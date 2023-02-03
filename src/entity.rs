@@ -12,10 +12,10 @@ use std::{
 
 pub fn storage<T: 'static>() -> &'static Storage<T> {
     thread_local! {
-        static DATABASE: RefCell<FnvHashMap<TypeId, &'static dyn Any>> = Default::default();
+        static STORAGES: RefCell<FnvHashMap<TypeId, &'static dyn Any>> = Default::default();
     }
 
-    DATABASE.with(|db| {
+    STORAGES.with(|db| {
         db.borrow_mut()
             .entry(TypeId::of::<T>())
             .or_insert_with(|| {
@@ -40,6 +40,8 @@ pub struct Storage<T: 'static>(RefCell<StorageInner<T>>);
 
 #[derive(Debug)]
 struct StorageInner<T: 'static> {
+    // TODO: Use `ev_map` with a local reader cache to implement lockless `mappings`.
+    // TODO: Use `SyncRefCell` for a lockless `RwLock`.
     free_slots: Vec<&'static StorageSlot<T>>,
     mappings: FnvHashMap<Entity, &'static StorageSlot<T>>,
 }

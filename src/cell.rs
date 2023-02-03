@@ -2,6 +2,7 @@
 
 use std::{
     cell::{Cell, RefCell, UnsafeCell},
+    fmt,
     marker::PhantomData,
     num::NonZeroU32,
     ops::{Deref, DerefMut},
@@ -308,15 +309,31 @@ impl CellState {
     }
 }
 
-#[derive(Debug)] // TODO: Give this a proper debug, clone, eq, ord, send, sync, and from implementation.
+#[derive(Debug)] // TODO: Give this a proper debug, eq, and ord implementation.
 pub struct SyncRefCell<T: ?Sized> {
     state: CellState,
     value: UnsafeCell<T>,
 }
 
+unsafe impl<T: Send> Send for SyncRefCell<T> {}
+
+unsafe impl<T: Sync> Sync for SyncRefCell<T> {}
+
 impl<T: Default> Default for SyncRefCell<T> {
     fn default() -> Self {
         Self::new(T::default())
+    }
+}
+
+impl<T> From<T> for SyncRefCell<T> {
+    fn from(value: T) -> Self {
+        Self::new(value)
+    }
+}
+
+impl<T: Clone> Clone for SyncRefCell<T> {
+    fn clone(&self) -> Self {
+        Self::new_in(self.namespace(), self.borrow().clone())
     }
 }
 
@@ -416,10 +433,61 @@ impl<T: ?Sized> SyncRefCell<T> {
     }
 }
 
-// TODO: Give this a proper debug implementation.
 pub struct SyncRef<'b, T: ?Sized> {
+    // This ensures both that `T` is covariant and that `SyncRef: !Send` and `!Sync`.
     value: NonNull<T>,
     borrow: &'b CellState,
+}
+
+impl<T: ?Sized + fmt::Debug> fmt::Debug for SyncRef<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&**self, f)
+    }
+}
+
+impl<T: ?Sized + fmt::Display> fmt::Display for SyncRef<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&**self, f)
+    }
+}
+
+impl<'b, T: ?Sized> SyncRef<'b, T> {
+    pub fn clone(orig: &SyncRef<'b, T>) -> SyncRef<'b, T> {
+        orig.borrow.relock_immutable();
+
+        SyncRef {
+            value: orig.value,
+            borrow: orig.borrow,
+        }
+    }
+
+    pub fn map<U, F>(orig: SyncRef<'b, T>, f: F) -> SyncRef<'b, U>
+    where
+        F: FnOnce(&T) -> &U,
+        U: ?Sized,
+    {
+        let value = NonNull::from(f(&*orig));
+        let borrow = orig.borrow;
+        std::mem::forget(orig);
+
+        SyncRef { value, borrow }
+    }
+
+    pub fn filter_map<U, F>(orig: SyncRef<'b, T>, f: F) -> Result<SyncRef<'b, U>, SyncRef<'b, T>>
+    where
+        F: FnOnce(&T) -> Option<&U>,
+        U: ?Sized,
+    {
+        let Some(value) = f(&*orig) else {
+			return Err(orig);
+		};
+
+        let value = NonNull::from(value);
+        let borrow = orig.borrow;
+        std::mem::forget(orig);
+
+        Ok(SyncRef { value, borrow })
+    }
 }
 
 impl<T: ?Sized> Deref for SyncRef<'_, T> {
@@ -436,11 +504,65 @@ impl<T: ?Sized> Drop for SyncRef<'_, T> {
     }
 }
 
-// TODO: Give this a proper debug implementation.
 pub struct SyncMut<'b, T: ?Sized> {
+    // This ensures that `T` is invariant.
     _invariant: PhantomData<&'b mut T>,
+    // This ensures that `SyncRef: !Send` and `!Sync`.
     value: NonNull<T>,
     borrow: &'b CellState,
+}
+
+impl<T: ?Sized + fmt::Debug> fmt::Debug for SyncMut<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&**self, f)
+    }
+}
+
+impl<T: ?Sized + fmt::Display> fmt::Display for SyncMut<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&**self, f)
+    }
+}
+
+impl<'b, T: ?Sized> SyncMut<'b, T> {
+    pub fn map<U, F>(mut orig: SyncMut<'b, T>, f: F) -> SyncMut<'b, U>
+    where
+        F: FnOnce(&mut T) -> &mut U,
+        U: ?Sized,
+    {
+        let value = NonNull::from(f(&mut *orig));
+        let borrow = orig.borrow;
+        std::mem::forget(orig);
+
+        SyncMut {
+            _invariant: PhantomData,
+            value,
+            borrow,
+        }
+    }
+
+    pub fn filter_map<U, F>(
+        mut orig: SyncMut<'b, T>,
+        f: F,
+    ) -> Result<SyncMut<'b, U>, SyncMut<'b, T>>
+    where
+        F: FnOnce(&mut T) -> Option<&mut U>,
+        U: ?Sized,
+    {
+        let Some(value) = f(&mut *orig) else {
+			return Err(orig);
+		};
+
+        let value = NonNull::from(value);
+        let borrow = orig.borrow;
+        std::mem::forget(orig);
+
+        Ok(SyncMut {
+            _invariant: PhantomData,
+            value,
+            borrow,
+        })
+    }
 }
 
 impl<T: ?Sized> Deref for SyncMut<'_, T> {
@@ -454,5 +576,11 @@ impl<T: ?Sized> Deref for SyncMut<'_, T> {
 impl<T: ?Sized> DerefMut for SyncMut<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { self.value.as_mut() }
+    }
+}
+
+impl<T: ?Sized> Drop for SyncMut<'_, T> {
+    fn drop(&mut self) {
+        self.borrow.unlock_mutable();
     }
 }
