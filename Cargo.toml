@@ -1,0 +1,10 @@
+[package]
+name = "mini-geode"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+derive-where = "1.0.0"
+fastrand = "1.8.0"
+fnv = "1.0.7"
+parking_lot = "0.12.1"
