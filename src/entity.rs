@@ -145,4 +145,6 @@ impl Entity {
     pub fn has<T: 'static>(self) -> bool {
         storage::<T>().has(self)
     }
+
+    // TODO: implement `mark_finalized`, `comp_count`, and `is_alive`.
 }

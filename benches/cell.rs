@@ -2,7 +2,7 @@ use std::{cell::RefCell, time::Duration};
 
 use atomic_refcell::AtomicRefCell;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use mini_geode::cell::{Namespace, SyncRefCell};
+use mini_geode::{Namespace, SyncRefCell};
 
 fn bench(c: &mut Criterion) {
     c.bench_function("ref cell", |c| {

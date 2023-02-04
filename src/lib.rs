@@ -1,2 +1,4 @@
-pub mod cell;
-pub mod entity;
+mod cell;
+mod entity;
+
+pub use self::{cell::*, entity::*};
