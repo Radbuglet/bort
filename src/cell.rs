@@ -52,6 +52,7 @@ impl NamespaceState {
     }
 }
 
+// TODO: Reuse unused namespaces.
 #[derive(Debug, Copy, Clone)]
 pub struct Namespace(&'static NamespaceState);
 
@@ -158,22 +159,29 @@ impl CellState {
         &self,
         my_thread: NonZeroU32,
         (lock_state, current_thread): (u32, u32),
-        can_be_already_locked: bool,
     ) {
         const HELD_ELSEWHERE_ERROR: &str = "lock held by another thread";
 
         // Ensure that we have exclusive access to this cell.
-        if can_be_already_locked && current_thread == my_thread.get() {
+        if current_thread == my_thread.get() {
             // This cell is bound to our thread ID and will reject all other threads.
             // Hence we will be the only thread proceeding, guaranteeing exclusivity.
             // (fallthrough)
         } else if lock_state == 0 {
-            assert!(self.namespace().is_held(), "{}", HELD_ELSEWHERE_ERROR);
+            // Because the `lock_state` is zero, we know that the previous thread properly
+            // relinquished its last reference and just never unset its ownership status.
+            assert!(
+                self.namespace().is_held_by(my_thread),
+                "{}",
+                HELD_ELSEWHERE_ERROR
+            );
+
             // This cell is bound to a lock held by this thread. This lock can only
             // be released by the thread that owns it, hence we will be the only
             // thread proceeding, guaranteeing exclusivity.
         } else {
-            // Another thread has ongoing borrows on this cell. Reject it!
+            // Another thread has ongoing borrows on this cell. Regardless of who's the owner,
+            // we have to reject this!
             panic!("{}", HELD_ELSEWHERE_ERROR);
         }
     }
@@ -185,7 +193,7 @@ impl CellState {
             Self::decompose_state(self.state.load(Ordering::Relaxed));
 
         // Ensure that the current thread has exclusive access of this cell.
-        self.ensure_thread_exclusivity(my_thread, (lock_state, current_thread), false);
+        self.ensure_thread_exclusivity(my_thread, (lock_state, current_thread));
 
         // Acquire the cell mutably.
         assert_eq!(
@@ -209,7 +217,7 @@ impl CellState {
             Self::decompose_state(self.state.load(Ordering::Relaxed));
 
         // Ensure that the current thread has exclusive access of this cell.
-        self.ensure_thread_exclusivity(my_thread, (lock_state, current_thread), true);
+        self.ensure_thread_exclusivity(my_thread, (lock_state, current_thread));
 
         // Acquire the cell mutably.
         assert!(
@@ -286,7 +294,7 @@ impl CellState {
             Self::decompose_state(self.state.load(Ordering::Relaxed));
 
         // Ensure that the current thread has exclusive access of this cell.
-        self.ensure_thread_exclusivity(my_thread, (lock_state, current_thread), true);
+        self.ensure_thread_exclusivity(my_thread, (lock_state, current_thread));
 
         // Modify the owning namespace.
         unsafe {
