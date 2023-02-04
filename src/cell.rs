@@ -136,6 +136,8 @@ struct CellState {
 }
 
 impl CellState {
+    const HELD_ELSEWHERE_ERROR: &str = "lock held by another thread";
+
     pub const fn new(namespace: Namespace) -> Self {
         Self {
             namespace: AtomicPtr::new(namespace.0 as *const NamespaceState as *mut NamespaceState),
@@ -160,8 +162,6 @@ impl CellState {
         my_thread: NonZeroU32,
         (lock_state, current_thread): (u32, u32),
     ) {
-        const HELD_ELSEWHERE_ERROR: &str = "lock held by another thread";
-
         // Ensure that we have exclusive access to this cell.
         if current_thread == my_thread.get() {
             // This cell is bound to our thread ID and will reject all other threads.
@@ -173,7 +173,7 @@ impl CellState {
             assert!(
                 self.namespace().is_held_by(my_thread),
                 "{}",
-                HELD_ELSEWHERE_ERROR
+                Self::HELD_ELSEWHERE_ERROR
             );
 
             // This cell is bound to a lock held by this thread. This lock can only
@@ -182,32 +182,32 @@ impl CellState {
         } else {
             // Another thread has ongoing borrows on this cell. Regardless of who's the owner,
             // we have to reject this!
-            panic!("{}", HELD_ELSEWHERE_ERROR);
+            panic!("{}", Self::HELD_ELSEWHERE_ERROR);
         }
     }
 
     pub fn lock_mutable(&self) {
         // Load state
-        let my_thread = thread_id();
-        let (lock_state, current_thread) =
-            Self::decompose_state(self.state.load(Ordering::Relaxed));
+        let (lock_state, _) = Self::decompose_state(self.state.load(Ordering::Relaxed));
 
-        // Ensure that the current thread has exclusive access of this cell.
-        self.ensure_thread_exclusivity(my_thread, (lock_state, current_thread));
+        // Ensure that we can hold this lock.
+        assert!(self.namespace().is_held(), "{}", Self::HELD_ELSEWHERE_ERROR);
 
-        // Acquire the cell mutably.
+        // Ensure that no one else is holding this lock. We don't really care whether `current_thread`
+        // is ours because it can't have any ongoing borrows and won't be able to acquire any anyways
+        // because we hold the namespace.
         assert_eq!(
             lock_state, 0,
             "Cannot borrow cell mutably: cell is already borrowed."
         );
 
+        // Acquire the cell mutably.
+        //
         // N.B. This requires neither inter-thread orderings (all these accesses are effectively
         // single-threaded) nor fences (we already place an acquire-release fence in acquiring/giving
         // up a `Namespace`).
-        self.state.store(
-            Self::compose_state(u32::MAX, my_thread.get()),
-            Ordering::Relaxed,
-        );
+        self.state
+            .store(Self::compose_state(u32::MAX, 0), Ordering::Relaxed);
     }
 
     pub fn lock_immutable(&self) {
