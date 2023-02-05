@@ -1,6 +1,8 @@
+use derive_where::derive_where;
 use fnv::FnvHashMap;
 use std::{
     any::{type_name, Any, TypeId},
+    borrow::Borrow,
     cell::{Ref, RefCell, RefMut},
     collections::hash_map,
     iter::repeat_with,
@@ -18,13 +20,8 @@ pub fn storage<T: 'static>() -> &'static Storage<T> {
     STORAGES.with(|db| {
         db.borrow_mut()
             .entry(TypeId::of::<T>())
-            .or_insert_with(|| {
-                &*Box::leak(Box::new(RefCell::new(StorageInner::<T> {
-                    free_slots: Vec::new(),
-                    mappings: FnvHashMap::default(),
-                })))
-            })
-            .downcast_ref()
+            .or_insert_with(|| &*Box::leak(Box::new(Storage::<T>::default())))
+            .downcast_ref::<Storage<T>>()
             .unwrap()
     })
 }
@@ -36,12 +33,12 @@ const BLOCK_SIZE: usize = 128;
 type StorageSlot<T> = RefCell<Option<T>>;
 
 #[derive(Debug)]
+#[derive_where(Default)]
 pub struct Storage<T: 'static>(RefCell<StorageInner<T>>);
 
 #[derive(Debug)]
+#[derive_where(Default)]
 struct StorageInner<T: 'static> {
-    // TODO: Use `ev_map` with a local reader cache to implement lockless `mappings`.
-    // TODO: Use `SyncRefCell` for a lockless `RwLock`.
     free_slots: Vec<&'static StorageSlot<T>>,
     mappings: FnvHashMap<Entity, &'static StorageSlot<T>>,
 }
@@ -82,7 +79,7 @@ impl<T: 'static> Storage<T> {
         }
     }
 
-    pub fn try_get_slot(&self, entity: Entity) -> Option<&'static StorageSlot<T>> {
+    fn try_get_slot(&self, entity: Entity) -> Option<&'static StorageSlot<T>> {
         self.0.borrow().mappings.get(&entity).copied()
     }
 
@@ -94,6 +91,16 @@ impl<T: 'static> Storage<T> {
                 entity,
             );
         })
+    }
+
+    pub fn try_get(&self, entity: Entity) -> Option<Ref<'static, T>> {
+        self.try_get_slot(entity)
+            .map(|slot| Ref::map(slot.borrow(), |v| v.as_ref().unwrap()))
+    }
+
+    pub fn try_get_mut(&self, entity: Entity) -> Option<RefMut<'static, T>> {
+        self.try_get_slot(entity)
+            .map(|slot| RefMut::map(slot.borrow_mut(), |v| v.as_mut().unwrap()))
     }
 
     pub fn get(&self, entity: Entity) -> Ref<'static, T> {
@@ -115,7 +122,7 @@ impl<T: 'static> Storage<T> {
 pub struct Entity(NonZeroU64);
 
 impl Entity {
-    pub fn new() -> Self {
+    pub fn new_unguarded() -> Self {
         static ID_GEN: AtomicU64 = AtomicU64::new(1);
 
         Self(NonZeroU64::new(ID_GEN.fetch_add(1, Ordering::Relaxed)).unwrap())
@@ -134,6 +141,14 @@ impl Entity {
         storage::<T>().remove(self)
     }
 
+    pub fn try_get<T: 'static>(self) -> Option<Ref<'static, T>> {
+        storage::<T>().try_get(self)
+    }
+
+    pub fn try_get_mut<T: 'static>(self) -> Option<RefMut<'static, T>> {
+        storage::<T>().try_get_mut(self)
+    }
+
     pub fn get<T: 'static>(self) -> Ref<'static, T> {
         storage::<T>().get(self)
     }
@@ -146,5 +161,92 @@ impl Entity {
         storage::<T>().has(self)
     }
 
-    // TODO: implement `mark_finalized`, `comp_count`, and `is_alive`.
+    pub fn is_alive(self) -> bool {
+        true // TODO
+    }
+
+    pub fn destroy(self) {
+        // TODO
+    }
+}
+
+// === OwnedEntity === //
+
+#[derive(Debug, Hash, Eq, PartialEq)]
+pub struct OwnedEntity(Entity);
+
+impl OwnedEntity {
+    // === Lifecycle === //
+
+    pub fn new() -> Self {
+        Self(Entity::new_unguarded())
+    }
+
+    pub fn entity(&self) -> Entity {
+        self.0
+    }
+
+    pub fn defuse(self) -> Entity {
+        let entity = self.0;
+        std::mem::forget(self);
+
+        entity
+    }
+
+    pub fn split_guard(self) -> (Self, Entity) {
+        let entity = self.entity();
+        (self, entity)
+    }
+
+    // === Forwards === //
+
+    pub fn with<T: 'static>(self, comp: T) -> Self {
+        self.0.insert(comp);
+        self
+    }
+
+    pub fn insert<T: 'static>(&self, comp: T) -> Option<T> {
+        self.0.insert(comp)
+    }
+
+    pub fn remove<T: 'static>(&self) -> Option<T> {
+        self.0.remove()
+    }
+
+    pub fn try_get<T: 'static>(&self) -> Option<Ref<'static, T>> {
+        self.0.try_get()
+    }
+
+    pub fn try_get_mut<T: 'static>(&self) -> Option<RefMut<'static, T>> {
+        self.0.try_get_mut()
+    }
+
+    pub fn get<T: 'static>(&self) -> Ref<'static, T> {
+        self.0.get()
+    }
+
+    pub fn get_mut<T: 'static>(&self) -> RefMut<'static, T> {
+        self.0.get_mut()
+    }
+
+    pub fn has<T: 'static>(&self) -> bool {
+        self.0.has::<T>()
+    }
+
+    pub fn is_alive(&self) -> bool {
+        self.0.is_alive()
+    }
+}
+
+impl Borrow<Entity> for OwnedEntity {
+    fn borrow(&self) -> &Entity {
+        &self.0
+    }
+}
+
+impl Drop for OwnedEntity {
+    fn drop(&mut self) {
+        dbg!(&self);
+        self.0.destroy();
+    }
 }

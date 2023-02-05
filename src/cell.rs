@@ -7,7 +7,7 @@ use std::{
     num::NonZeroU32,
     ops::{Deref, DerefMut},
     ptr::NonNull,
-    sync::atomic::{fence, AtomicPtr, AtomicU32, AtomicU64, Ordering},
+    sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering},
 };
 
 // === ThreadId === //
@@ -126,12 +126,30 @@ impl Drop for NamespaceGuard {
 
 // === SyncRefCell === //
 
-#[derive(Debug)] // TODO: Give this a proper debug implementation.
+#[derive(Debug)]
 struct CellState {
+    // On orderings:
+    // - This will not change underneath your feet during `acquire/release`
+    // methods if you own the namespace.
     namespace: AtomicPtr<NamespaceState>,
-    // Layout: [MSB](lock_state: u32, last_thread: u32)[LSB]
-    // N.B. We pack this state into one atomic to ensure that both the `lock_state` and the
-    // `last_thread` are made visible at the same time.
+
+    // Layout: [MSB](thread_id: u32, lock_state: u32)[LSB]
+    //
+    // Interpretation:
+    // - `lock_state == 0`: the cell is completely unborrowed.
+    //   Only the `namespace` owner is allowed to acquire the
+    //   cell now.
+    // - `0 < lock_state < u32::MAX`: the cell is immutably
+    //   borrowed by `thread_id`. Only `thread_id` is allowed
+    //   to acquire the cell now.
+    // - `lock_state == u32::MAX`: the cell is mutably borrowed.
+    //
+    // On memory orderings:
+    // - Unfortunately, we can't rely on the `Acquire` and `Release`
+    //   orderings of the `Namespace` acquisition methods to properly
+    //   make our changes to the interior of this cell visible to the
+    //   owning thread. This is because cells can be borrowed past the
+    //   namespace acquisition.
     state: AtomicU64,
 }
 
@@ -146,157 +164,123 @@ impl CellState {
     }
 
     pub fn namespace(&self) -> Namespace {
-        Namespace(unsafe { &*self.namespace.load(Ordering::Relaxed) })
+        Namespace(unsafe {
+            // Safety: we are always pointing to a valid `&'static NamespaceState`.
+            &*self.namespace.load(Ordering::Relaxed)
+        })
     }
 
-    fn decompose_state(full_state: u64) -> (u32, u32) {
-        ((full_state >> 32) as u32, full_state as u32)
+    const fn decode_state(full_state: u64) -> (u32, u32) {
+        (
+            (full_state >> 32) as u32,
+            Self::decode_lock_state(full_state),
+        )
     }
 
-    fn compose_state(lock_state: u32, current_thread: u32) -> u64 {
-        ((lock_state as u64) << 32) + current_thread as u64
+    const fn decode_lock_state(full_state: u64) -> u32 {
+        full_state as u32
     }
 
-    fn ensure_thread_exclusivity(
-        &self,
-        my_thread: NonZeroU32,
-        (lock_state, current_thread): (u32, u32),
-    ) {
-        // Ensure that we have exclusive access to this cell.
-        if current_thread == my_thread.get() {
-            // This cell is bound to our thread ID and will reject all other threads.
-            // Hence we will be the only thread proceeding, guaranteeing exclusivity.
-            // (fallthrough)
-        } else if lock_state == 0 {
-            // Because the `lock_state` is zero, we know that the previous thread properly
-            // relinquished its last reference and just never unset its ownership status.
+    const fn compose_state(current_thread: u32, lock_state: u32) -> u64 {
+        ((current_thread as u64) << 32) + lock_state as u64
+    }
+
+    pub fn lock_mutable(&self) {
+        // First, we need to make sure that we are the logical owner of this cell.
+        assert!(self.namespace().is_held(), "{}", Self::HELD_ELSEWHERE_ERROR);
+
+        // Now, we just need to make sure that it can actually be locked.
+        assert_eq!(
+            // N.B. See "on memory orderings" in the item documentation.
+            Self::decode_lock_state(self.state.load(Ordering::Acquire)),
+            0,
+            "{}",
+            Self::HELD_ELSEWHERE_ERROR,
+        );
+
+        // It is now safe to update the lock state and acquire the cell.
+        const FULLY_LOCKED_STATE: u64 = CellState::compose_state(0, u32::MAX);
+
+        self.state.store(FULLY_LOCKED_STATE, Ordering::Relaxed);
+    }
+
+    pub fn lock_immutable(&self) {
+        let my_thread = thread_id();
+        let (using_thread, lock_state) = Self::decode_state(self.state.load(Ordering::Acquire));
+
+        // Ensure that the borrow is valid.
+        if lock_state == 0 {
+            // If `lock_state == 0` and we own the lock, we can borrow freely.
             assert!(
                 self.namespace().is_held_by(my_thread),
                 "{}",
                 Self::HELD_ELSEWHERE_ERROR
             );
-
-            // This cell is bound to a lock held by this thread. This lock can only
-            // be released by the thread that owns it, hence we will be the only
-            // thread proceeding, guaranteeing exclusivity.
+        } else if lock_state < u32::MAX - 1 {
+            // If the owning thread ID is ours, we can borrow this lock.
+            assert_eq!(
+                using_thread,
+                my_thread.get(),
+                "{}",
+                Self::HELD_ELSEWHERE_ERROR
+            );
         } else {
-            // Another thread has ongoing borrows on this cell. Regardless of who's the owner,
-            // we have to reject this!
+            // If this branch is reached, we know the lock is held mutably or that
+            // we immutably borrowed it too many times.
             panic!("{}", Self::HELD_ELSEWHERE_ERROR);
         }
-    }
 
-    pub fn lock_mutable(&self) {
-        // Load state
-        let (lock_state, _) = Self::decompose_state(self.state.load(Ordering::Relaxed));
-
-        // Ensure that we can hold this lock.
-        assert!(self.namespace().is_held(), "{}", Self::HELD_ELSEWHERE_ERROR);
-
-        // Ensure that no one else is holding this lock. We don't really care whether `current_thread`
-        // is ours because it can't have any ongoing borrows and won't be able to acquire any anyways
-        // because we hold the namespace.
-        assert_eq!(
-            lock_state, 0,
-            "Cannot borrow cell mutably: cell is already borrowed."
-        );
-
-        // Acquire the cell mutably.
-        //
-        // N.B. This requires neither inter-thread orderings (all these accesses are effectively
-        // single-threaded) nor fences (we already place an acquire-release fence in acquiring/giving
-        // up a `Namespace`).
-        self.state
-            .store(Self::compose_state(u32::MAX, 0), Ordering::Relaxed);
-    }
-
-    pub fn lock_immutable(&self) {
-        // Load state
-        let my_thread = thread_id();
-        let (lock_state, current_thread) =
-            Self::decompose_state(self.state.load(Ordering::Relaxed));
-
-        // Ensure that the current thread has exclusive access of this cell.
-        self.ensure_thread_exclusivity(my_thread, (lock_state, current_thread));
-
-        // Acquire the cell mutably.
-        assert!(
-            lock_state < u32::MAX - 1,
-            "Cannot borrow cell immutably: cell is mutably borrowed."
-        );
-
-        // N.B. This requires neither inter-thread orderings (all these accesses are effectively
-        // single-threaded) nor an acquire fence (we already place an acquire fence for acquiring
-        // a `Namespace`).
+        // Commit it!
         self.state.store(
-            Self::compose_state(lock_state + 1, my_thread.get()),
+            Self::compose_state(my_thread.get(), lock_state + 1),
             Ordering::Relaxed,
         );
     }
 
     pub fn relock_immutable(&self) {
         let raw_state = self.state.load(Ordering::Relaxed);
-        let (lock_state, current_thread) = Self::decompose_state(raw_state);
 
-        assert_ne!(lock_state, u32::MAX - 1);
+        let (owning_thread, lock_state) = Self::decode_state(raw_state);
+        debug_assert_eq!(owning_thread, thread_id().get());
         debug_assert_ne!(lock_state, 0);
-        debug_assert_ne!(lock_state, u32::MAX);
-        debug_assert_eq!(current_thread, thread_id().get());
+        assert!(lock_state < u32::MAX - 1);
 
+        // Lock state is in the MSB and we already checked against overflow.
+        // N.B. we don't need acquire ordering because our thread already has
+        // exclusive access to this cell.
         self.state.store(raw_state + 1, Ordering::Relaxed);
-
-        // N.B. We have a fence for `unlock_mutable` to ensure that all state changes made during the
-        // borrow are made visible to other threads. However, because we're only giving an immutable
-        // reference to the contents of this cell, we know that nothing (that we're in charge of) will
-        // have been updated.
     }
 
     pub fn unlock_mutable(&self) {
         #[cfg(debug_assertions)]
         {
-            let (lock_state, current_thread) =
-                Self::decompose_state(self.state.load(Ordering::Relaxed));
-
+            let (_, lock_state) = Self::decode_state(self.state.load(Ordering::Relaxed));
             debug_assert_eq!(lock_state, u32::MAX);
-            debug_assert_eq!(current_thread, thread_id().get());
         }
 
-        self.state.store(0, Ordering::Relaxed);
+        // We locked it so we can unlock it.
+        const FULLY_UNLOCKED_STATE: u64 = CellState::compose_state(u32::MAX, 0);
 
-        // N.B. While we typically don't need a release fence because `Namespace::unacquire` handles
-        // it for us, unfortunately, they are necessary in the scenario where the `CellState` is still
-        // borrowed after the lock is released. Luckily, these are free in x64 (modulo lost compiler
-        // optimizations). Unfortunately, the same is not true in ARM64.
-        //
-        // TODO: Try to avoid it with a check to `self.namespace().is_held()`?
-        fence(Ordering::Release);
+        self.state.store(FULLY_UNLOCKED_STATE, Ordering::Release);
     }
 
     pub fn unlock_immutable(&self) {
-        #[cfg(debug_assertions)]
-        {
-            let (lock_state, current_thread) =
-                Self::decompose_state(self.state.load(Ordering::Relaxed));
+        let raw_state = self.state.load(Ordering::Relaxed);
 
-            debug_assert_ne!(lock_state, u32::MAX);
-            debug_assert_ne!(lock_state, 0);
-            debug_assert_eq!(current_thread, thread_id().get());
-        }
+        let (owning_thread, lock_state) = Self::decode_state(raw_state);
+        debug_assert_eq!(owning_thread, thread_id().get());
+        debug_assert_ne!(lock_state, 0);
+        debug_assert!(lock_state < u32::MAX - 1);
 
-        self.state
-            .store(self.state.load(Ordering::Relaxed) - 1, Ordering::Relaxed);
+        // Lock state is in the MSB and overflow is not possible.
+        // N.B. we don't need to make any of our changes visible because we
+        // only handed out an immutable reference.
+        self.state.store(raw_state - 1, Ordering::Relaxed);
     }
 
-    pub fn set_namespace(&self, namespace: Namespace) {
-        // Load state
-        let my_thread = thread_id();
-        let (lock_state, current_thread) =
-            Self::decompose_state(self.state.load(Ordering::Relaxed));
+    pub fn give_namespace(&self, namespace: Namespace) {
+        assert!(self.namespace().is_held());
 
-        // Ensure that the current thread has exclusive access of this cell.
-        self.ensure_thread_exclusivity(my_thread, (lock_state, current_thread));
-
-        // Modify the owning namespace.
         unsafe {
             self.set_namespace_unchecked(namespace);
         }
@@ -306,9 +290,6 @@ impl CellState {
         *self.namespace.get_mut() = namespace.0 as *const NamespaceState as *mut NamespaceState;
     }
 
-    // Safety: This is dangerous because a user could change the namespace to their own namespace
-    // and call `lock_mutable`  while a call to `lock_mutable` on another thread is on-going. Thus,
-    // a caller must guarantee that no other thread is trying to lock this cell.
     pub unsafe fn set_namespace_unchecked(&self, namespace: Namespace) {
         self.namespace.store(
             namespace.0 as *const NamespaceState as *mut NamespaceState,
@@ -395,8 +376,8 @@ impl<T: ?Sized> SyncRefCell<T> {
         self.state.namespace()
     }
 
-    pub fn set_namespace(&self, namespace: Namespace) {
-        self.state.set_namespace(namespace);
+    pub fn give_namespace(&self, namespace: Namespace) {
+        self.state.give_namespace(namespace);
     }
 
     pub fn set_namespace_mut(&mut self, namespace: Namespace) {
