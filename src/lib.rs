@@ -1,6 +1,6 @@
 use std::{
     any::{type_name, Any, TypeId},
-    borrow::Borrow,
+    borrow::{Borrow, Cow},
     cell::{Ref, RefCell, RefMut},
     fmt, hash, iter, mem,
     num::NonZeroU64,
@@ -351,37 +351,10 @@ impl<T: 'static> Storage<T> {
         #[cold]
         #[inline(never)]
         fn get_slot_failed<T: 'static>(entity: Entity) -> ! {
-            // Try to get the component list or panic if this is a liveness error.
-            let comp_list = ALIVE.with(|alive| {
-                alive.borrow().get(&entity).copied().unwrap_or_else(|| {
-                    panic!(
-                        "failed to find component of type {} for dead {:?}",
-                        type_name::<T>(),
-                        entity
-                    )
-                })
-            });
-
-            // Otherwise, print the regular error message.
-            struct CompListFmt<'a>(&'a [ComponentType]);
-
-            impl fmt::Display for CompListFmt<'_> {
-                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                    for (i, v) in self.0.iter().enumerate() {
-                        if i > 0 {
-                            f.write_str(", ")?;
-                        }
-                        f.write_str(v.name)?;
-                    }
-                    Ok(())
-                }
-            }
-
             panic!(
-                "failed to find component of type {} for {:?} (components: {})",
+                "failed to find component of type {} for {:?}",
                 type_name::<T>(),
                 entity,
-                CompListFmt(&comp_list.comps),
             );
         }
 
@@ -419,12 +392,14 @@ impl<T: 'static> Storage<T> {
 
 // === Entity === //
 
+#[derive(Debug)]
+pub struct DebugLabel(pub Cow<'static, str>);
+
 thread_local! {
     static ALIVE: RefCell<FxHashMap<Entity, &'static ComponentList>> = Default::default();
 }
 
-// TODO: Implement debug labels
-#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq)]
+#[derive(Copy, Clone, Hash, Eq, PartialEq)]
 pub struct Entity(NonZeroU64);
 
 impl Entity {
@@ -444,6 +419,11 @@ impl Entity {
 
     pub fn with<T: 'static>(self, comp: T) -> Self {
         self.insert(comp);
+        self
+    }
+
+    pub fn with_debug_label<L: Into<Cow<'static, str>>>(self, label: L) -> Self {
+        self.with(DebugLabel(label.into()));
         self
     }
 
@@ -491,6 +471,36 @@ impl Entity {
     }
 }
 
+impl fmt::Debug for Entity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        struct StrLit<'a>(&'a str);
+
+        impl fmt::Debug for StrLit<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(self.0)
+            }
+        }
+
+        ALIVE.with(|alive| {
+            let mut builder = f.debug_tuple("Entity");
+
+            if let Some(label) = self.try_get::<DebugLabel>() {
+                builder.field(&label);
+            }
+
+            if let Some(comp_list) = alive.borrow().get(self).copied() {
+                for v in comp_list.comps.iter() {
+                    builder.field(&StrLit(v.name));
+                }
+            } else {
+                builder.field(&StrLit("<DEAD>"));
+            }
+
+            builder.finish()
+        })
+    }
+}
+
 // === OwnedEntity === //
 
 #[derive(Debug, Hash, Eq, PartialEq)]
@@ -523,6 +533,11 @@ impl OwnedEntity {
 
     pub fn with<T: 'static>(self, comp: T) -> Self {
         self.0.insert(comp);
+        self
+    }
+
+    pub fn with_debug_label<L: Into<Cow<'static, str>>>(self, label: L) -> Self {
+        self.0.with_debug_label(label);
         self
     }
 
