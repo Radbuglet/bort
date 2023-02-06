@@ -134,14 +134,6 @@ vec2.push(4);
 
 Components should strive to only borrow from their logical children. For example, it's somewhat expected for a player to access the components of the items in its inventory but it's somewhat unexpected to have that same player access the world state without that state being explicitly passed to it. Maintaining this informal rule should make borrowing dependencies easier to reason about.
 
-Components should also avoid cross-borrowing other components on themselves, since doing so could force the caller to awkwardly drop and reborrow a component guard. Instead, they should take their component set explicitly like so:
+### A Note on Threading
 
-**TODO:** Document `extract`.
-
-## Going Data-Oriented
-
-**TODO**
-
-## Going Multi-Threaded
-
-**TODO**
+Currently, Geode is entirely single-threaded. Because everything is stored in thread-local storage, entities spawned on one thread will appear dead on another.
