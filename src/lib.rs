@@ -3,6 +3,7 @@ use std::{
     borrow::Borrow,
     cell::{Ref, RefCell, RefMut},
     hash, iter,
+    mem::needs_drop,
     num::NonZeroU64,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -64,6 +65,8 @@ struct ComponentType {
 
 impl ComponentType {
     fn of<T: 'static>() -> Self {
+        debug_assert!(needs_drop::<T>());
+
         fn dtor<T: 'static>(entity: Entity) {
             drop(storage::<T>().remove_untracked(entity)); // (ignores missing components)
         }
@@ -220,6 +223,7 @@ pub fn storage<T: 'static>() -> &'static Storage<T> {
     })
 }
 
+// TODO: These should likely be allocated in a bump allocator instead.
 const BLOCK_SIZE: usize = 128;
 
 type StorageSlot<T> = RefCell<Option<T>>;
@@ -256,7 +260,9 @@ impl<T: 'static> Storage<T> {
                 panic!("attempted to attach a component to the dead {:?}.", entity)
             });
 
-            *slot = slot.extend(ComponentType::of::<T>());
+            if needs_drop::<T>() {
+                *slot = slot.extend(ComponentType::of::<T>());
+            }
         });
 
         self.insert_untracked(entity, value)
@@ -296,7 +302,9 @@ impl<T: 'static> Storage<T> {
                 )
             });
 
-            *slot = slot.de_extend(ComponentType::of::<T>());
+            if needs_drop::<T>() {
+                *slot = slot.de_extend(ComponentType::of::<T>());
+            }
         });
 
         self.remove_untracked(entity)
@@ -319,8 +327,20 @@ impl<T: 'static> Storage<T> {
 
     fn get_slot(&self, entity: Entity) -> &'static StorageSlot<T> {
         self.try_get_slot(entity).unwrap_or_else(|| {
+            // See if this is a lifetime error...
+            ALIVE.with(|alive| {
+                if !alive.borrow().contains_key(&entity) {
+                    panic!(
+                        "failed to find component of type {} for dead {:?}",
+                        type_name::<T>(),
+                        entity
+                    );
+                }
+            });
+
+            // Otherwise, print the regular error message.
             panic!(
-                "Failed to find component of type {} for {:?}.",
+                "failed to find component of type {} for {:?}",
                 type_name::<T>(),
                 entity,
             );
@@ -356,6 +376,7 @@ thread_local! {
     static ALIVE: RefCell<FxHashMap<Entity, &'static ComponentList>> = Default::default();
 }
 
+// TODO: Implement debug labels
 #[derive(Debug, Copy, Clone, Hash, Eq, PartialEq)]
 pub struct Entity(NonZeroU64);
 

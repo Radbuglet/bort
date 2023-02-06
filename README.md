@@ -6,13 +6,13 @@ A Simple Object Model for Rust
 use geode::Entity;
 
 let player = Entity::new()
-	.with(Pos(Vec3::ZERO))
-	.with(Vel(Vec3::ZERO))
-	.with(PlayerState { ... });
+    .with(Pos(Vec3::ZERO))
+    .with(Vel(Vec3::ZERO))
+    .with(PlayerState { ... });
 
 let chaser = Entity::new()
-	.with(Pos(Vec3::ZERO))
-	.with(ChaserAi { target: Some(player), home: Vec3::ZERO });
+    .with(Pos(Vec3::ZERO))
+    .with(ChaserAi { target: Some(player), home: Vec3::ZERO });
 
 player.get_mut::<PlayerState>().update(player.handle());
 
@@ -45,15 +45,15 @@ player.insert(Vel(Vec3::ZERO));
 
 // ...which is equivalent to:
 let player = Entity::new()
-	.with(Pos(Vec3::ZERO))
-	.with(Vel(Vec3::ZERO));
+    .with(Pos(Vec3::ZERO))
+    .with(Vel(Vec3::ZERO));
 ```
 
 ...and access them using `get` or `get_mut`:
 
 ```rust
-let mut pos = player.get_mut::<Pos>();  // These are essentially `RefCell`s.
-let vel = player.get::<Vel>();
+let mut pos = player.get_mut::<Pos>();  // These are `RefMut`s
+let vel = player.get::<Vel>();          // ...and `Ref`s.
 
 pos.0 += vel.0;
 ```
@@ -105,7 +105,7 @@ impl PlayerRegistry {
 }
 
 let player = Entity::new()
-	.with(Name("foo".to_string()));
+    .with(Name("foo".to_string()));
 
 let mut registry = PlayerRegistry::default();
 registry.add(player);
@@ -123,7 +123,7 @@ Geode relies quite heavily on runtime borrowing. Although the type system does n
 use geode::Entity;
 
 let foo = Entity::new()
-	.with(vec![3i32]);
+    .with(vec![3i32]);
 
 let vec1 = foo.get::<Vec<i32>>();  // Ok
 let a = &vec1[0];
