@@ -58,7 +58,7 @@ let vel = player.get::<Vel>();          // ...and `Ref`s.
 pos.0 += vel.0;
 ```
 
-Note that `Entity::new()` doesn't actually return an `Entity`, rather returning an `OwnedEntity`. These expose the exact same interface as an `Entity` but have an additional `Drop` handler (making them non-`Copy`) that automatically `Entity::destroy`s their managed entity when they leave the scope.
+Note that `Entity::new()` doesn't actually return an `Entity`, but rather an `OwnedEntity`. These expose the exact same interface as an `Entity` but have an additional `Drop` handler (making them non-`Copy`) that automatically `Entity::destroy`s their managed entity when they leave the scope.
 
 You can extract an `Entity` from them using `OwnedEntity::entity(&self)`.
 

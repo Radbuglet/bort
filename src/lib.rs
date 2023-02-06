@@ -217,7 +217,12 @@ pub fn storage<T: 'static>() -> &'static Storage<T> {
     STORAGES.with(|db| {
         db.borrow_mut()
             .entry(TypeId::of::<T>())
-            .or_insert_with(|| leak(Storage::<T>::default()))
+            .or_insert_with(|| {
+                leak(Storage::<T>(RefCell::new(StorageInner {
+                    free_slots: Vec::new(),
+                    mappings: FxHashMap::default(),
+                })))
+            })
             .downcast_ref::<Storage<T>>()
             .unwrap()
     })
@@ -231,25 +236,10 @@ type StorageSlot<T> = RefCell<Option<T>>;
 #[derive(Debug)]
 pub struct Storage<T: 'static>(RefCell<StorageInner<T>>);
 
-impl<T: 'static> Default for Storage<T> {
-    fn default() -> Self {
-        Self(Default::default())
-    }
-}
-
 #[derive(Debug)]
 struct StorageInner<T: 'static> {
     free_slots: Vec<&'static StorageSlot<T>>,
     mappings: FxHashMap<Entity, &'static StorageSlot<T>>,
-}
-
-impl<T: 'static> Default for StorageInner<T> {
-    fn default() -> Self {
-        Self {
-            free_slots: Vec::default(),
-            mappings: FxHashMap::default(),
-        }
-    }
 }
 
 impl<T: 'static> Storage<T> {
