@@ -9,7 +9,7 @@ fn access_tests() {
         .measurement_time(Duration::from_millis(900))
         .configure_from_args();
 
-    c.bench_function("get method", |c| {
+    c.bench_function("entity.get", |c| {
         let entity = Entity::new().with(3i32);
 
         c.iter(|| {
@@ -17,13 +17,33 @@ fn access_tests() {
         })
     });
 
-    c.bench_function("get storage", |c| {
+    c.bench_function("storage.get", |c| {
         let storage = storage::<i32>();
+
         let entity = Entity::new().with(3i32);
 
         c.iter(|| {
             drop(storage.get(entity.entity()));
-        })
+        });
+    });
+
+    c.bench_function("storage.try_get.unwrap", |c| {
+        let storage = storage::<i32>();
+
+        let entity = Entity::new().with(3i32);
+
+        c.iter(|| {
+            drop(storage.try_get(entity.entity()).unwrap());
+        });
+    });
+
+    c.bench_function("storage.has", |c| {
+        let storage = storage::<i32>();
+        let entity = Entity::new().with(3i32);
+
+        c.iter(|| {
+            storage.has(entity.entity());
+        });
     });
 }
 

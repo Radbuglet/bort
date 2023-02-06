@@ -2,8 +2,7 @@ use std::{
     any::{type_name, Any, TypeId},
     borrow::Borrow,
     cell::{Ref, RefCell, RefMut},
-    hash, iter,
-    mem::needs_drop,
+    fmt, hash, iter, mem,
     num::NonZeroU64,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -60,19 +59,19 @@ fn leak<T>(value: T) -> &'static T {
 #[derive(Copy, Clone)]
 struct ComponentType {
     id: TypeId,
+    name: &'static str,
     dtor: fn(Entity),
 }
 
 impl ComponentType {
     fn of<T: 'static>() -> Self {
-        debug_assert!(needs_drop::<T>());
-
         fn dtor<T: 'static>(entity: Entity) {
             drop(storage::<T>().remove_untracked(entity)); // (ignores missing components)
         }
 
         Self {
             id: TypeId::of::<T>(),
+            name: type_name::<T>(),
             dtor: dtor::<T>,
         }
     }
@@ -107,6 +106,7 @@ impl PartialEq for ComponentType {
 struct ComponentList {
     comps: Box<[ComponentType]>,
     extensions: RefCell<FxHashMap<TypeId, &'static Self>>,
+    de_extensions: RefCell<FxHashMap<TypeId, &'static Self>>,
 }
 
 impl hash::Hash for ComponentList {
@@ -129,6 +129,7 @@ impl ComponentList {
             static EMPTY: &'static ComponentList = leak(ComponentList {
                 comps: Box::new([]),
                 extensions: Default::default(),
+                de_extensions: Default::default(),
             });
         }
 
@@ -139,11 +140,6 @@ impl ComponentList {
         for comp in &*self.comps {
             (comp.dtor)(target);
         }
-    }
-
-    pub fn de_extend(&'static self, _without: ComponentType) -> &'static Self {
-        // TODO: implement
-        self
     }
 
     pub fn extend(&'static self, with: ComponentType) -> &'static Self {
@@ -157,13 +153,26 @@ impl ComponentList {
             .or_insert_with(|| Self::find_extension_in_db(&self.comps, with))
     }
 
-    fn find_extension_in_db(base_set: &[ComponentType], with: ComponentType) -> &'static Self {
-        thread_local! {
-            static COMP_LISTS: RefCell<FxHashSet<&'static ComponentList>> = RefCell::new(FxHashSet::from_iter([
-                ComponentList::empty(),
-            ]));
+    pub fn de_extend(&'static self, without: ComponentType) -> &'static Self {
+        if !self.comps.contains(&without) {
+            return self;
         }
 
+        self.de_extensions
+            .borrow_mut()
+            .entry(without.id)
+            .or_insert_with(|| Self::find_de_extension_in_db(&self.comps, without))
+    }
+
+    // === Database === //
+
+    thread_local! {
+        static COMP_LISTS: RefCell<FxHashSet<&'static ComponentList>> = RefCell::new(FxHashSet::from_iter([
+            ComponentList::empty(),
+        ]));
+    }
+
+    fn find_extension_in_db(base_set: &[ComponentType], with: ComponentType) -> &'static Self {
         struct ComponentListSearch<'a>(&'a [ComponentType], ComponentType);
 
         impl hash::Hash for ComponentListSearch<'_> {
@@ -174,26 +183,13 @@ impl ComponentList {
 
         impl hashbrown::Equivalent<&'static ComponentList> for ComponentListSearch<'_> {
             fn equivalent(&self, key: &&'static ComponentList) -> bool {
-                let mut i = 0;
-
-                for entry in &*key.comps {
-                    if entry.id == self.1.id {
-                        continue;
-                    }
-
-                    if entry.id == self.0[i].id {
-                        i += 1;
-                        continue;
-                    }
-
-                    return false;
-                }
-
-                true
+                // See if the key component list without the additional component
+                // is equal to the base list.
+                key.comps.iter().filter(|v| **v == self.1).eq(self.0.iter())
             }
         }
 
-        COMP_LISTS.with(|set| {
+        ComponentList::COMP_LISTS.with(|set| {
             *set.borrow_mut()
                 .get_or_insert_with(&ComponentListSearch(base_set, with), |_| {
                     leak(Self {
@@ -201,6 +197,44 @@ impl ComponentList {
                             .collect::<Vec<_>>()
                             .into_boxed_slice(),
                         extensions: Default::default(),
+                        de_extensions: Default::default(),
+                    })
+                })
+        })
+    }
+
+    fn find_de_extension_in_db(
+        base_set: &[ComponentType],
+        without: ComponentType,
+    ) -> &'static Self {
+        struct ComponentListSearch<'a>(&'a [ComponentType], ComponentType);
+
+        impl hash::Hash for ComponentListSearch<'_> {
+            fn hash<H: hash::Hasher>(&self, state: &mut H) {
+                hash_iter(state, self.0.iter().filter(|v| **v != self.1));
+            }
+        }
+
+        impl hashbrown::Equivalent<&'static ComponentList> for ComponentListSearch<'_> {
+            fn equivalent(&self, key: &&'static ComponentList) -> bool {
+                // See if the base component list without the removed component
+                // is equal to the key list.
+                self.0.iter().filter(|v| **v == self.1).eq(key.comps.iter())
+            }
+        }
+
+        ComponentList::COMP_LISTS.with(|set| {
+            *set.borrow_mut()
+                .get_or_insert_with(&ComponentListSearch(base_set, without), |_| {
+                    leak(Self {
+                        comps: base_set
+                            .iter()
+                            .copied()
+                            .filter(|v| *v != without)
+                            .collect::<Vec<_>>()
+                            .into_boxed_slice(),
+                        extensions: Default::default(),
+                        de_extensions: Default::default(),
                     })
                 })
         })
@@ -250,9 +284,7 @@ impl<T: 'static> Storage<T> {
                 panic!("attempted to attach a component to the dead {:?}.", entity)
             });
 
-            if needs_drop::<T>() {
-                *slot = slot.extend(ComponentType::of::<T>());
-            }
+            *slot = slot.extend(ComponentType::of::<T>());
         });
 
         self.insert_untracked(entity, value)
@@ -292,9 +324,7 @@ impl<T: 'static> Storage<T> {
                 )
             });
 
-            if needs_drop::<T>() {
-                *slot = slot.de_extend(ComponentType::of::<T>());
-            }
+            *slot = slot.de_extend(ComponentType::of::<T>());
         });
 
         self.remove_untracked(entity)
@@ -311,50 +341,77 @@ impl<T: 'static> Storage<T> {
         }
     }
 
+    #[inline(always)]
     fn try_get_slot(&self, entity: Entity) -> Option<&'static StorageSlot<T>> {
         self.0.borrow().mappings.get(&entity).copied()
     }
 
+    #[inline(always)]
     fn get_slot(&self, entity: Entity) -> &'static StorageSlot<T> {
-        self.try_get_slot(entity).unwrap_or_else(|| {
-            // See if this is a lifetime error...
-            ALIVE.with(|alive| {
-                if !alive.borrow().contains_key(&entity) {
+        #[cold]
+        #[inline(never)]
+        fn get_slot_failed<T: 'static>(entity: Entity) -> ! {
+            // Try to get the component list or panic if this is a liveness error.
+            let comp_list = ALIVE.with(|alive| {
+                alive.borrow().get(&entity).copied().unwrap_or_else(|| {
                     panic!(
                         "failed to find component of type {} for dead {:?}",
                         type_name::<T>(),
                         entity
-                    );
-                }
+                    )
+                })
             });
 
             // Otherwise, print the regular error message.
+            struct CompListFmt<'a>(&'a [ComponentType]);
+
+            impl fmt::Display for CompListFmt<'_> {
+                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    for (i, v) in self.0.iter().enumerate() {
+                        if i > 0 {
+                            f.write_str(", ")?;
+                        }
+                        f.write_str(v.name)?;
+                    }
+                    Ok(())
+                }
+            }
+
             panic!(
-                "failed to find component of type {} for {:?}",
+                "failed to find component of type {} for {:?} (components: {})",
                 type_name::<T>(),
                 entity,
+                CompListFmt(&comp_list.comps),
             );
-        })
+        }
+
+        self.try_get_slot(entity)
+            .unwrap_or_else(|| get_slot_failed::<T>(entity))
     }
 
+    #[inline(always)]
     pub fn try_get(&self, entity: Entity) -> Option<Ref<'static, T>> {
         self.try_get_slot(entity)
             .map(|slot| Ref::map(slot.borrow(), |v| v.as_ref().unwrap()))
     }
 
+    #[inline(always)]
     pub fn try_get_mut(&self, entity: Entity) -> Option<RefMut<'static, T>> {
         self.try_get_slot(entity)
             .map(|slot| RefMut::map(slot.borrow_mut(), |v| v.as_mut().unwrap()))
     }
 
+    #[inline(always)]
     pub fn get(&self, entity: Entity) -> Ref<'static, T> {
         Ref::map(self.get_slot(entity).borrow(), |v| v.as_ref().unwrap())
     }
 
+    #[inline(always)]
     pub fn get_mut(&self, entity: Entity) -> RefMut<'static, T> {
         RefMut::map(self.get_slot(entity).borrow_mut(), |v| v.as_mut().unwrap())
     }
 
+    #[inline(always)]
     pub fn has(&self, entity: Entity) -> bool {
         self.try_get_slot(entity).is_some()
     }
@@ -375,7 +432,7 @@ impl Entity {
         OwnedEntity::new()
     }
 
-    pub fn new_unguarded() -> Self {
+    pub fn new_unmanaged() -> Self {
         static ID_GEN: AtomicU64 = AtomicU64::new(1);
 
         let me = Self(NonZeroU64::new(ID_GEN.fetch_add(1, Ordering::Relaxed)).unwrap());
@@ -443,16 +500,16 @@ impl OwnedEntity {
     // === Lifecycle === //
 
     pub fn new() -> Self {
-        Self(Entity::new_unguarded())
+        Self(Entity::new_unmanaged())
     }
 
     pub fn entity(&self) -> Entity {
         self.0
     }
 
-    pub fn defuse(self) -> Entity {
+    pub fn unmanage(self) -> Entity {
         let entity = self.0;
-        std::mem::forget(self);
+        mem::forget(self);
 
         entity
     }
