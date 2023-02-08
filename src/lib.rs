@@ -1,3 +1,5 @@
+// TODO: Stop leaking thread globals in case people want to use Geode on a non-main thread.
+
 use std::{
     any::{type_name, Any, TypeId},
     borrow::{Borrow, Cow},
@@ -243,6 +245,10 @@ impl ComponentList {
 
 // === Storage === //
 
+pub type CompRef<T> = Ref<'static, T>;
+
+pub type CompMut<T> = RefMut<'static, T>;
+
 pub fn storage<T: 'static>() -> &'static Storage<T> {
     thread_local! {
         static STORAGES: RefCell<FxHashMap<TypeId, &'static dyn Any>> = Default::default();
@@ -262,8 +268,10 @@ pub fn storage<T: 'static>() -> &'static Storage<T> {
     })
 }
 
-// TODO: These should likely be allocated in a bump allocator instead.
-const BLOCK_SIZE: usize = 128;
+const fn block_elem_size<T>() -> usize {
+    // TODO: make this adaptive
+    128
+}
 
 type StorageSlot<T> = RefCell<Option<T>>;
 
@@ -277,6 +285,10 @@ struct StorageInner<T: 'static> {
 }
 
 impl<T: 'static> Storage<T> {
+    pub fn acquire() -> &'static Storage<T> {
+        storage()
+    }
+
     pub fn insert(&self, entity: Entity, value: T) -> Option<T> {
         ALIVE.with(|slots| {
             let mut slots = slots.borrow_mut();
@@ -298,7 +310,7 @@ impl<T: 'static> Storage<T> {
             hashbrown::hash_map::Entry::Vacant(entry) => {
                 if me.free_slots.is_empty() {
                     let block = iter::repeat_with(StorageSlot::default)
-                        .take(BLOCK_SIZE)
+                        .take(block_elem_size::<T>())
                         .collect::<Vec<_>>()
                         .leak();
 
@@ -334,8 +346,9 @@ impl<T: 'static> Storage<T> {
         let mut me = self.0.borrow_mut();
 
         if let Some(slot) = me.mappings.remove(&entity) {
+            let taken = slot.borrow_mut().take();
             me.free_slots.push(slot);
-            slot.borrow_mut().take()
+            taken
         } else {
             None
         }
@@ -363,24 +376,24 @@ impl<T: 'static> Storage<T> {
     }
 
     #[inline(always)]
-    pub fn try_get(&self, entity: Entity) -> Option<Ref<'static, T>> {
+    pub fn try_get(&self, entity: Entity) -> Option<CompRef<T>> {
         self.try_get_slot(entity)
             .map(|slot| Ref::map(slot.borrow(), |v| v.as_ref().unwrap()))
     }
 
     #[inline(always)]
-    pub fn try_get_mut(&self, entity: Entity) -> Option<RefMut<'static, T>> {
+    pub fn try_get_mut(&self, entity: Entity) -> Option<CompMut<T>> {
         self.try_get_slot(entity)
             .map(|slot| RefMut::map(slot.borrow_mut(), |v| v.as_mut().unwrap()))
     }
 
     #[inline(always)]
-    pub fn get(&self, entity: Entity) -> Ref<'static, T> {
+    pub fn get(&self, entity: Entity) -> CompRef<T> {
         Ref::map(self.get_slot(entity).borrow(), |v| v.as_ref().unwrap())
     }
 
     #[inline(always)]
-    pub fn get_mut(&self, entity: Entity) -> RefMut<'static, T> {
+    pub fn get_mut(&self, entity: Entity) -> CompMut<T> {
         RefMut::map(self.get_slot(entity).borrow_mut(), |v| v.as_mut().unwrap())
     }
 
@@ -435,19 +448,19 @@ impl Entity {
         storage::<T>().remove(self)
     }
 
-    pub fn try_get<T: 'static>(self) -> Option<Ref<'static, T>> {
+    pub fn try_get<T: 'static>(self) -> Option<CompRef<T>> {
         storage::<T>().try_get(self)
     }
 
-    pub fn try_get_mut<T: 'static>(self) -> Option<RefMut<'static, T>> {
+    pub fn try_get_mut<T: 'static>(self) -> Option<CompMut<T>> {
         storage::<T>().try_get_mut(self)
     }
 
-    pub fn get<T: 'static>(self) -> Ref<'static, T> {
+    pub fn get<T: 'static>(self) -> CompRef<T> {
         storage::<T>().get(self)
     }
 
-    pub fn get_mut<T: 'static>(self) -> RefMut<'static, T> {
+    pub fn get_mut<T: 'static>(self) -> CompMut<T> {
         storage::<T>().get_mut(self)
     }
 
@@ -457,6 +470,10 @@ impl Entity {
 
     pub fn is_alive(self) -> bool {
         ALIVE.with(|slots| slots.borrow().contains_key(&self))
+    }
+
+    pub fn alive_count() -> usize {
+        ALIVE.with(|slots| slots.borrow().len())
     }
 
     pub fn destroy(self) {
@@ -490,7 +507,9 @@ impl fmt::Debug for Entity {
 
             if let Some(comp_list) = alive.borrow().get(self).copied() {
                 for v in comp_list.comps.iter() {
-                    builder.field(&StrLit(v.name));
+                    if v.id != TypeId::of::<DebugLabel>() {
+                        builder.field(&StrLit(v.name));
+                    }
                 }
             } else {
                 builder.field(&StrLit("<DEAD>"));
@@ -549,19 +568,19 @@ impl OwnedEntity {
         self.0.remove()
     }
 
-    pub fn try_get<T: 'static>(&self) -> Option<Ref<'static, T>> {
+    pub fn try_get<T: 'static>(&self) -> Option<CompRef<T>> {
         self.0.try_get()
     }
 
-    pub fn try_get_mut<T: 'static>(&self) -> Option<RefMut<'static, T>> {
+    pub fn try_get_mut<T: 'static>(&self) -> Option<CompMut<T>> {
         self.0.try_get_mut()
     }
 
-    pub fn get<T: 'static>(&self) -> Ref<'static, T> {
+    pub fn get<T: 'static>(&self) -> CompRef<T> {
         self.0.get()
     }
 
-    pub fn get_mut<T: 'static>(&self) -> RefMut<'static, T> {
+    pub fn get_mut<T: 'static>(&self) -> CompMut<T> {
         self.0.get_mut()
     }
 
