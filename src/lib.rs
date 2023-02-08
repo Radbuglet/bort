@@ -9,6 +9,10 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use debug::AsDebugLabel;
+
+use crate::debug::DebugLabel;
+
 // === Helpers === //
 
 type FxHashBuilder = hash::BuildHasherDefault<rustc_hash::FxHasher>;
@@ -314,7 +318,7 @@ impl<T: 'static> Storage<T> {
                         .collect::<Vec<_>>()
                         .leak();
 
-                    me.free_slots.extend(block.into_iter().map(|v| &*v));
+                    me.free_slots.extend(block.iter());
                 }
 
                 let slot = me.free_slots.pop().unwrap();
@@ -405,12 +409,11 @@ impl<T: 'static> Storage<T> {
 
 // === Entity === //
 
-#[derive(Debug)]
-pub struct DebugLabel(pub Cow<'static, str>);
-
 thread_local! {
     static ALIVE: RefCell<FxHashMap<Entity, &'static ComponentList>> = Default::default();
 }
+
+static ENTITY_ID_GEN: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Copy, Clone, Hash, Eq, PartialEq)]
 pub struct Entity(NonZeroU64);
@@ -421,9 +424,7 @@ impl Entity {
     }
 
     pub fn new_unmanaged() -> Self {
-        static ID_GEN: AtomicU64 = AtomicU64::new(1);
-
-        let me = Self(NonZeroU64::new(ID_GEN.fetch_add(1, Ordering::Relaxed)).unwrap());
+        let me = Self(NonZeroU64::new(ENTITY_ID_GEN.fetch_add(1, Ordering::Relaxed)).unwrap());
 
         ALIVE.with(|slots| slots.borrow_mut().insert(me, ComponentList::empty()));
 
@@ -435,8 +436,11 @@ impl Entity {
         self
     }
 
-    pub fn with_debug_label<L: Into<Cow<'static, str>>>(self, label: L) -> Self {
-        self.with(DebugLabel(label.into()));
+    pub fn with_debug_label<L: AsDebugLabel>(self, label: L) -> Self {
+        #[cfg(debug_assertions)]
+        self.with(DebugLabel::from(label));
+        #[cfg(not(debug_assertions))]
+        let _ = label;
         self
     }
 
@@ -470,10 +474,6 @@ impl Entity {
 
     pub fn is_alive(self) -> bool {
         ALIVE.with(|slots| slots.borrow().contains_key(&self))
-    }
-
-    pub fn alive_count() -> usize {
-        ALIVE.with(|slots| slots.borrow().len())
     }
 
     pub fn destroy(self) {
@@ -555,7 +555,7 @@ impl OwnedEntity {
         self
     }
 
-    pub fn with_debug_label<L: Into<Cow<'static, str>>>(self, label: L) -> Self {
+    pub fn with_debug_label<L: AsDebugLabel>(self, label: L) -> Self {
         self.0.with_debug_label(label);
         self
     }
@@ -602,5 +602,58 @@ impl Borrow<Entity> for OwnedEntity {
 impl Drop for OwnedEntity {
     fn drop(&mut self) {
         self.0.destroy();
+    }
+}
+
+// === Debug utilities === //
+
+pub mod debug {
+    use super::*;
+
+    pub fn alive_entity_count() -> usize {
+        ALIVE.with(|slots| slots.borrow().len())
+    }
+
+    pub fn alive_entities() -> Vec<Entity> {
+        ALIVE.with(|slots| slots.borrow().keys().copied().collect())
+    }
+
+    pub fn spawned_entity_count() -> u64 {
+        ENTITY_ID_GEN.load(Ordering::Relaxed)
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct DebugLabel(pub Cow<'static, str>);
+
+    impl<L: AsDebugLabel> From<L> for DebugLabel {
+        fn from(value: L) -> Self {
+            Self(AsDebugLabel::reify(value))
+        }
+    }
+
+    pub trait AsDebugLabel {
+        fn reify(me: Self) -> Cow<'static, str>;
+    }
+
+    impl AsDebugLabel for &'static str {
+        fn reify(me: Self) -> Cow<'static, str> {
+            Cow::Borrowed(me)
+        }
+    }
+
+    impl AsDebugLabel for String {
+        fn reify(me: Self) -> Cow<'static, str> {
+            Cow::Owned(me)
+        }
+    }
+
+    impl AsDebugLabel for fmt::Arguments<'_> {
+        fn reify(me: Self) -> Cow<'static, str> {
+            if let Some(str) = me.as_str() {
+                Cow::Borrowed(str)
+            } else {
+                Cow::Owned(me.to_string())
+            }
+        }
     }
 }
