@@ -9,9 +9,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use debug::AsDebugLabel;
-
-use crate::debug::DebugLabel;
+use debug::{AsDebugLabel, DebugLabel};
 
 // === Helpers === //
 
@@ -297,7 +295,11 @@ impl<T: 'static> Storage<T> {
         ALIVE.with(|slots| {
             let mut slots = slots.borrow_mut();
             let slot = slots.get_mut(&entity).unwrap_or_else(|| {
-                panic!("attempted to attach a component to the dead {:?}.", entity)
+                panic!(
+                    "attempted to attach a component of type {} to the dead {:?}.",
+                    type_name::<T>(),
+                    entity
+                )
             });
 
             *slot = slot.extend(ComponentType::of::<T>());
@@ -331,19 +333,30 @@ impl<T: 'static> Storage<T> {
     }
 
     pub fn remove(&self, entity: Entity) -> Option<T> {
-        ALIVE.with(|slots| {
-            let mut slots = slots.borrow_mut();
-            let slot = slots.get_mut(&entity).unwrap_or_else(|| {
-                panic!(
-                    "attempted to remove a component from the dead {:?}.",
-                    entity
-                )
+        if let Some(removed) = self.remove_untracked(entity) {
+            // Modify the component list or fail silently if the entity lacks the component.
+            // This behavior allows users to `remove` components explicitly from entities that are
+            // in the of being destroyed. This is the opposite behavior of `insert`, which requires
+            // the entity to be valid before modifying it. This pairing ensures that, by the time
+            // `Entity::destroy()` resolves, all of the entity's components will have been removed.
+            ALIVE.with(|slots| {
+                let mut slots = slots.borrow_mut();
+                let Some(slot) = slots.get_mut(&entity) else { return };
+
+                *slot = slot.de_extend(ComponentType::of::<T>());
             });
 
-            *slot = slot.de_extend(ComponentType::of::<T>());
-        });
-
-        self.remove_untracked(entity)
+            Some(removed)
+        } else {
+            // Only if the component is missing will we issue the standard error.
+            assert!(
+                entity.is_alive(),
+                "attempted to remove a component of type {} from the already fully-dead {:?}",
+                type_name::<T>(),
+                entity,
+            );
+            None
+        }
     }
 
     fn remove_untracked(&self, entity: Entity) -> Option<T> {
