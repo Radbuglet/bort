@@ -136,4 +136,4 @@ Components should strive to only borrow from their logical children. For example
 
 ### A Note on Threading
 
-Currently, Geode is entirely single-threaded. Because everything is stored in thread-local storage, entities spawned on one thread will appear dead on another.
+Currently, Geode is entirely single-threaded. Because everything is stored in thread-local storage, entities spawned on one thread will likely appear dead on another and all component sets will be thread-specific.

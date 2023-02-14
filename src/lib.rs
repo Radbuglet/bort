@@ -3,7 +3,7 @@
 use std::{
     any::{type_name, Any, TypeId},
     borrow::{Borrow, Cow},
-    cell::{Ref, RefCell, RefMut},
+    cell::{Cell, Ref, RefCell, RefMut},
     fmt, hash, iter, mem,
     num::NonZeroU64,
     sync::atomic::{AtomicU64, Ordering},
@@ -12,6 +12,18 @@ use std::{
 use debug::{AsDebugLabel, DebugLabel};
 
 // === Helpers === //
+
+fn xorshift64(state: NonZeroU64) -> NonZeroU64 {
+    // Adapted from: https://en.wikipedia.org/w/index.php?title=Xorshift&oldid=1123949358
+    let state = state.get();
+    let state = state ^ (state << 13);
+    let state = state ^ (state >> 7);
+    let state = state ^ (state << 17);
+    NonZeroU64::new(state).unwrap()
+}
+
+type NopHashBuilder = hash::BuildHasherDefault<NoOpHasher>;
+type NopHashMap<K, V> = hashbrown::HashMap<K, V, NopHashBuilder>;
 
 type FxHashBuilder = hash::BuildHasherDefault<rustc_hash::FxHasher>;
 type FxHashMap<K, V> = hashbrown::HashMap<K, V, FxHashBuilder>;
@@ -56,6 +68,23 @@ where
 
 fn leak<T>(value: T) -> &'static T {
     Box::leak(Box::new(value))
+}
+
+#[derive(Debug, Default)]
+struct NoOpHasher(u64);
+
+impl hash::Hasher for NoOpHasher {
+    fn write_u64(&mut self, i: u64) {
+        self.0 = i;
+    }
+
+    fn write(&mut self, _bytes: &[u8]) {
+        unimplemented!("This is only supported for `u64`s.")
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
 }
 
 // === ComponentList === //
@@ -262,7 +291,7 @@ pub fn storage<T: 'static>() -> &'static Storage<T> {
             .or_insert_with(|| {
                 leak(Storage::<T>(RefCell::new(StorageInner {
                     free_slots: Vec::new(),
-                    mappings: FxHashMap::default(),
+                    mappings: NopHashMap::default(),
                 })))
             })
             .downcast_ref::<Storage<T>>()
@@ -283,7 +312,7 @@ pub struct Storage<T: 'static>(RefCell<StorageInner<T>>);
 #[derive(Debug)]
 struct StorageInner<T: 'static> {
     free_slots: Vec<&'static StorageSlot<T>>,
-    mappings: FxHashMap<Entity, &'static StorageSlot<T>>,
+    mappings: NopHashMap<Entity, &'static StorageSlot<T>>,
 }
 
 impl<T: 'static> Storage<T> {
@@ -423,10 +452,10 @@ impl<T: 'static> Storage<T> {
 // === Entity === //
 
 thread_local! {
-    static ALIVE: RefCell<FxHashMap<Entity, &'static ComponentList>> = Default::default();
+    static ALIVE: RefCell<NopHashMap<Entity, &'static ComponentList>> = Default::default();
 }
 
-static ENTITY_ID_GEN: AtomicU64 = AtomicU64::new(1);
+static DEBUG_ENTITY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Copy, Clone, Hash, Eq, PartialEq)]
 pub struct Entity(NonZeroU64);
@@ -437,8 +466,24 @@ impl Entity {
     }
 
     pub fn new_unmanaged() -> Self {
-        let me = Self(NonZeroU64::new(ENTITY_ID_GEN.fetch_add(1, Ordering::Relaxed)).unwrap());
+        // Increment the total entity counter
+        DEBUG_ENTITY_COUNTER.fetch_add(1, Ordering::Relaxed);
 
+        // Allocate a slot
+        thread_local! {
+            static ID_GEN: Cell<NonZeroU64> = const { Cell::new(match NonZeroU64::new(1) {
+                Some(v) => v,
+                None => unreachable!(),
+            }) };
+        }
+
+        let me = Self(ID_GEN.with(|v| {
+            let state = xorshift64(v.get());
+            v.set(state);
+            state
+        }));
+
+        // Register our slot in the alive set
         ALIVE.with(|slots| slots.borrow_mut().insert(me, ComponentList::empty()));
 
         me
@@ -632,7 +677,7 @@ pub mod debug {
     }
 
     pub fn spawned_entity_count() -> u64 {
-        ENTITY_ID_GEN.load(Ordering::Relaxed)
+        DEBUG_ENTITY_COUNTER.load(Ordering::Relaxed)
     }
 
     #[derive(Debug, Clone)]
