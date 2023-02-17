@@ -494,6 +494,11 @@ impl Entity {
         self
     }
 
+    pub fn with_self_referential<T: 'static>(self, func: impl FnOnce(Entity) -> T) -> Self {
+        self.insert(func(self));
+        self
+    }
+
     pub fn with_debug_label<L: AsDebugLabel>(self, label: L) -> Self {
         #[cfg(debug_assertions)]
         self.with(DebugLabel::from(label));
@@ -610,6 +615,11 @@ impl OwnedEntity {
 
     pub fn with<T: 'static>(self, comp: T) -> Self {
         self.0.insert(comp);
+        self
+    }
+
+    pub fn with_self_referential<T: 'static>(self, func: impl FnOnce(Entity) -> T) -> Self {
+        self.0.insert(func(self.entity()));
         self
     }
 
