@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use criterion::{criterion_main, Criterion};
-use geode::{storage, Entity};
+use bort::{storage, Entity};
 
 fn access_tests() {
     let mut c = Criterion::default()

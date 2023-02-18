@@ -1,4 +1,207 @@
-// TODO: Stop leaking thread globals in case people want to use Geode on a non-main thread.
+//! # Bort
+//!
+//! A Simple Object Model for Rust
+//!
+//! ```
+//! use cgmath::Vec3;
+//! use bort::Entity;
+//!
+//! #[derive(Debug, Copy, Clone)]
+//! struct Pos(Vec3);
+//!
+//! #[derive(Debug, Copy, Clone)]
+//! struct Vel(Vec3);
+//!
+//! #[derive(Debug)]
+//! struct ChaserAi {
+//!     target: Option<Entity>,
+//!     home: Vec3,
+//! }
+//!
+//! #[derive(Debug)]
+//! struct PlayerState {
+//!     hp: u32,
+//! }
+//!
+//! impl PlayerState {
+//!     fn update(&mut self, me: Entity) {
+//!         me.get_mut::<Pos>().0 += me.get::<Vel>().0;
+//!     }
+//! }
+//!
+//! let player = Entity::new()
+//!     .with(Pos(Vec3::ZERO))
+//!     .with(Vel(Vec3::ZERO))
+//!     .with(PlayerState {
+//!         hp: 100,
+//!     });
+//!
+//! let chaser = Entity::new()
+//!     .with(Pos(Vec3::ZERO))
+//!     .with(ChaserAi { target: Some(player), home: Vec3::ZERO });
+//!
+//! player.get_mut::<PlayerState>().update(player.entity());
+//!
+//! let pos = &mut *chaser.get_mut::<Pos>();
+//! let state = chaser.get::<ChaserState>();
+//!
+//! pos.0 = pos.0.lerp(match state.target {
+//!     Some(target) => target.get::<Pos>().0,
+//!     None => state.home,
+//! }, 0.2);
+//! ```
+//!
+//! ## Getting Started
+//!
+//! Applications in Bort are made of [`Entity`] instances. These are `Copy`able references to
+//! logical objects in your application. They can represent anything from a player character in a
+//! game to a UI widget.
+//!
+//! To create one, just call [`Entity::new()`].
+//!
+//! ```
+//! use bort::Entity;
+//!
+//! let player = Entity::new();
+//! ```
+//!
+//! From there, you can add components to it using either [`insert`](Entity::insert) or [`with`](Entity::with):
+//!
+//! ```
+//! player.insert(Pos(Vec3::ZERO));
+//! player.insert(Vel(Vec3::ZERO));
+//!
+//! // ...which is equivalent to:
+//! let player = Entity::new()
+//!     .with(Pos(Vec3::ZERO))
+//!     .with(Vel(Vec3::ZERO));
+//! ```
+//!
+//! ...and access them using [`get`](Entity::get) or [`get_mut`](Entity::get_mut):
+//!
+//! ```
+//! let mut pos = player.get_mut::<Pos>();  // These are `RefMut`s
+//! let vel = player.get::<Vel>();          // ...and `Ref`s.
+//!
+//! pos.0 += vel.0;
+//! ```
+//!
+//! Note that `Entity::new()` doesn't actually return an `Entity`, but rather an [`OwnedEntity`].
+//! These expose the exact same interface as an `Entity` but have an additional `Drop` handler
+//! (making them non-`Copy`) that automatically [`Entity::destroy`](Entity::destroy)s their managed
+//! entity when they leave the scope.
+//!
+//! You can extract an `Entity` from them using [`OwnedEntity::entity(&self)`](OwnedEntity::entity).
+//!
+//! ```
+//! let player2 = player;  // (transfers ownership of `OwnedEntity`)
+//! // player.insert("hello!");
+//! // ^ `player` is invalid here; use `player2` instead!
+//!
+//! let player_ref = player.entity();  // (produces a copyable `Entity` reference)
+//! let player_ref_2 = player_ref;  // (copies the value)
+//!
+//! assert_eq(player_ref, player_ref_2);
+//! assert(player_ref.is_alive());
+//!
+//! drop(player2);  // (dropped `OwnedEntity`; `player_xx` are all dead now)
+//!
+//! assert!(!player_ref.is_alive());
+//! ```
+//!
+//! Using these `Entity` handles, you can freely reference you object in multiple places without
+//! dealing with cloning smart pointers.
+//!
+//! ```
+//! use bort::Entity;
+//!
+//! struct PlayerId(usize);
+//!
+//! struct Name(String);
+//!
+//! #[derive(Default)]
+//! struct PlayerRegistry {
+//!     all: Vec<Entity>,
+//!     by_name: HashMap<String, Entity>,
+//! }
+//!
+//! impl PlayerRegistry {
+//!     pub fn add(&mut self, player: Entity) {
+//!         player.insert(PlayerId(self.all.len()));
+//!         self.all.push(player);
+//!         self.by_name.insert(
+//!             player.get::<Name>().0.clone(),
+//!             player,
+//!         );
+//!     }
+//! }
+//!
+//! let player = Entity::new()
+//!     .with(Name("foo".to_string()));
+//!
+//! let mut registry = PlayerRegistry::default();
+//! registry.add(player);
+//!
+//! println!("Player is at index {}", player.get::<PlayerId>().0);
+//! ```
+//!
+//! See the reference documentation for [`Entity`] and [`OwnedEntity`] for a complete list of methods.
+//!
+//! Features not discussed in this introductory section include:
+//!
+//! - Liveness checking through [`Entity::is_alive()`]
+//! - Storage handle caching through [`storage()`] for hot code sections
+//! - Additional entity builder methods such as [`Entity::with_debug_label()`] and [`Entity::with_self_referential`]
+//! - Debug utilities to [query entity statistics](debug)
+//!
+//! ### A Note on Borrowing
+//!
+//! Bort relies quite heavily on runtime borrowing. Although the type system does not prevent you
+//! from mutably borrowing the same component more than once, doing so will cause a panic anyways:
+//!
+//! ```
+//! use bort::Entity;
+//!
+//! let foo = Entity::new()
+//!     .with(vec![3i32]);
+//!
+//! let vec1 = foo.get::<Vec<i32>>();  // Ok
+//! let a = &vec1[0];
+//!
+//! let mut vec2 = foo.get_mut::<Vec<i32>>();  // Panics at runtime!
+//! vec2.push(4);
+//! ```
+//!
+//! Components should strive to only borrow from their logical children. For example, it's somewhat
+//! expected for a player to access the components of the items in its inventory but it's somewhat
+//! unexpected to have that same player access the world state without that state being explicitly
+//! passed to it. Maintaining this informal rule should make borrowing dependencies easier to reason
+//! about.
+//!
+//! Dispatching object behavior through "system" functions that iterate over and update entities of
+//! a given type can be a wonderful way to encourage intuitive borrowing practices and can greatly
+//! improve performance when compared to regular dynamic dispatch:
+//!
+//! ```
+//! use bort::{Entity, storage};
+//!
+//! fn process_players(players: impl Iterator<Item = Entity>) {
+//!     let positions = storage::<Pos>();
+//!     let velocities = storage::<Vel>();
+//!
+//!     for player in players {
+//!         positions.get_mut(player).0 += velocities.get(player).0;
+//!     }
+//! }
+//! ```
+//!
+//! ### A Note on Threading
+//!
+//! Currently, Bort is entirely single-threaded. Because everything is stored in thread-local storage,
+//! entities spawned on one thread will likely appear dead on another and all component sets will be
+//! thread-specific.
+
+// TODO: Stop leaking thread globals in case people want to use Bort on a non-main thread.
 
 use std::{
     any::{type_name, Any, TypeId},
@@ -276,10 +479,53 @@ impl ComponentList {
 
 // === Storage === //
 
+/// The type of an immutable reference to a component. These are essentially [`Ref`]s from the
+/// standard library. See [`CompMut`] for its mutable counterpart.
+///
+/// The `'static` lifetime means that the memory location holding the component data will be valid
+/// throughout the lifetime of the program—not that the component will be leaked. Indeed, these slots
+/// will be reclaimed once the owning entity dies.
+///
+/// Because outstanding `CompRefs` and `CompMuts` prevent that component from being removed from a
+/// dying entity, *it is highly discouraged to store these in permanent structures unless you know
+/// all referents will expire before the owning entity will*.
 pub type CompRef<T> = Ref<'static, T>;
 
+/// The type of an mutable reference to a component. These are essentially [`RefMut`]s from the
+/// standard library. See [`CompRef`] for its immutable counterpart.
+///
+/// The `'static` lifetime means that the memory location holding the component data will be valid
+/// throughout the lifetime of the program—not that the component will be leaked. Indeed, these slots
+/// will be reclaimed once the owning entity dies.
+///
+/// Because outstanding `CompRefs` and `CompMuts` prevent that component from being removed from a
+/// dying entity, *it is highly discouraged to store these in permanent structures unless you know
+/// all referents will expire before the owning entity will*.
 pub type CompMut<T> = RefMut<'static, T>;
 
+/// Fetches a [`Storage`] instance for the given component type `T`, which can be used to optimize
+/// tight loops fetching many entity components.
+///
+/// Components are normally fetched from these using the [`Entity::get()`] and [`Entity::get_mut()`]
+/// shorthand methods. However, fetching a storage manually and using it for multiple component
+/// fetches in a function can be useful for optimizing tight loops which fetch a predictable set of
+/// components, such as when you write a "system" function processing entities of a given logical
+/// type.
+///
+/// ```
+/// use bort::{Entity, storage};
+///
+/// fn process_players(players: impl Iterator<Item = Entity>) {
+///     let positions = storage::<Pos>();
+///     let velocities = storage::<Vel>();
+///     for player in players {
+///         positions.get_mut(player).0 += velocities.get(player).0;
+///     }
+/// }
+/// ```
+///
+/// This is a short alias to [`Storage::<T>::acquire()`].
+///
 pub fn storage<T: 'static>() -> &'static Storage<T> {
     thread_local! {
         static STORAGES: RefCell<FxHashMap<TypeId, &'static dyn Any>> = Default::default();
@@ -306,6 +552,33 @@ const fn block_elem_size<T>() -> usize {
 
 type StorageSlot<T> = RefCell<Option<T>>;
 
+/// Storages are glorified maps from entity IDs to components of type `T` with some extra bookkeeping
+/// that provide the backbone for [`Entity::get()`] and [`Entity::get_mut()`] queries. Fetching
+/// components from a storage explicitly can optimize component accesses in a tight loop.
+///
+/// There is exactly one storage for every given component type, and it can be acquired using either
+/// [`Storage::<T>::acquire()`] or its shorter [`storage::<T>()`] function alias.
+///
+/// Components are normally fetched from these using the [`Entity::get()`] and [`Entity::get_mut()`]
+/// shorthand methods. However, fetching a storage manually and using it for multiple component
+/// fetches in a function can be useful for optimizing tight loops which fetch a predictable set of
+/// components, such as when you write a "system" function processing entities of a given logical
+/// type.
+///
+/// ```
+/// use bort::{Entity, storage};
+///
+/// fn process_players(players: impl Iterator<Item = Entity>) {
+///     let positions = storage::<Pos>();
+///     let velocities = storage::<Vel>();
+///     for player in players {
+///         positions.get_mut(player).0 += velocities.get(player).0;
+///     }
+/// }
+/// ```
+///
+/// `Storages` are not `Sync` because they employ un-synchronized interior mutability in the form of
+/// [`RefCell`]'ed components.
 #[derive(Debug)]
 pub struct Storage<T: 'static>(RefCell<StorageInner<T>>);
 
@@ -316,6 +589,17 @@ struct StorageInner<T: 'static> {
 }
 
 impl<T: 'static> Storage<T> {
+    /// Acquires the `Storage<T>` singleton for the current thread.
+    ///
+    /// This is a longer form of the shorter [`storage<T>()`] function alias.
+    ///
+    /// ```
+    /// use bort::{storage, Storage};
+    ///
+    /// let foo = Storage::<u32>::acquire();
+    /// let bar = storage::<u32>();  // This is an equivalent shorter form.
+    /// ```
+    ///
     pub fn acquire() -> &'static Storage<T> {
         storage()
     }

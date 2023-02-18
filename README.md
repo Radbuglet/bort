@@ -1,9 +1,9 @@
-# Geode
+# Bort
 
 A Simple Object Model for Rust
 
 ```rust
-use geode::Entity;
+use bort::Entity;
 
 let player = Entity::new()
     .with(Pos(Vec3::ZERO))
@@ -27,12 +27,12 @@ pos.0 = pos.0.lerp(match state.target {
 
 ## Getting Started
 
-Applications in Geode are made of `Entity` instances. These are `Copy`able references to logical objects in your application. They can represent anything from a player character in a game to a UI widget.
+Applications in Bort are made of `Entity` instances. These are `Copy`able references to logical objects in your application. They can represent anything from a player character in a game to a UI widget.
 
 To create one, just call `Entity::new()`.
 
 ```rust
-use geode::Entity;
+use bort::Entity;
 
 let player = Entity::new();
 ```
@@ -81,7 +81,7 @@ assert!(!player_ref.is_alive());
 Using these `Entity` handles, you can freely reference you object in multiple places without dealing with cloning smart pointers.
 
 ```rust
-use geode::Entity;
+use bort::Entity;
 
 struct PlayerId(usize);
 
@@ -117,10 +117,10 @@ See the reference documentation for `Entity` and `OwnedEntity` for a complete li
 
 ### A Note on Borrowing
 
-Geode relies quite heavily on runtime borrowing. Although the type system does not prevent you from mutably borrowing the same component more than once, doing so will cause a panic anyways:
+Bort relies quite heavily on runtime borrowing. Although the type system does not prevent you from mutably borrowing the same component more than once, doing so will cause a panic anyways:
 
 ```rust
-use geode::Entity;
+use bort::Entity;
 
 let foo = Entity::new()
     .with(vec![3i32]);
@@ -136,4 +136,4 @@ Components should strive to only borrow from their logical children. For example
 
 ### A Note on Threading
 
-Currently, Geode is entirely single-threaded. Because everything is stored in thread-local storage, entities spawned on one thread will likely appear dead on another and all component sets will be thread-specific.
+Currently, Bort is entirely single-threaded. Because everything is stored in thread-local storage, entities spawned on one thread will likely appear dead on another and all component sets will be thread-specific.
