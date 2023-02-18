@@ -3,8 +3,8 @@
 //! A Simple Object Model for Rust
 //!
 //! ```
-//! use cgmath::Vec3;
 //! use bort::Entity;
+//! use glam::Vec3;
 //!
 //! #[derive(Debug, Copy, Clone)]
 //! struct Pos(Vec3);
@@ -38,12 +38,12 @@
 //!
 //! let chaser = Entity::new()
 //!     .with(Pos(Vec3::ZERO))
-//!     .with(ChaserAi { target: Some(player), home: Vec3::ZERO });
+//!     .with(ChaserAi { target: Some(player.entity()), home: Vec3::ZERO });
 //!
 //! player.get_mut::<PlayerState>().update(player.entity());
 //!
 //! let pos = &mut *chaser.get_mut::<Pos>();
-//! let state = chaser.get::<ChaserState>();
+//! let state = chaser.get::<ChaserAi>();
 //!
 //! pos.0 = pos.0.lerp(match state.target {
 //!     Some(target) => target.get::<Pos>().0,
@@ -68,6 +68,12 @@
 //! From there, you can add components to it using either [`insert`](Entity::insert) or [`with`](Entity::with):
 //!
 //! ```
+//! # use bort::Entity;
+//! # use glam::Vec3;
+//! # struct Pos(Vec3);
+//! # struct Vel(Vec3);
+//! # let player = Entity::new();
+//! #
 //! player.insert(Pos(Vec3::ZERO));
 //! player.insert(Vel(Vec3::ZERO));
 //!
@@ -80,6 +86,12 @@
 //! ...and access them using [`get`](Entity::get) or [`get_mut`](Entity::get_mut):
 //!
 //! ```
+//! # use bort::Entity;
+//! # use glam::Vec3;
+//! # struct Pos(Vec3);
+//! # struct Vel(Vec3);
+//! # let player = Entity::new().with(Pos(Vec3::ZERO)).with(Vel(Vec3::ZERO));
+//! #
 //! let mut pos = player.get_mut::<Pos>();  // These are `RefMut`s
 //! let vel = player.get::<Vel>();          // ...and `Ref`s.
 //!
@@ -94,15 +106,19 @@
 //! You can extract an `Entity` from them using [`OwnedEntity::entity(&self)`](OwnedEntity::entity).
 //!
 //! ```
+//! use bort::{Entity, OwnedEntity};
+//!
+//! let player: OwnedEntity = Entity::new();
+//!
 //! let player2 = player;  // (transfers ownership of `OwnedEntity`)
 //! // player.insert("hello!");
 //! // ^ `player` is invalid here; use `player2` instead!
 //!
-//! let player_ref = player.entity();  // (produces a copyable `Entity` reference)
+//! let player_ref = player2.entity();  // (produces a copyable `Entity` reference)
 //! let player_ref_2 = player_ref;  // (copies the value)
 //!
-//! assert_eq(player_ref, player_ref_2);
-//! assert(player_ref.is_alive());
+//! assert_eq!(player_ref, player_ref_2);
+//! assert!(player_ref.is_alive());
 //!
 //! drop(player2);  // (dropped `OwnedEntity`; `player_xx` are all dead now)
 //!
@@ -113,7 +129,8 @@
 //! dealing with cloning smart pointers.
 //!
 //! ```
-//! use bort::Entity;
+//! use bort::{Entity, OwnedEntity};
+//! use std::collections::HashMap;
 //!
 //! struct PlayerId(usize);
 //!
@@ -121,28 +138,34 @@
 //!
 //! #[derive(Default)]
 //! struct PlayerRegistry {
-//!     all: Vec<Entity>,
+//!     all: Vec<OwnedEntity>,
 //!     by_name: HashMap<String, Entity>,
 //! }
 //!
 //! impl PlayerRegistry {
-//!     pub fn add(&mut self, player: Entity) {
+//!     pub fn add(&mut self, player: OwnedEntity) {
+//!         let player_ref = player.entity();
+//!
+//!         // Add to list of all entities
 //!         player.insert(PlayerId(self.all.len()));
 //!         self.all.push(player);
+//!
+//!         // Add to map of entities by name
 //!         self.by_name.insert(
-//!             player.get::<Name>().0.clone(),
-//!             player,
+//!             player_ref.get::<Name>().0.clone(),
+//!             player_ref,
 //!         );
 //!     }
 //! }
 //!
-//! let player = Entity::new()
-//!     .with(Name("foo".to_string()));
+//! let (player, player_ref) = Entity::new()
+//!     .with(Name("foo".to_string()))
+//!     .split_guard();  // Splits the `OwnedEntity` into a tuple of `(OwnedEntity, Entity)`.
 //!
 //! let mut registry = PlayerRegistry::default();
 //! registry.add(player);
 //!
-//! println!("Player is at index {}", player.get::<PlayerId>().0);
+//! println!("Player is at index {}", player_ref.get::<PlayerId>().0);
 //! ```
 //!
 //! See the reference documentation for [`Entity`] and [`OwnedEntity`] for a complete list of methods.
@@ -157,9 +180,10 @@
 //! ### A Note on Borrowing
 //!
 //! Bort relies quite heavily on runtime borrowing. Although the type system does not prevent you
-//! from mutably borrowing the same component more than once, doing so will cause a panic anyways:
+//! from violating "mutable xor immutable" rules for a given component, doing so will cause a panic
+//! anyways:
 //!
-//! ```
+//! ```should_panic
 //! use bort::Entity;
 //!
 //! let foo = Entity::new()
@@ -180,12 +204,14 @@
 //!
 //! Dispatching object behavior through "system" functions that iterate over and update entities of
 //! a given type can be a wonderful way to encourage intuitive borrowing practices and can greatly
-//! improve performance when compared to regular dynamic dispatch:
+//! improve performance when compared to the regular dynamic dispatch way of doing things:
 //!
 //! ```
 //! use bort::{Entity, storage};
+//! # struct Pos(glam::Vec3);
+//! # struct Vel(glam::Vec3);
 //!
-//! fn process_players(players: impl Iterator<Item = Entity>) {
+//! fn process_players(players: impl IntoIterator<Item = Entity>) {
 //!     let positions = storage::<Pos>();
 //!     let velocities = storage::<Vel>();
 //!
@@ -518,10 +544,13 @@ thread_local! {
 ///
 /// ```
 /// use bort::{Entity, storage};
+/// # struct Pos(glam::Vec3);
+/// # struct Vel(glam::Vec3);
 ///
-/// fn process_players(players: impl Iterator<Item = Entity>) {
+/// fn process_players(players: impl IntoIterator<Item = Entity>) {
 ///     let positions = storage::<Pos>();
 ///     let velocities = storage::<Vel>();
+///
 ///     for player in players {
 ///         positions.get_mut(player).0 += velocities.get(player).0;
 ///     }
@@ -567,10 +596,13 @@ type StorageSlot<T> = RefCell<Option<T>>;
 ///
 /// ```
 /// use bort::{Entity, storage};
+/// # struct Pos(glam::Vec3);
+/// # struct Vel(glam::Vec3);
 ///
-/// fn process_players(players: impl Iterator<Item = Entity>) {
+/// fn process_players(players: impl IntoIterator<Item = Entity>) {
 ///     let positions = storage::<Pos>();
 ///     let velocities = storage::<Vel>();
+///
 ///     for player in players {
 ///         positions.get_mut(player).0 += velocities.get(player).0;
 ///     }
@@ -762,6 +794,9 @@ impl Entity {
         }
 
         let me = Self(ID_GEN.with(|v| {
+            // N.B. `xorshift`, like all other well-constructed LSFRs, produces a full cycle of non-zero
+            // values before repeating itself. Thus, this is an effective way to generate random but
+            // unique IDs without using additional storage.
             let state = xorshift64(v.get());
             v.set(state);
             state
