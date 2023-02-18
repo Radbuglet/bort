@@ -1,11 +1,10 @@
-//! # Bort
-//!
-//! A Simple Object Model for Rust
+//! Bort implements a simple object model for Rust that aims to be convenient, intuitive, and fast.
 //!
 //! ```
-//! use bort::Entity;
+//! use bort::{Entity, OwnedEntity};
 //! use glam::Vec3;
 //!
+//! // Define a bunch of components as plain old Rust structs.
 //! #[derive(Debug, Copy, Clone)]
 //! struct Pos(Vec3);
 //!
@@ -25,23 +24,32 @@
 //!
 //! impl PlayerState {
 //!     fn update(&mut self, me: Entity) {
-//!         me.get_mut::<Pos>().0 += me.get::<Vel>().0;
+//!         let mut pos = me.get_mut::<Pos>();
+//!         pos.0 += me.get::<Vel>().0;
+//!
+//!         if pos.0.y < 0.0 {
+//!             // Take void damage.
+//!             self.hp -= 1;
+//!         }
 //!     }
 //! }
 //!
-//! let player = Entity::new()
+//! // Spawn entities to contain those components.
+//! let player = OwnedEntity::new()
 //!     .with(Pos(Vec3::ZERO))
 //!     .with(Vel(Vec3::ZERO))
 //!     .with(PlayerState {
 //!         hp: 100,
 //!     });
 //!
-//! let chaser = Entity::new()
+//! let chaser = OwnedEntity::new()
 //!     .with(Pos(Vec3::ZERO))
 //!     .with(ChaserAi { target: Some(player.entity()), home: Vec3::ZERO });
 //!
+//! // Fetch the `PlayerState` component from the entity and update its state.
 //! player.get_mut::<PlayerState>().update(player.entity());
 //!
+//! // Process the "chaser" monster's AI.
 //! let pos = &mut *chaser.get_mut::<Pos>();
 //! let state = chaser.get::<ChaserAi>();
 //!
@@ -57,28 +65,28 @@
 //! logical objects in your application. They can represent anything from a player character in a
 //! game to a UI widget.
 //!
-//! To create one, just call [`Entity::new()`].
+//! To create one, just call [`OwnedEntity::new()`].
 //!
 //! ```
-//! use bort::Entity;
+//! use bort::OwnedEntity;
 //!
-//! let player = Entity::new();
+//! let player = OwnedEntity::new();
 //! ```
 //!
 //! From there, you can add components to it using either [`insert`](Entity::insert) or [`with`](Entity::with):
 //!
 //! ```
-//! # use bort::Entity;
+//! # use bort::OwnedEntity;
 //! # use glam::Vec3;
 //! # struct Pos(Vec3);
 //! # struct Vel(Vec3);
-//! # let player = Entity::new();
+//! # let player = OwnedEntity::new();
 //! #
 //! player.insert(Pos(Vec3::ZERO));
 //! player.insert(Vel(Vec3::ZERO));
 //!
 //! // ...which is equivalent to:
-//! let player = Entity::new()
+//! let player = OwnedEntity::new()
 //!     .with(Pos(Vec3::ZERO))
 //!     .with(Vel(Vec3::ZERO));
 //! ```
@@ -86,11 +94,11 @@
 //! ...and access them using [`get`](Entity::get) or [`get_mut`](Entity::get_mut):
 //!
 //! ```
-//! # use bort::Entity;
+//! # use bort::OwnedEntity;
 //! # use glam::Vec3;
 //! # struct Pos(Vec3);
 //! # struct Vel(Vec3);
-//! # let player = Entity::new().with(Pos(Vec3::ZERO)).with(Vel(Vec3::ZERO));
+//! # let player = OwnedEntity::new().with(Pos(Vec3::ZERO)).with(Vel(Vec3::ZERO));
 //! #
 //! let mut pos = player.get_mut::<Pos>();  // These are `RefMut`s
 //! let vel = player.get::<Vel>();          // ...and `Ref`s.
@@ -98,17 +106,20 @@
 //! pos.0 += vel.0;
 //! ```
 //!
-//! Note that `Entity::new()` doesn't actually return an `Entity`, but rather an [`OwnedEntity`].
-//! These expose the exact same interface as an `Entity` but have an additional `Drop` handler
-//! (making them non-`Copy`) that automatically [`Entity::destroy`](Entity::destroy)s their managed
-//! entity when they leave the scope.
+//! You might be wonder about the difference between an [`OwnedEntity`] and an [`Entity`]. While an
+//! `Entity` is just a wrapper around a [`NonZeroU64`] identifier for an entity and can thus be freely
+//! copied around, an `OwnedEntity` augments that "dumb" handle with the notion of ownership.
+//!
+//! `OwnedEntities` expose the exact same interface as an `Entity` but have an additional `Drop`
+//! handler (making them non-`Copy`) that automatically [`Entity::destroy()`]s themselves when they
+//! leave the scope.
 //!
 //! You can extract an `Entity` from them using [`OwnedEntity::entity(&self)`](OwnedEntity::entity).
 //!
 //! ```
 //! use bort::{Entity, OwnedEntity};
 //!
-//! let player: OwnedEntity = Entity::new();
+//! let player = OwnedEntity::new();
 //!
 //! let player2 = player;  // (transfers ownership of `OwnedEntity`)
 //! // player.insert("hello!");
@@ -120,13 +131,13 @@
 //! assert_eq!(player_ref, player_ref_2);
 //! assert!(player_ref.is_alive());
 //!
-//! drop(player2);  // (dropped `OwnedEntity`; `player_xx` are all dead now)
+//! drop(player2);  // (dropped `OwnedEntity`; `player_ref_xx` are all dead now)
 //!
 //! assert!(!player_ref.is_alive());
 //! ```
 //!
 //! Using these `Entity` handles, you can freely reference you object in multiple places without
-//! dealing with cloning smart pointers.
+//! dealing smart pointers or leaky reference cycles.
 //!
 //! ```
 //! use bort::{Entity, OwnedEntity};
@@ -158,7 +169,7 @@
 //!     }
 //! }
 //!
-//! let (player, player_ref) = Entity::new()
+//! let (player, player_ref) = OwnedEntity::new()
 //!     .with(Name("foo".to_string()))
 //!     .split_guard();  // Splits the `OwnedEntity` into a tuple of `(OwnedEntity, Entity)`.
 //!
@@ -184,9 +195,9 @@
 //! anyways:
 //!
 //! ```should_panic
-//! use bort::Entity;
+//! use bort::OwnedEntity;
 //!
-//! let foo = Entity::new()
+//! let foo = OwnedEntity::new()
 //!     .with(vec![3i32]);
 //!
 //! let vec1 = foo.get::<Vec<i32>>();  // Ok
@@ -777,10 +788,6 @@ static DEBUG_ENTITY_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub struct Entity(NonZeroU64);
 
 impl Entity {
-    pub fn new() -> OwnedEntity {
-        OwnedEntity::new()
-    }
-
     pub fn new_unmanaged() -> Self {
         // Increment the total entity counter
         DEBUG_ENTITY_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -1005,20 +1012,97 @@ impl Drop for OwnedEntity {
 // === Debug utilities === //
 
 pub mod debug {
+    //! Debug helpers exposing various runtime statistics and mechanisms for assigning and querying
+    //! entity debug labels.
+
     use super::*;
 
+    /// Returns the number of entities currently alive on this thread.
+    ///
+    /// ```
+    /// use bort::debug::alive_entity_count;
+    ///
+    /// let count = alive_entity_count();
+    ///
+    /// if count > 0 {
+    ///     println!(
+    ///         "Leaked {} {} before program exit.",
+    ///         count,
+    ///         if count == 1 { "entity" } else { "entities" },
+    ///     );
+    /// } else {
+    ///     println!("No entities remaining!");
+    /// }
+    /// ```
+    ///
     pub fn alive_entity_count() -> usize {
         ALIVE.with(|slots| slots.borrow().len())
     }
 
+    /// Returns the list of all currently alive entities on this thread. This can be somewhat expensive
+    /// if you have a lot of entities in your application and should, as its classification implies,
+    /// only be used for debug purposes.
+    ///
+    /// ```
+    /// use bort::debug::alive_entities;
+    ///
+    /// println!("The following entities are currently alive:");
+    ///
+    /// for entity in alive_entities() {
+    ///     println!("- {entity:?}");
+    /// }
+    /// ```
+    ///
+    /// If you just need the total number of entities alive at a given time, you can use [`alive_entity_count`],
+    /// which is much cheaper.
+    ///
     pub fn alive_entities() -> Vec<Entity> {
         ALIVE.with(|slots| slots.borrow().keys().copied().collect())
     }
 
+    /// Returns the total number of entities to have ever been spawned anywhere in this application.
     pub fn spawned_entity_count() -> u64 {
         DEBUG_ENTITY_COUNTER.load(Ordering::Relaxed)
     }
 
+    /// The component [`Entity::with_debug_label`] uses to record the provided debug label.
+    ///
+    /// These can be constructed from any object implementing [`AsDebugLabel`] (e.g. `&'static str`,
+    /// `fmt::Arguments`) using its [`From`] conversion.
+    ///
+    /// Manually accessing a `DebugLabel` can allow you to reflect the entity's debug label at runtime:
+    ///
+    /// ```
+    /// use bort::{OwnedEntity, debug::DebugLabel};
+    ///
+    /// let my_entity = OwnedEntity::new()
+    /// 	.with_debug_label("my entity 1");
+    ///
+    /// if cfg!(debug_assertions) {
+    ///     assert_eq!(&my_entity.get::<DebugLabel>().0, "my entity 1");
+    /// } else {
+    ///     // Recall that `with_debug_label` only attaches the debug label in
+    ///     // debug builds.
+    ///     assert!(!my_entity.has::<DebugLabel>());
+    /// }
+    /// ```
+    ///
+    /// Just remember that [`with_debug_label()`](Entity::with_debug_label) only attaches debug labels
+    /// to entities in debug builds with `debug_assertions` turned on.
+    ///
+    /// If you wish to attach a debug label unconditionally, you can add it to the entity as if it
+    /// were any other component:
+    ///
+    /// ```
+    /// use bort::{OwnedEntity, debug::DebugLabel};
+    ///
+    /// let my_entity = OwnedEntity::new()
+    /// 	.with(DebugLabel::from("my entity 1"));
+    ///
+    /// // This always works, even in release mode!
+    /// assert_eq!(&my_entity.get::<DebugLabel>().0, "my entity 1");
+    /// ```
+    ///
     #[derive(Debug, Clone)]
     pub struct DebugLabel(pub Cow<'static, str>);
 
@@ -1028,7 +1112,72 @@ pub mod debug {
         }
     }
 
+    /// A trait implemented for anything that can be used as a debug label.
+    ///
+    /// More specifically, this trait is implemented for any string-like object that can be lazily
+    /// converted into a `Cow<'static, str>`—that is, anything that can produce either a `'static`
+    /// string slice or a dynamically created `String` instance.
+    ///
+    /// Objects implementing this trait should avoid performing any allocations unless [`AsDebugLabel::reify`]
+    /// is called.
+    ///
+    /// To obtain a "reified" version of the label you can store, use the [`AsDebugLabel::reify`]
+    /// associated function:
+    ///
+    /// ```
+    /// use bort::debug::AsDebugLabel;
+    /// # fn do_something_with_name<T>(_: T) {}
+    ///
+    /// fn set_the_name(label: impl AsDebugLabel) {
+    ///     if cfg!(debug_assertions) {
+    ///         // `AsDebugLabel::reify` turns it into a `Cow<'static, str>`.
+    ///         // Also note that this is an associated function—not a method—hence this calling
+    ///         // convention.
+    ///         do_something_with_name(AsDebugLabel::reify(label));
+    ///     } else {
+    ///         // (do nothing)
+    ///         // Ideally, nothing should have been allocated in the creation of `label` if this
+    ///         // branch is taken.
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// There are three main implementations of this trait provided by this crate:
+    ///
+    /// - `&'static str`, which corresponds to string literals and other strings embedded into the
+    ///   binary.
+    /// - [`fmt::Arguments`], which corresponds to lazily allocated format strings created by the
+    ///   standard library's [`format_args!`] macro. Unlike `Strings`, these only allocate on the
+    ///   heap if [`AsDebugLabel::reify(me: Self)`](AsDebugLabel::reify) is called.
+    /// - `String`, which correspond to strings allocated at runtime on the heap. These should be
+    ///   avoided in practice because, even if [`AsDebugLabel::reify(me: Self)`](AsDebugLabel::reify) is never called,
+    ///   the allocation required to create them will still take place.
+    ///
+    /// There is also an identity conversion from `Cow<'static, str>`.
+    ///
+    /// Usually, only the first two are used in practice. The rest are niche and there usually isn't
+    /// a good reason to use them:
+    ///
+    /// ```
+    /// use bort::debug::AsDebugLabel;
+    /// # fn set_the_name(label: impl AsDebugLabel) { }
+    ///
+    /// set_the_name("just a string literal");
+    /// set_the_name(format_args!("just a string created at {:?}", std::time::Instant::now()));
+    /// ```
+    ///
     pub trait AsDebugLabel {
+        /// Lazily produces a `Cow<'static, str>` that can be stored as an object's debug label.
+        ///
+        /// This is defined as an *associated function* instead of a method and must therefore be
+        /// called as `AsDebugLabel::reify(target)`.
+        ///
+        /// ```
+        /// use bort::debug::AsDebugLabel;
+        ///
+        /// let reified = AsDebugLabel::reify("foo");
+        /// ```
+        ///
         fn reify(me: Self) -> Cow<'static, str>;
     }
 
@@ -1051,6 +1200,12 @@ pub mod debug {
             } else {
                 Cow::Owned(me.to_string())
             }
+        }
+    }
+
+    impl AsDebugLabel for Cow<'static, str> {
+        fn reify(me: Self) -> Cow<'static, str> {
+            me
         }
     }
 }

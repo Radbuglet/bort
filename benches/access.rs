@@ -1,7 +1,7 @@
 use std::time::Duration;
 
+use bort::{storage, OwnedEntity};
 use criterion::{criterion_main, Criterion};
-use bort::{storage, Entity};
 
 fn access_tests() {
     let mut c = Criterion::default()
@@ -10,7 +10,7 @@ fn access_tests() {
         .configure_from_args();
 
     c.bench_function("entity.get", |c| {
-        let entity = Entity::new().with(3i32);
+        let entity = OwnedEntity::new().with(3i32);
 
         c.iter(|| {
             drop(entity.get::<i32>());
@@ -20,7 +20,7 @@ fn access_tests() {
     c.bench_function("storage.get", |c| {
         let storage = storage::<i32>();
 
-        let entity = Entity::new().with(3i32);
+        let entity = OwnedEntity::new().with(3i32);
 
         c.iter(|| {
             drop(storage.get(entity.entity()));
@@ -30,7 +30,7 @@ fn access_tests() {
     c.bench_function("storage.try_get.unwrap", |c| {
         let storage = storage::<i32>();
 
-        let entity = Entity::new().with(3i32);
+        let entity = OwnedEntity::new().with(3i32);
 
         c.iter(|| {
             drop(storage.try_get(entity.entity()).unwrap());
@@ -39,7 +39,7 @@ fn access_tests() {
 
     c.bench_function("storage.has", |c| {
         let storage = storage::<i32>();
-        let entity = Entity::new().with(3i32);
+        let entity = OwnedEntity::new().with(3i32);
 
         c.iter(|| {
             storage.has(entity.entity());
