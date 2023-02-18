@@ -503,6 +503,10 @@ pub type CompRef<T> = Ref<'static, T>;
 /// all referents will expire before the owning entity will*.
 pub type CompMut<T> = RefMut<'static, T>;
 
+thread_local! {
+    static STORAGES: RefCell<FxHashMap<TypeId, &'static dyn Any>> = Default::default();
+}
+
 /// Fetches a [`Storage`] instance for the given component type `T`, which can be used to optimize
 /// tight loops fetching many entity components.
 ///
@@ -527,10 +531,6 @@ pub type CompMut<T> = RefMut<'static, T>;
 /// This is a short alias to [`Storage::<T>::acquire()`].
 ///
 pub fn storage<T: 'static>() -> &'static Storage<T> {
-    thread_local! {
-        static STORAGES: RefCell<FxHashMap<TypeId, &'static dyn Any>> = Default::default();
-    }
-
     STORAGES.with(|db| {
         db.borrow_mut()
             .entry(TypeId::of::<T>())
@@ -609,7 +609,7 @@ impl<T: 'static> Storage<T> {
             let mut slots = slots.borrow_mut();
             let slot = slots.get_mut(&entity).unwrap_or_else(|| {
                 panic!(
-                    "attempted to attach a component of type {} to the dead {:?}.",
+                    "attempted to attach a component of type {} to the dead or cross-thread {:?}.",
                     type_name::<T>(),
                     entity
                 )
@@ -664,7 +664,7 @@ impl<T: 'static> Storage<T> {
             // Only if the component is missing will we issue the standard error.
             assert!(
                 entity.is_alive(),
-                "attempted to remove a component of type {} from the already fully-dead {:?}",
+                "attempted to remove a component of type {} from the already fully-dead or cross-thread {:?}",
                 type_name::<T>(),
                 entity,
             );
@@ -825,10 +825,12 @@ impl Entity {
 
     pub fn destroy(self) {
         ALIVE.with(|slots| {
-            let comp_list = slots
-                .borrow_mut()
-                .remove(&self)
-                .unwrap_or_else(|| panic!("attempted to destroy the already-dead {:?}.", self));
+            let comp_list = slots.borrow_mut().remove(&self).unwrap_or_else(|| {
+                panic!(
+                    "attempted to destroy the already-dead or cross-threaded {:?}.",
+                    self
+                )
+            });
 
             comp_list.run_dtors(self);
         });
@@ -846,23 +848,31 @@ impl fmt::Debug for Entity {
         }
 
         ALIVE.with(|alive| {
-            let mut builder = f.debug_tuple("Entity");
-
-            if let Some(label) = self.try_get::<DebugLabel>() {
-                builder.field(&label);
-            }
+            #[derive(Debug)]
+            struct Id(NonZeroU64);
 
             if let Some(comp_list) = alive.borrow().get(self).copied() {
+                let mut builder = f.debug_tuple("Entity");
+
+                if let Some(label) = self.try_get::<DebugLabel>() {
+                    builder.field(&label);
+                }
+
+                builder.field(&Id(self.0));
+
                 for v in comp_list.comps.iter() {
                     if v.id != TypeId::of::<DebugLabel>() {
                         builder.field(&StrLit(v.name));
                     }
                 }
-            } else {
-                builder.field(&StrLit("<DEAD>"));
-            }
 
-            builder.finish()
+                builder.finish()
+            } else {
+                f.debug_tuple("Entity")
+                    .field(&"<DEAD OR CROSS-THREAD>")
+                    .field(&Id(self.0))
+                    .finish()
+            }
         })
     }
 }
