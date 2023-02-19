@@ -1066,11 +1066,16 @@ static DEBUG_ENTITY_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// entity without the specified component.
 ///
 /// ```
-/// #[derive(Debug)]
+/// use bort::OwnedEntity;
+/// use glam::Vec3;
+///
+/// #[derive(Debug, PartialEq)]
 /// struct Pos(Vec3);
 ///
-/// #[derive(Debug)]
+/// #[derive(Debug, PartialEq)]
 /// struct Vel(Vec3);
+///
+/// let (player, player_ref) = OwnedEntity::new().split_guard();
 ///
 /// player_ref.insert(Pos(Vec3::new(-1.3, -0.45, 4.76)));
 /// player_ref.insert(Pos(Vec3::ZERO));  // ^ Overwrites the previous assignment.
@@ -1105,7 +1110,7 @@ static DEBUG_ENTITY_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// // the variable.
 /// let mut pos = player.get_mut::<Pos>();
 ///
-/// *pos.0 += Vec3::Y;
+/// pos.0 += Vec3::Y;
 ///
 /// assert_eq!(pos.0, Vec3::new(0.0, 1.0, 0.0));
 /// ```
@@ -1116,11 +1121,13 @@ static DEBUG_ENTITY_COUNTER: AtomicU64 = AtomicU64::new(0);
 ///
 /// ```
 /// # use glam::Vec3;
+/// # #[derive(Debug, PartialEq)]
 /// # struct Pos(Vec3);
-/// # let (player, player_ref) = bort::OwnedEntity::new().with(Pos(Vec3::ZERO)).split_guard();
+/// # struct Vel(Vec3);
+/// # let (player, player_ref) = bort::OwnedEntity::new().with(Pos(Vec3::Y)).split_guard();
 ///
 /// // This component exists...
-/// assert_eq!(player_ref.try_get::<Pos>().as_deref(), Some(&Vec3::new(0.0, 1.0, 0.0)));
+/// assert_eq!(player_ref.try_get::<Pos>().as_deref(), Some(&Pos(Vec3::new(0.0, 1.0, 0.0))));
 ///
 /// // This component does not...
 /// assert!(player_ref.try_get_mut::<Vel>().is_none());
