@@ -647,6 +647,29 @@ impl<T: 'static> Storage<T> {
         storage()
     }
 
+    /// Inserts the provided component `value` onto the specified `entity`.
+    ///
+    /// If the entity did not have this component before, `None` is returned.
+    ///
+    /// If the entity did have this component, the component is updated and the old component value
+    /// is returned.
+    ///
+    /// ```
+    /// use bort::{storage, OwnedEntity};
+    ///
+    /// let (my_entity, my_entity_ref) = OwnedEntity::new().split_guard();
+    /// let storage = storage::<u32>();
+    ///
+    /// assert_eq!(storage.insert(my_entity_ref, 0), None);
+    /// assert_eq!(storage.insert(my_entity_ref, 1), Some(0));
+    /// assert_eq!(storage.insert(my_entity_ref, 2), Some(1));
+    /// ```
+    ///
+    /// This method will panic if `entity` is not alive. Use [`Entity::is_alive`] to check the
+    /// liveness state.
+    ///
+    /// See [`Entity::insert`] for a short version of this method that fetches the appropriate storage
+    /// automatically.
     pub fn insert(&self, entity: Entity, value: T) -> Option<T> {
         ALIVE.with(|slots| {
             let mut slots = slots.borrow_mut();
@@ -688,6 +711,28 @@ impl<T: 'static> Storage<T> {
         slot.borrow_mut().replace(value)
     }
 
+    /// Removes the component of type `T` from the specified `entity`, returning the component value
+    /// if the entity previously had it.
+    ///
+    /// ```
+    /// use bort::{storage, OwnedEntity};
+    ///
+    /// let (my_entity, my_entity_ref) = OwnedEntity::new().split_guard();
+    /// let storage = storage::<u32>();
+    ///
+    /// assert_eq!(storage.remove(my_entity_ref), None);
+    /// storage.insert(my_entity_ref, 0);
+    /// assert_eq!(storage.remove(my_entity_ref), Some(0));
+    /// assert_eq!(storage.remove(my_entity_ref), None);
+    /// ```
+    ///
+    /// This method will panic if the `entity` is dead and the component is missing. If the entity
+    /// is actively being destroyed but the component is still attached to the entity (a scenario
+    /// which could occur in the `Drop` handler of an entity component), this method will remove the
+    /// component normally.
+    ///
+    /// See [`Entity::remove`] for a short version of this method that fetches the appropriate storage
+    /// automatically.
     pub fn remove(&self, entity: Entity) -> Option<T> {
         if let Some(removed) = self.remove_untracked(entity) {
             // Modify the component list or fail silently if the entity lacks the component.
@@ -748,28 +793,169 @@ impl<T: 'static> Storage<T> {
             .unwrap_or_else(|| get_slot_failed::<T>(entity))
     }
 
+    /// Attempts to fetch and immutably borrow the component belonging to the specified `entity`,
+    /// returning a [`CompRef`] on success.
+    ///
+    /// Returns `None` if the entity is either missing the component or dead.
+    ///
+    /// Panics if the component is already borrowed mutably.
+    ///
+    /// ```
+    /// use bort::{storage, OwnedEntity};
+    ///
+    /// let (my_entity, my_entity_ref) = OwnedEntity::new().split_guard();
+    /// let storage = storage::<u32>();
+    ///
+    /// assert_eq!(storage.try_get(my_entity_ref).as_deref(), None);
+    /// storage.insert(my_entity_ref, 0);
+    /// assert_eq!(storage.try_get(my_entity_ref).as_deref(), Some(&0));
+    ///
+    /// // Destroy the entity
+    /// drop(my_entity);
+    ///
+    /// // The dangling reference resolves to `None`
+    /// assert_eq!(storage.try_get(my_entity_ref).as_deref(), None);
+    /// ```
+    ///
+    /// If the entity is actively being destroyed but the component is still attached to the entity
+    /// (a scenario which could occur in the `Drop` handler of an entity component), this method will
+    /// fetch and borrow the component normally.
+    ///
+    /// If the returned [`CompRef`] remains alive while the entity is being destroyed, the entity
+    /// destructor will panic.
+    ///
+    /// See [`Entity::try_get`] for a short version of this method that fetches the appropriate
+    /// storage automatically.
     #[inline(always)]
     pub fn try_get(&self, entity: Entity) -> Option<CompRef<T>> {
         self.try_get_slot(entity)
             .map(|slot| Ref::map(slot.borrow(), |v| v.as_ref().unwrap()))
     }
 
+    /// Attempts to fetch and mutably borrow the component belonging to the specified `entity`,
+    /// returning a [`CompMut`] on success.
+    ///
+    /// Returns `None` if the entity is either missing the component or dead.
+    ///
+    /// Panics if the component is already borrowed either mutably or immutably.
+    ///
+    /// ```
+    /// use bort::{storage, OwnedEntity};
+    ///
+    /// let (my_entity, my_entity_ref) = OwnedEntity::new().split_guard();
+    /// let storage = storage::<u32>();
+    ///
+    /// assert_eq!(storage.try_get_mut(my_entity_ref).as_deref(), None);
+    /// storage.insert(my_entity_ref, 0);
+    /// assert_eq!(storage.try_get_mut(my_entity_ref).as_deref(), Some(&0));
+    ///
+    /// // Destroy the entity
+    /// drop(my_entity);
+    ///
+    /// // The dangling reference resolves to `None`
+    /// assert_eq!(storage.try_get_mut(my_entity_ref).as_deref(), None);
+    /// ```
+    ///
+    /// If the entity is actively being destroyed but the component is still attached to the entity
+    /// (a scenario which could occur in the `Drop` handler of an entity component), this method will
+    /// fetch and borrow the component normally.
+    ///
+    /// If the returned [`CompMut`] remains alive while the entity is being destroyed, the entity
+    /// destructor will panic.
+    ///
+    /// See [`Entity::try_get_mut`] for a short version of this method that fetches the appropriate
+    /// storage automatically.
     #[inline(always)]
     pub fn try_get_mut(&self, entity: Entity) -> Option<CompMut<T>> {
         self.try_get_slot(entity)
             .map(|slot| RefMut::map(slot.borrow_mut(), |v| v.as_mut().unwrap()))
     }
 
+    /// Fetches and immutably borrow the component belonging to the specified `entity`, returning a
+    /// [`CompRef`].
+    ///
+    /// Panics if the entity is either missing the component or dead. This method will also panic if
+    /// the component is already borrowed mutably.
+    ///
+    /// ```
+    /// use bort::{storage, OwnedEntity};
+    ///
+    /// let my_entity = OwnedEntity::new();
+    /// let storage = storage::<u32>();
+    ///
+    /// storage.insert(my_entity.entity(), 0);
+    /// assert_eq!(&*storage.get(my_entity.entity()), &0);
+    /// ```
+    ///
+    /// If the entity is actively being destroyed but the component is still attached to the entity
+    /// (a scenario which could occur in the `Drop` handler of an entity component), this method will
+    /// fetch and borrow the component normally.
+    ///
+    /// If the returned [`CompRef`] remains alive while the entity is being destroyed, the entity
+    /// destructor will panic.
+    ///
+    /// See [`Entity::get`] for a short version of this method that fetches the appropriate
+    /// storage automatically.
     #[inline(always)]
     pub fn get(&self, entity: Entity) -> CompRef<T> {
         Ref::map(self.get_slot(entity).borrow(), |v| v.as_ref().unwrap())
     }
 
+    /// Fetches and mutably borrow the component belonging to the specified `entity`, returning a
+    /// [`CompMut`].
+    ///
+    /// Panics if the entity is either missing the component or dead. This method will also panic if
+    /// the component is already borrowed either mutably or immutably.
+    ///
+    /// ```
+    /// use bort::{storage, OwnedEntity};
+    ///
+    /// let (my_entity, my_entity_ref) = OwnedEntity::new().split_guard();
+    /// let storage = storage::<u32>();
+    ///
+    /// storage.insert(my_entity_ref, 0);
+    ///
+    /// let mut value = storage.get_mut(my_entity_ref);
+    /// assert_eq!(&*value, &0);
+    /// *value = 1;
+    /// assert_eq!(&*value, &1);
+    /// ```
+    ///
+    /// If the entity is actively being destroyed but the component is still attached to the entity
+    /// (a scenario which could occur in the `Drop` handler of an entity component), this method will
+    /// fetch and borrow the component normally.
+    ///
+    /// If the returned [`CompMut`] remains alive while the entity is being destroyed, the entity
+    /// destructor will panic.
+    ///
+    /// See [`Entity::get_mut`] for a short version of this method that fetches the appropriate
+    /// storage automatically.
     #[inline(always)]
     pub fn get_mut(&self, entity: Entity) -> CompMut<T> {
         RefMut::map(self.get_slot(entity).borrow_mut(), |v| v.as_mut().unwrap())
     }
 
+    /// Returns whether the specified `entity` has a component of this type.
+    ///
+    /// Returns `false` if the entity is already dead.
+    ///
+    /// ```
+    /// use bort::{storage, OwnedEntity};
+    ///
+    /// let (my_entity, my_entity_ref) = OwnedEntity::new().split_guard();
+    /// let storage = storage::<u32>();
+    ///
+    /// assert!(!storage.has(my_entity_ref));
+    /// storage.insert(my_entity_ref, 0);
+    /// assert!(storage.has(my_entity_ref));
+    ///
+    /// // Destroy the entity
+    /// drop(my_entity);
+    ///
+    /// // The dangling check resolves `false`.
+    /// assert!(!storage.has(my_entity_ref));
+    /// ```
+    ///
     #[inline(always)]
     pub fn has(&self, entity: Entity) -> bool {
         self.try_get_slot(entity).is_some()
@@ -1076,7 +1262,7 @@ pub mod debug {
     /// use bort::{OwnedEntity, debug::DebugLabel};
     ///
     /// let my_entity = OwnedEntity::new()
-    /// 	.with_debug_label("my entity 1");
+    ///     .with_debug_label("my entity 1");
     ///
     /// if cfg!(debug_assertions) {
     ///     assert_eq!(&my_entity.get::<DebugLabel>().0, "my entity 1");
@@ -1097,7 +1283,7 @@ pub mod debug {
     /// use bort::{OwnedEntity, debug::DebugLabel};
     ///
     /// let my_entity = OwnedEntity::new()
-    /// 	.with(DebugLabel::from("my entity 1"));
+    ///     .with(DebugLabel::from("my entity 1"));
     ///
     /// // This always works, even in release mode!
     /// assert_eq!(&my_entity.get::<DebugLabel>().0, "my entity 1");

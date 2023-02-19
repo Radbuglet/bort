@@ -8,6 +8,7 @@ Bort implements a simple object model for Rust that aims to be convenient, intui
 use bort::{Entity, OwnedEntity};
 use glam::Vec3;
 
+// Define a bunch of components as plain old Rust structs.
 #[derive(Debug, Copy, Clone)]
 struct Pos(Vec3);
 
@@ -27,10 +28,17 @@ struct PlayerState {
 
 impl PlayerState {
     fn update(&mut self, me: Entity) {
-        me.get_mut::<Pos>().0 += me.get::<Vel>().0;
+        let mut pos = me.get_mut::<Pos>();
+        pos.0 += me.get::<Vel>().0;
+
+        if pos.0.y < 0.0 {
+            // Take void damage.
+            self.hp -= 1;
+        }
     }
 }
 
+// Spawn entities to contain those components.
 let player = OwnedEntity::new()
     .with(Pos(Vec3::ZERO))
     .with(Vel(Vec3::ZERO))
@@ -42,8 +50,10 @@ let chaser = OwnedEntity::new()
     .with(Pos(Vec3::ZERO))
     .with(ChaserAi { target: Some(player.entity()), home: Vec3::ZERO });
 
+// Fetch the `PlayerState` component from the entity and update its state.
 player.get_mut::<PlayerState>().update(player.entity());
 
+// Process the "chaser" monster's AI.
 let pos = &mut *chaser.get_mut::<Pos>();
 let state = chaser.get::<ChaserAi>();
 
@@ -91,6 +101,7 @@ pos.0 += vel.0;
 You might be wonder about the difference between an [`OwnedEntity`] and an [`Entity`]. While an
 `Entity` is just a wrapper around a [`NonZeroU64`] identifier for an entity and can thus be freely
 copied around, an `OwnedEntity` augments that "dumb" handle with the notion of ownership.
+
 `OwnedEntities` expose the exact same interface as an `Entity` but have an additional `Drop`
 handler (making them non-`Copy`) that automatically [`Entity::destroy()`]s themselves when they
 leave the scope.
@@ -118,7 +129,7 @@ assert!(!player_ref.is_alive());
 ```
 
 Using these `Entity` handles, you can freely reference you object in multiple places without
-dealing with cloning smart pointers.
+dealing smart pointers or leaky reference cycles.
 
 ```rust
 use bort::{Entity, OwnedEntity};
@@ -176,7 +187,7 @@ from violating "mutable xor immutable" rules for a given component, doing so wil
 anyways:
 
 ```rust
-use bort::Entity;
+use bort::OwnedEntity;
 
 let foo = OwnedEntity::new()
     .with(vec![3i32]);
