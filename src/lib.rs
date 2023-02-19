@@ -970,6 +970,254 @@ thread_local! {
 
 static DEBUG_ENTITY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// An entity represents a [`Copy`]able reference single logical object (e.g. a player, a zombie, a
+/// UI widget, etc) containing an arbitrary number of typed components.
+///
+/// Internally, the definition of an `Entity` is just:
+///
+/// ```
+/// # use std::num::NonZeroU64;
+/// #
+/// #[derive(Copy, Clone, Hash, Eq, PartialEq)]
+/// struct Entity(NonZeroU64);
+/// ```
+///
+/// ...so these are as cheap as pointers on 64-bit machines to copy around.
+///
+/// ## Spawning
+///
+/// Entities are usually spawned as their managed [`OwnedEntity`] counterpart, which is a simple
+/// wrapper around a real `Entity` instance which destroys the entity on `Drop`. An actual `Entity`
+/// handle can be extracted from it using the [`OwnedEntity::entity()`] method.
+///
+/// ```
+/// use bort::OwnedEntity;
+///
+/// let player = OwnedEntity::new();
+/// let player_ref = player.entity();  // <-- This is an `Entity`
+/// ```
+///
+/// Every method available on `Entity` is also available on `OwnedEntity`.
+///
+/// You can also create an unmanaged `Entity` instance directly using [`Entity::new_unmanaged()`] or
+/// by calling [`OwnedEntity::unmanage`] on an `OwnedEntity`. These, however, are quite dangerous
+/// because, even if you remain vigilant about [`Entity::destroy()`]ing entities at the end of their
+/// lifetime, a panic could still force the stack to unwind before then, potentially leaking the
+/// entity.
+///
+/// ```
+/// use std::panic::catch_unwind;
+/// use bort::{Entity, debug::alive_entity_count};
+///
+/// assert_eq!(alive_entity_count(), 0);
+///
+/// catch_unwind(|| {
+///     let player = Entity::new_unmanaged();
+///
+///     fn uses_entity(entity: Entity) {
+///         panic!("Oh no, I panicked!");
+///     }
+///
+///     uses_entity(player);
+///
+///     // This method call is never reached.
+///     // So much for vigilance!
+///     player.destroy();
+/// });
+///
+/// // Oh no, we leaked the player entity!
+/// assert_eq!(alive_entity_count(), 1);
+/// ```
+///
+/// Oftentimes, it is much more appropriate to spawn an `OwnedEntity` and extract a working `Entity`
+/// instance from it like so:
+///
+/// ```
+/// use std::panic::catch_unwind;
+/// use bort::{OwnedEntity, Entity, debug::alive_entity_count};
+///
+/// assert_eq!(alive_entity_count(), 0);
+///
+/// catch_unwind(|| {
+///     let (player, player_ref) = OwnedEntity::new().split_guard();
+///
+///     fn uses_entity(entity: Entity) {
+///         panic!("Oh no, I panicked!");
+///     }
+///
+///     fn spawn_entity_in_world(entity: OwnedEntity) {
+///         // Additionally, entity ownership is now much clearer!
+///     }
+///
+///     uses_entity(player_ref);
+///     spawn_entity_in_world(player);
+/// });
+///
+/// // Good news, nothing was leaked!
+/// assert_eq!(alive_entity_count(), 0);
+/// ```
+///
+/// ## Component Management
+///
+/// Components can be added to and removed from entities using the [`Entity::insert()`] and
+/// [`Entity::remove()`] methods. Like [`HashMap::insert()`](std::collections::HashMap::insert) and
+/// [`HashMap::remove()`](std::collections::HashMap::remove), `Entity::insert()` will overwrite
+/// instances and return the old value and `Entity::remove()` will silently ignore operations on an
+/// entity without the specified component.
+///
+/// ```
+/// #[derive(Debug)]
+/// struct Pos(Vec3);
+///
+/// #[derive(Debug)]
+/// struct Vel(Vec3);
+///
+/// player_ref.insert(Pos(Vec3::new(-1.3, -0.45, 4.76)));
+/// player_ref.insert(Pos(Vec3::ZERO));  // ^ Overwrites the previous assignment.
+/// player_ref.insert(Vel(-Vec3::Y));
+///
+/// assert_eq!(player_ref.remove::<Vel>(), Some(Vel(-Vec3::Y)));
+/// assert_eq!(player_ref.remove::<Vel>(), None);  // ^ The component was already removed.
+/// ```
+///
+/// References to components can be acquired using [`Entity::get()`] and [`Entity::get_mut()`]. These
+/// methods return [`CompRef`]s and [`CompMut`]s, which are just fancy type aliases around
+/// [`std::cell::Ref`] and [`std::cell::RefMut`].
+///
+/// ```
+/// # use glam::Vec3;
+/// # struct Pos(Vec3);
+/// # let (player, player_ref) = bort::OwnedEntity::new().with(Pos(Vec3::ZERO)).split_guard();
+///
+/// // Fetch an immutable reference to the position.
+/// let pos = player.get::<Pos>();
+///
+/// assert_eq!(pos.0, Vec3::ZERO);
+///
+/// // Fetch a mutable reference to the position.
+///
+/// // Because borrows are checked using `Ref` guards, we need to drop the reference before we can
+/// // mutably borrow the same component mutably, lest we panic!
+/// drop(pos);
+///
+/// // To access the `DerefMut` method of a `RefMut`—as is done implicitly when we access attempt to
+/// // mutate the interior vector—we need to provide a `&mut` reference, hence the `mut` qualifier on
+/// // the variable.
+/// let mut pos = player.get_mut::<Pos>();
+///
+/// *pos.0 += Vec3::Y;
+///
+/// assert_eq!(pos.0, Vec3::new(0.0, 1.0, 0.0));
+/// ```
+///
+/// We can also fallibly acquire a component using [`Entity::try_get()`] and [`Entity::try_get_mut()`].
+/// Instead of panicking if the entity is dead or the component is missing, these variants will simply
+/// return `None`. These methods will still panic on runtime borrow violations, however.
+///
+/// ```
+/// # use glam::Vec3;
+/// # struct Pos(Vec3);
+/// # let (player, player_ref) = bort::OwnedEntity::new().with(Pos(Vec3::ZERO)).split_guard();
+///
+/// // This component exists...
+/// assert_eq!(player_ref.try_get::<Pos>().as_deref(), Some(&Vec3::new(0.0, 1.0, 0.0)));
+///
+/// // This component does not...
+/// assert!(player_ref.try_get_mut::<Vel>().is_none());
+///
+/// // And now that we destroy the player...
+/// drop(player);  // Recall: `player` is the `OwnedEntity` guard managing the instance's lifetime.
+///
+/// // It's gone!
+/// assert!(player_ref.try_get::<Pos>().is_none());
+/// ```
+///
+/// Finally, we can also check whether an entity has a component without borrowing it using [`Entity::has`].
+/// The same liveness semantics as [`Entity::try_get()`] apply here as well.
+///
+/// ```
+/// # use bort::OwnedEntity;
+/// # use glam::Vec3;
+/// # struct Pos(Vec3);
+/// # struct Vel(Vec3);
+/// let (player, player_ref) = OwnedEntity::new().split_guard();
+///
+/// player.insert(Pos(Vec3::ZERO));
+/// player.insert(Vel(Vec3::ZERO));
+///
+/// assert!(player.has::<Pos>());
+/// assert!(player.has::<Vel>());
+///
+/// player.remove::<Vel>();
+///
+/// assert!(!player.has::<Vel>());
+///
+/// drop(player);
+///
+/// assert!(!player_ref.has::<Pos>());
+/// ```
+///
+/// ## Construction
+///
+/// In general, `Entity::with_xx` methods are *builder* methods. That is, they are designed to be
+/// chained in an expression to build up an entity.
+///
+/// The [`Entity::with_debug_label`] method allows you to attach a [`DebugLabel`] to the entity in
+/// builds with `debug_assertions` enabled.
+///
+/// ```
+/// use bort::{OwnedEntity, debug::DebugLabel};
+///
+/// let player = OwnedEntity::new()
+///     .with_debug_label("my player :)");
+///
+/// if cfg!(debug_assertions) {
+///     assert_eq!(&player.get::<DebugLabel>().0, "my player :)");
+/// } else {
+///     assert!(!player.has::<DebugLabel>());
+/// }
+/// ```
+///
+/// The [`Entity::with`] method allows you to attach any component to the entity. Like [`Entity::insert`],
+/// this will overwrite existing component instances.
+///
+/// ```
+/// # use bort::OwnedEntity;
+/// # use glam::Vec3;
+/// # struct Pos(Vec3);
+/// # struct Vel(Vec3);
+///
+/// let player = OwnedEntity::new()
+///     .with(Pos(Vec3::new(-1.3, -0.45, 4.76)))
+///     .with(Vel(Vec3::ZERO))
+///     .with(Pos(Vec3::ZERO));
+/// ```
+///
+/// Finally, you can succinctly construct self-referential structures using [`Entity::with_self_referential`].
+///
+/// ```
+/// # use bort::{OwnedEntity, Entity};
+///
+/// struct MyStruct {
+///     me: Entity,
+/// }
+///
+/// let player = OwnedEntity::new()
+///     .with_self_referential(|me| MyStruct { me });
+/// ```
+///
+/// ## Lifetime
+///
+/// TODO
+///
+/// ## Threading
+///
+/// TODO
+///
+/// ## Performance
+///
+/// TODO
+///
 #[derive(Copy, Clone, Hash, Eq, PartialEq)]
 pub struct Entity(NonZeroU64);
 
@@ -1180,6 +1428,10 @@ impl OwnedEntity {
 
     pub fn is_alive(&self) -> bool {
         self.0.is_alive()
+    }
+
+    pub fn destroy(self) {
+        drop(self);
     }
 }
 
