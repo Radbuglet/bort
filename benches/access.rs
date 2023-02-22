@@ -23,7 +23,7 @@ fn access_tests() {
         let entity = OwnedEntity::new().with(3i32);
 
         c.iter(|| {
-            drop(storage.get(entity.entity()));
+            drop(storage.get(&entity));
         });
     });
 
@@ -33,7 +33,7 @@ fn access_tests() {
         let entity = OwnedEntity::new().with(3i32);
 
         c.iter(|| {
-            drop(storage.try_get(entity.entity()).unwrap());
+            drop(storage.try_get(&entity).unwrap());
         });
     });
 
