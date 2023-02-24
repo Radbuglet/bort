@@ -180,7 +180,7 @@ Features not discussed in this introductory section include:
 - Additional entity builder methods such as [`Entity::with_debug_label()`] and [`Entity::with_self_referential`]
 - Debug utilities to [query entity statistics](debug)
 
-#### A Note on Borrowing
+#### Borrowing
 
 Bort relies quite heavily on runtime borrowing. Although the type system does not prevent you
 from violating "mutable xor immutable" rules for a given component, doing so will cause a panic
@@ -222,10 +222,95 @@ fn process_players(players: impl IntoIterator<Item = Entity>) {
 }
 ```
 
-#### A Note on Threading
+If runtime borrowing is still troublesome, the pub-in-private trick can help you define a component
+that can only be borrowed from within trusted modules:
 
-Currently, Bort is entirely single-threaded. Because everything is stored in thread-local storage,
-entities spawned on one thread will likely appear dead on another and all component sets will be
-thread-specific.
+```rust
+mod voxel {
+    use bort::{OwnedEntity, Entity};
+    use std::{cell::Ref, ops::Deref};
+
+    #[derive(Default)]
+    pub struct World {
+        chunks: Vec<OwnedEntity>,
+    }
+
+    impl World {
+        pub fn spawn_chunk(&mut self) -> Entity {
+             let (chunk, chunk_ref) = OwnedEntity::new()
+                .with_debug_label("chunk")
+                .with(Chunk::default())
+                .split_guard();
+
+             self.chunks.push(chunk);
+             chunk_ref
+        }
+
+        pub fn chunk_state(&self, chunk: Entity) -> ChunkRef {
+            ChunkRef(chunk.get())
+        }
+
+        pub fn mutate_chunk(&mut self, chunk: Entity) {
+            chunk.get_mut::<Chunk>().mutated = false;
+        }
+    }
+
+    mod sealed {
+        #[derive(Default)]
+        pub struct Chunk {
+            pub(super) mutated: bool,
+        }
+    }
+
+    use sealed::Chunk;
+
+    impl Chunk {
+        pub fn do_something(&self) {
+            println!("Mutated: {}", self.mutated);
+        }
+    }
+
+    pub struct ChunkRef<'a>(Ref<'a, Chunk>);
+
+    impl Deref for ChunkRef<'_> {
+        type Target = Chunk;
+
+        fn deref(&self) -> &Chunk {
+            &self.0
+        }
+    }
+}
+
+use voxel::World;
+
+let mut world = World::default();
+let chunk = world.spawn_chunk();
+
+let chunk_ref = world.chunk_state(chunk);
+chunk_ref.do_something();
+
+// `chunk_ref` is tied to the lifetime of `world`.
+// Thus, there is no risk of accidentally leaving the guard alive.
+drop(chunk_ref);
+
+world.mutate_chunk(chunk);
+world.chunk_state(chunk).do_something();
+
+// No way to access the component directly.
+// let chunk_ref = chunk.get::<voxel::Chunk>();
+//                             ^ this is unnamable!
+```
+
+#### Threading
+
+Most globals in Bort are thread local and therefore, most entity operations will not work on other
+threads. Additionally, because Bort relies so much on allocating global memory pools for the
+duration of the program to handle component allocations, using Bort on a non-main thread and then
+destroying that thread would leak memory.
+
+Because of these two hazards, only the first thread to call into Bort will be allowed to use its
+thread-specific functionality. You can circumvent this restriction by explicitly calling
+[`theading::bless()`](threading::bless) on the additional threads on which you wish to use Bort. Just know
+that the caveats still apply.
 
 <!-- cargo-rdme end -->

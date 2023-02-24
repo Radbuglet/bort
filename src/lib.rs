@@ -188,7 +188,7 @@
 //! - Additional entity builder methods such as [`Entity::with_debug_label()`] and [`Entity::with_self_referential`]
 //! - Debug utilities to [query entity statistics](debug)
 //!
-//! ### A Note on Borrowing
+//! ### Borrowing
 //!
 //! Bort relies quite heavily on runtime borrowing. Although the type system does not prevent you
 //! from violating "mutable xor immutable" rules for a given component, doing so will cause a panic
@@ -232,14 +232,97 @@
 //! }
 //! ```
 //!
-//! ### A Note on Threading
+//! If runtime borrowing is still troublesome, the pub-in-private trick can help you define a component
+//! that can only be borrowed from within trusted modules:
 //!
-//! Currently, Bort is entirely single-threaded. Because everything is stored in thread-local storage,
-//! entities spawned on one thread will likely appear dead on another and all component sets will be
-//! thread-specific.
-
-// TODO: Stop leaking thread globals in case people want to use Bort on a non-main thread.
-
+//! ```
+//! mod voxel {
+//!     use bort::{OwnedEntity, Entity};
+//!     use std::{cell::Ref, ops::Deref};
+//!
+//!     #[derive(Default)]
+//!     pub struct World {
+//!         chunks: Vec<OwnedEntity>,
+//!     }
+//!
+//!     impl World {
+//!         pub fn spawn_chunk(&mut self) -> Entity {
+//!              let (chunk, chunk_ref) = OwnedEntity::new()
+//!                 .with_debug_label("chunk")
+//!                 .with(Chunk::default())
+//!                 .split_guard();
+//!
+//!              self.chunks.push(chunk);
+//!              chunk_ref
+//!         }
+//!
+//!         pub fn chunk_state(&self, chunk: Entity) -> ChunkRef {
+//!             ChunkRef(chunk.get())
+//!         }
+//!
+//!         pub fn mutate_chunk(&mut self, chunk: Entity) {
+//!             chunk.get_mut::<Chunk>().mutated = false;
+//!         }
+//!     }
+//!
+//!     mod sealed {
+//!         #[derive(Default)]
+//!         pub struct Chunk {
+//!             pub(super) mutated: bool,
+//!         }
+//!     }
+//!
+//!     use sealed::Chunk;
+//!
+//!     impl Chunk {
+//!         pub fn do_something(&self) {
+//!             println!("Mutated: {}", self.mutated);
+//!         }
+//!     }
+//!
+//!     pub struct ChunkRef<'a>(Ref<'a, Chunk>);
+//!
+//!     impl Deref for ChunkRef<'_> {
+//!         type Target = Chunk;
+//!
+//!         fn deref(&self) -> &Chunk {
+//!             &self.0
+//!         }
+//!     }
+//! }
+//!
+//! use voxel::World;
+//!
+//! let mut world = World::default();
+//! let chunk = world.spawn_chunk();
+//!
+//! let chunk_ref = world.chunk_state(chunk);
+//! chunk_ref.do_something();
+//!
+//! // `chunk_ref` is tied to the lifetime of `world`.
+//! // Thus, there is no risk of accidentally leaving the guard alive.
+//! drop(chunk_ref);
+//!
+//! world.mutate_chunk(chunk);
+//! world.chunk_state(chunk).do_something();
+//!
+//! // No way to access the component directly.
+//! // let chunk_ref = chunk.get::<voxel::Chunk>();
+//! //                             ^ this is unnamable!
+//! ```
+//!
+//! ### Threading
+//!
+//! Most globals in Bort are thread local and therefore, most entity operations will not work on other
+//! threads. Additionally, because Bort relies so much on allocating global memory pools for the
+//! duration of the program to handle component allocations, using Bort on a non-main thread and then
+//! destroying that thread would leak memory.
+//!
+//! Because of these two hazards, only the first thread to call into Bort will be allowed to use its
+//! thread-specific functionality. You can circumvent this restriction by explicitly calling
+//! [`theading::bless()`](threading::bless) on the additional threads on which you wish to use Bort. Just know
+//! that the caveats still apply.
+//!
 use std::{
     any::{type_name, Any, TypeId},
     borrow::{Borrow, Cow},
@@ -399,6 +482,8 @@ impl PartialEq for ComponentList {
 impl ComponentList {
     pub fn empty() -> &'static Self {
         thread_local! {
+            // N.B. we don't need `assert_blessed` here because methods on `ComponentList` are only called
+            // when liveness has been determined.
             static EMPTY: &'static ComponentList = leak(ComponentList {
                 comps: Box::new([]),
                 extensions: Default::default(),
@@ -440,9 +525,13 @@ impl ComponentList {
     // === Database === //
 
     thread_local! {
-        static COMP_LISTS: RefCell<FxHashSet<&'static ComponentList>> = RefCell::new(FxHashSet::from_iter([
-            ComponentList::empty(),
-        ]));
+        // N.B. we don't need `assert_blessed` here because methods on `ComponentList` are only called
+        // when liveness has been determined.
+        static COMP_LISTS: RefCell<FxHashSet<&'static ComponentList>> = {
+            RefCell::new(FxHashSet::from_iter([
+                ComponentList::empty(),
+            ]))
+        };
     }
 
     fn find_extension_in_db(base_set: &[ComponentType], with: ComponentType) -> &'static Self {
@@ -540,10 +629,6 @@ pub type CompRef<T> = Ref<'static, T>;
 /// all referents will expire before the owning entity will*.
 pub type CompMut<T> = RefMut<'static, T>;
 
-thread_local! {
-    static STORAGES: RefCell<FxHashMap<TypeId, &'static dyn Any>> = Default::default();
-}
-
 /// Fetches a [`Storage`] instance for the given component type `T`, which can be used to optimize
 /// tight loops fetching many entity components.
 ///
@@ -571,6 +656,13 @@ thread_local! {
 /// This is a short alias to [`Storage::<T>::acquire()`].
 ///
 pub fn storage<T: 'static>() -> &'static Storage<T> {
+    thread_local! {
+        static STORAGES: RefCell<FxHashMap<TypeId, &'static dyn Any>> = {
+            threading::assert_blessed("Accessed a storage");
+            Default::default()
+        };
+    }
+
     STORAGES.with(|db| {
         db.borrow_mut()
             .entry(TypeId::of::<T>())
@@ -965,7 +1057,10 @@ impl<T: 'static> Storage<T> {
 // === Entity === //
 
 thread_local! {
-    static ALIVE: RefCell<NopHashMap<Entity, &'static ComponentList>> = Default::default();
+    static ALIVE: RefCell<NopHashMap<Entity, &'static ComponentList>> = {
+        threading::assert_blessed("Spawned, despawned, or checked the liveness of an entity");
+        Default::default()
+    };
 }
 
 static DEBUG_ENTITY_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1217,10 +1312,6 @@ static DEBUG_ENTITY_COUNTER: AtomicU64 = AtomicU64::new(0);
 ///
 /// TODO
 ///
-/// ## Threading
-///
-/// TODO
-///
 /// ## Performance
 ///
 /// TODO
@@ -1230,11 +1321,10 @@ pub struct Entity(NonZeroU64);
 
 impl Entity {
     pub fn new_unmanaged() -> Self {
-        // Increment the total entity counter
-        DEBUG_ENTITY_COUNTER.fetch_add(1, Ordering::Relaxed);
-
         // Allocate a slot
         thread_local! {
+            // This doesn't directly leak anything so we're fine with not checking the blessed status
+            // of this value.
             static ID_GEN: Cell<NonZeroU64> = const { Cell::new(match NonZeroU64::new(1) {
                 Some(v) => v,
                 None => unreachable!(),
@@ -1251,7 +1341,14 @@ impl Entity {
         }));
 
         // Register our slot in the alive set
+        // N.B. we call `ComponentList::empty()` within the `ALIVE.with` section to ensure that blessed
+        // validation occurs before we allocate an empty component list.
         ALIVE.with(|slots| slots.borrow_mut().insert(me, ComponentList::empty()));
+
+        // Increment the total entity counter
+        // N.B. we do this once everything else has succeeded so that calls to `new_unmanaged` on
+        // un-blessed threads don't result in a phantom entity being recorded in the counter.
+        DEBUG_ENTITY_COUNTER.fetch_add(1, Ordering::Relaxed);
 
         me
     }
@@ -1652,5 +1749,57 @@ pub mod debug {
         fn reify(me: Self) -> Cow<'static, str> {
             me
         }
+    }
+}
+
+pub mod threading {
+    use std::{
+        cell::Cell,
+        sync::atomic::{AtomicBool, Ordering},
+        thread::current,
+    };
+
+    // === Blessing === //
+
+    static HAS_AUTO_BLESSED: AtomicBool = AtomicBool::new(false);
+
+    thread_local! {
+        static IS_BLESSED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub fn is_blessed() -> bool {
+        IS_BLESSED.with(Cell::get)
+    }
+
+    pub fn is_blessed_or_auto_bless() -> bool {
+        IS_BLESSED.with(|v| {
+            if !v.get()
+                // Short-circuiting makes this mutating exchange O.K.
+                && HAS_AUTO_BLESSED
+                    .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+            {
+                v.set(true)
+            }
+
+            v.get()
+        })
+    }
+
+    pub(crate) fn assert_blessed(action: &str) {
+        assert!(
+            is_blessed_or_auto_bless(),
+            "{} on the non-primary or non-`bless`ed thread {:?}. See multi-threading \
+             documentation stub in the main module docs for help.",
+            action,
+            current(),
+        );
+    }
+
+    pub fn bless() {
+        IS_BLESSED.with(|v| {
+            HAS_AUTO_BLESSED.store(true, Ordering::Relaxed);
+            v.set(true);
+        })
     }
 }
