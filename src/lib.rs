@@ -320,7 +320,7 @@
 //!
 //! Because of these two hazards, only the first thread to call into Bort will be allowed to use its
 //! thread-specific functionality. You can circumvent this restriction by explicitly calling
-//! [`theading::bless()`](threading::bless) on the additional threads on which you wish to use Bort. Just know
+//! [`threading::bless()`](threading::bless) on the additional threads on which you wish to use Bort. Just know
 //! that the caveats still apply.
 //!
 use std::{
@@ -1460,21 +1460,27 @@ impl fmt::Debug for Entity {
 // === OwnedEntity === //
 
 #[derive(Debug, Hash, Eq, PartialEq)]
-pub struct OwnedEntity(Entity);
+pub struct OwnedEntity {
+    entity: Entity,
+}
 
 impl OwnedEntity {
     // === Lifecycle === //
 
     pub fn new() -> Self {
-        Self(Entity::new_unmanaged())
+        Self::from_raw_entity(Entity::new_unmanaged())
+    }
+
+    pub fn from_raw_entity(entity: Entity) -> Self {
+        Self { entity }
     }
 
     pub fn entity(&self) -> Entity {
-        self.0
+        self.entity
     }
 
     pub fn unmanage(self) -> Entity {
-        let entity = self.0;
+        let entity = self.entity;
         mem::forget(self);
 
         entity
@@ -1488,50 +1494,50 @@ impl OwnedEntity {
     // === Forwards === //
 
     pub fn with<T: 'static>(self, comp: T) -> Self {
-        self.0.insert(comp);
+        self.entity.insert(comp);
         self
     }
 
     pub fn with_self_referential<T: 'static>(self, func: impl FnOnce(Entity) -> T) -> Self {
-        self.0.insert(func(self.entity()));
+        self.entity.insert(func(self.entity()));
         self
     }
 
     pub fn with_debug_label<L: AsDebugLabel>(self, label: L) -> Self {
-        self.0.with_debug_label(label);
+        self.entity.with_debug_label(label);
         self
     }
 
     pub fn insert<T: 'static>(&self, comp: T) -> Option<T> {
-        self.0.insert(comp)
+        self.entity.insert(comp)
     }
 
     pub fn remove<T: 'static>(&self) -> Option<T> {
-        self.0.remove()
+        self.entity.remove()
     }
 
     pub fn try_get<T: 'static>(&self) -> Option<CompRef<T>> {
-        self.0.try_get()
+        self.entity.try_get()
     }
 
     pub fn try_get_mut<T: 'static>(&self) -> Option<CompMut<T>> {
-        self.0.try_get_mut()
+        self.entity.try_get_mut()
     }
 
     pub fn get<T: 'static>(&self) -> CompRef<T> {
-        self.0.get()
+        self.entity.get()
     }
 
     pub fn get_mut<T: 'static>(&self) -> CompMut<T> {
-        self.0.get_mut()
+        self.entity.get_mut()
     }
 
     pub fn has<T: 'static>(&self) -> bool {
-        self.0.has::<T>()
+        self.entity.has::<T>()
     }
 
     pub fn is_alive(&self) -> bool {
-        self.0.is_alive()
+        self.entity.is_alive()
     }
 
     pub fn destroy(self) {
@@ -1541,13 +1547,13 @@ impl OwnedEntity {
 
 impl Borrow<Entity> for OwnedEntity {
     fn borrow(&self) -> &Entity {
-        &self.0
+        &self.entity
     }
 }
 
 impl Drop for OwnedEntity {
     fn drop(&mut self) {
-        self.0.destroy();
+        self.entity.destroy();
     }
 }
 
@@ -1752,6 +1758,8 @@ pub mod debug {
     }
 }
 
+// === Threading === /
+
 pub mod threading {
     use std::{
         cell::Cell,
@@ -1789,7 +1797,7 @@ pub mod threading {
     pub(crate) fn assert_blessed(action: &str) {
         assert!(
             is_blessed_or_auto_bless(),
-            "{} on the non-primary or non-`bless`ed thread {:?}. See multi-threading \
+            "{} on a non-primary or non-`bless`ed thread {:?}. See multi-threading \
              documentation stub in the main module docs for help.",
             action,
             current(),
