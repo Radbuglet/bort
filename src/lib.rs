@@ -603,6 +603,57 @@ impl ComponentList {
     }
 }
 
+// === Pool === //
+
+fn use_pool<T: 'static, R>(f: impl FnOnce(&mut Vec<T>) -> R) -> R {
+    thread_local! {
+        static POOLS: RefCell<FxHashMap<TypeId, Box<dyn Any>>> = {
+            threading::assert_blessed("Accessed object pools");
+            Default::default()
+        };
+    }
+
+    POOLS.with(|pools| {
+        let mut pools = pools.borrow_mut();
+        let pool = pools
+            .entry(TypeId::of::<T>())
+            .or_insert_with(|| Box::new(Vec::<T>::new()))
+            .downcast_mut::<Vec<T>>()
+            .unwrap();
+
+        f(pool)
+    })
+}
+
+type Block<T> = &'static [BlockElement<T>];
+
+type BlockElement<T> = RefCell<Option<T>>;
+
+fn alloc_block<T: 'static>() -> Block<T> {
+    const fn block_elem_size<T>() -> usize {
+        // TODO: make this adaptive
+        128
+    }
+
+    use_pool::<Block<T>, _>(|pool| {
+        if let Some(block) = pool.pop() {
+            block
+        } else {
+            Box::leak(
+                iter::repeat_with(|| RefCell::new(None))
+                    .take(block_elem_size::<T>())
+                    .collect::<Box<[BlockElement<T>]>>(),
+            )
+        }
+    })
+}
+
+fn release_block<T: 'static>(block: Block<T>) {
+    use_pool::<Block<T>, _>(|pool| {
+        pool.push(block);
+    });
+}
+
 // === Storage === //
 
 /// The type of an immutable reference to a component. These are essentially [`Ref`]s from the
@@ -719,8 +770,14 @@ pub struct Storage<T: 'static>(RefCell<StorageInner<T>>);
 
 #[derive(Debug)]
 struct StorageInner<T: 'static> {
-    free_slots: Vec<&'static StorageSlot<T>>,
-    mappings: NopHashMap<Entity, &'static StorageSlot<T>>,
+    free_slots: Vec<&'static BlockElement<T>>,
+    mappings: NopHashMap<Entity, EntityStorageMapping<T>>,
+}
+
+#[derive(Debug)]
+struct EntityStorageMapping<T: 'static> {
+    comp: &'static BlockElement<T>,
+    is_external: bool,
 }
 
 impl<T: 'static> Storage<T> {
@@ -776,27 +833,33 @@ impl<T: 'static> Storage<T> {
             *slot = slot.extend(ComponentType::of::<T>());
         });
 
-        self.insert_untracked(entity, value)
+        self.insert_untracked(entity, value, None)
     }
 
-    fn insert_untracked(&self, entity: Entity, value: T) -> Option<T> {
+    fn insert_untracked(
+        &self,
+        entity: Entity,
+        value: T,
+        external_comp: Option<&'static BlockElement<T>>,
+    ) -> Option<T> {
         let me = &mut *self.0.borrow_mut();
 
         let slot = match me.mappings.entry(entity) {
-            hashbrown::hash_map::Entry::Occupied(entry) => entry.get(),
+            hashbrown::hash_map::Entry::Occupied(entry) => entry.get().comp,
             hashbrown::hash_map::Entry::Vacant(entry) => {
-                if me.free_slots.is_empty() {
-                    let block = iter::repeat_with(StorageSlot::default)
-                        .take(block_elem_size::<T>())
-                        .collect::<Vec<_>>()
-                        .leak();
+                let comp = external_comp.unwrap_or_else(|| {
+                    if me.free_slots.is_empty() {
+                        me.free_slots.extend(alloc_block::<T>().iter());
+                    }
 
-                    me.free_slots.extend(block.iter());
-                }
+                    me.free_slots.pop().unwrap()
+                });
 
-                let slot = me.free_slots.pop().unwrap();
-                entry.insert(slot);
-                slot
+                entry.insert(EntityStorageMapping {
+                    comp,
+                    is_external: external_comp.is_some(),
+                });
+                comp
             }
         };
 
@@ -856,8 +919,11 @@ impl<T: 'static> Storage<T> {
         let mut me = self.0.borrow_mut();
 
         if let Some(slot) = me.mappings.remove(&entity) {
-            let taken = slot.borrow_mut().take();
-            me.free_slots.push(slot);
+            let taken = slot.comp.borrow_mut().take();
+
+            if !slot.is_external {
+                me.free_slots.push(slot.comp);
+            }
             taken
         } else {
             None
@@ -865,12 +931,12 @@ impl<T: 'static> Storage<T> {
     }
 
     #[inline(always)]
-    fn try_get_slot(&self, entity: Entity) -> Option<&'static StorageSlot<T>> {
-        self.0.borrow().mappings.get(&entity).copied()
+    fn try_get_slot(&self, entity: Entity) -> Option<&'static BlockElement<T>> {
+        self.0.borrow().mappings.get(&entity).map(|slot| slot.comp)
     }
 
     #[inline(always)]
-    fn get_slot(&self, entity: Entity) -> &'static StorageSlot<T> {
+    fn get_slot(&self, entity: Entity) -> &'static BlockElement<T> {
         #[cold]
         #[inline(never)]
         fn get_slot_failed<T: 'static>(entity: Entity) -> ! {
