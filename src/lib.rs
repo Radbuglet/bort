@@ -603,7 +603,37 @@ impl ComponentList {
     }
 }
 
-// === Pool === //
+// === Random ID Generator === //
+
+fn random_uid() -> NonZeroU64 {
+    thread_local! {
+        // This doesn't directly leak anything so we're fine with not checking the blessed status
+        // of this value.
+        static ID_GEN: Cell<NonZeroU64> = const { Cell::new(match NonZeroU64::new(1) {
+            Some(v) => v,
+            None => unreachable!(),
+        }) };
+    }
+
+    ID_GEN.with(|v| {
+        // N.B. `xorshift`, like all other well-constructed LSFRs, produces a full cycle of non-zero
+        // values before repeating itself. Thus, this is an effective way to generate random but
+        // unique IDs without using additional storage.
+        let state = xorshift64(v.get());
+        v.set(state);
+        state
+    })
+}
+
+// === Block allocator === //
+
+type Block<T> = &'static [BlockItem<T>];
+
+type BlockItem<T> = RefCell<Option<T>>;
+
+// The size of the block in elements. Unfortunately, this cannot be made adaptive because of the way
+// in which archetypes rely on fixed size blocks.
+const BLOCK_SIZE: usize = 128;
 
 fn use_pool<T: 'static, R>(f: impl FnOnce(&mut Vec<T>) -> R) -> R {
     thread_local! {
@@ -625,24 +655,15 @@ fn use_pool<T: 'static, R>(f: impl FnOnce(&mut Vec<T>) -> R) -> R {
     })
 }
 
-type Block<T> = &'static [BlockElement<T>];
-
-type BlockElement<T> = RefCell<Option<T>>;
-
 fn alloc_block<T: 'static>() -> Block<T> {
-    const fn block_elem_size<T>() -> usize {
-        // TODO: make this adaptive
-        128
-    }
-
     use_pool::<Block<T>, _>(|pool| {
         if let Some(block) = pool.pop() {
             block
         } else {
             Box::leak(
                 iter::repeat_with(|| RefCell::new(None))
-                    .take(block_elem_size::<T>())
-                    .collect::<Box<[BlockElement<T>]>>(),
+                    .take(BLOCK_SIZE)
+                    .collect::<Box<[BlockItem<T>]>>(),
             )
         }
     })
@@ -728,13 +749,6 @@ pub fn storage<T: 'static>() -> &'static Storage<T> {
     })
 }
 
-const fn block_elem_size<T>() -> usize {
-    // TODO: make this adaptive
-    128
-}
-
-type StorageSlot<T> = RefCell<Option<T>>;
-
 /// Storages are glorified maps from entity IDs to components of type `T` with some extra bookkeeping
 /// that provide the backbone for [`Entity::get()`] and [`Entity::get_mut()`] queries. Fetching
 /// components from a storage explicitly can optimize component accesses in a tight loop.
@@ -770,13 +784,13 @@ pub struct Storage<T: 'static>(RefCell<StorageInner<T>>);
 
 #[derive(Debug)]
 struct StorageInner<T: 'static> {
-    free_slots: Vec<&'static BlockElement<T>>,
+    free_slots: Vec<&'static BlockItem<T>>,
     mappings: NopHashMap<Entity, EntityStorageMapping<T>>,
 }
 
 #[derive(Debug)]
 struct EntityStorageMapping<T: 'static> {
-    comp: &'static BlockElement<T>,
+    comp: &'static BlockItem<T>,
     is_external: bool,
 }
 
@@ -840,7 +854,7 @@ impl<T: 'static> Storage<T> {
         &self,
         entity: Entity,
         value: T,
-        external_comp: Option<&'static BlockElement<T>>,
+        external_comp: Option<&'static BlockItem<T>>,
     ) -> Option<T> {
         let me = &mut *self.0.borrow_mut();
 
@@ -931,12 +945,12 @@ impl<T: 'static> Storage<T> {
     }
 
     #[inline(always)]
-    fn try_get_slot(&self, entity: Entity) -> Option<&'static BlockElement<T>> {
+    fn try_get_slot(&self, entity: Entity) -> Option<&'static BlockItem<T>> {
         self.0.borrow().mappings.get(&entity).map(|slot| slot.comp)
     }
 
     #[inline(always)]
-    fn get_slot(&self, entity: Entity) -> &'static BlockElement<T> {
+    fn get_slot(&self, entity: Entity) -> &'static BlockItem<T> {
         #[cold]
         #[inline(never)]
         fn get_slot_failed<T: 'static>(entity: Entity) -> ! {
@@ -1118,6 +1132,113 @@ impl<T: 'static> Storage<T> {
     pub fn has(&self, entity: Entity) -> bool {
         self.try_get_slot(entity).is_some()
     }
+}
+
+// === Archetype === //
+
+thread_local! {
+    static ARCHETYPES: RefCell<NopHashMap<Archetype, ArchetypeInner>> = {
+        threading::assert_blessed("Created an archetype");
+        Default::default()
+    };
+}
+
+#[derive(Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
+pub struct Archetype(NonZeroU64);
+
+impl Archetype {
+    pub fn new() -> Self {
+        Self(random_uid())
+    }
+
+    pub fn entity_count(self) -> usize {
+        ARCHETYPES.with(|archetypes| {
+            let archetypes = archetypes.borrow();
+
+            match archetypes.get(&self) {
+                Some(state) => state.entity_count,
+                None => 0,
+            }
+        })
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.entity_count() == 0
+    }
+
+    fn with_state<F, R>(self, f: F) -> R
+    where
+        F: FnOnce(&mut ArchetypeInner) -> R,
+    {
+        ARCHETYPES.with(|archetypes| {
+            let mut archetypes = archetypes.borrow_mut();
+
+            let state = archetypes
+                .entry(self)
+                .or_insert_with(ArchetypeInner::default);
+
+            let res = f(state);
+
+            if state.entity_count == 0 {
+                archetypes.remove(&self);
+            }
+
+            res
+        })
+    }
+
+    fn reserve(self) -> usize {
+        self.with_state(|state| {
+            let my_loc = if let Some(&block) = state.open_blocks.last() {
+                // Take an existing block and allocate a new bit inside it
+                let mask = &mut state.block_masks[block];
+                let zeros_in_front = mask.trailing_zeros();
+                *mask |= 1 << zeros_in_front;
+
+                // Unmark the block as open if all the slots have become occupied
+                if *mask == u128::MAX {
+                    state.open_blocks.pop();
+                }
+
+                // Construct an index for this slot
+                block * BLOCK_SIZE + zeros_in_front as usize
+            } else {
+                // Create a new block and allocate the least significant slot for ourselves
+                let block = state.block_masks.len();
+                state.block_masks.push(1);
+                block * BLOCK_SIZE + 0
+            };
+
+            state.entity_count += 1;
+            my_loc
+        })
+    }
+
+    fn unreserve(self, target: usize) {
+        self.with_state(|state| {
+            let block = target / BLOCK_SIZE;
+            let mask = &mut state.block_masks[block];
+
+            // Mark the block as open if it used to not be free
+            if *mask == u128::MAX {
+                state.open_blocks.push(block);
+            }
+
+            // Unset the bit
+            *mask ^= 1 << (target % BLOCK_SIZE);
+
+            // Decrement the entity count
+            state.entity_count -= 1;
+        });
+    }
+}
+
+#[derive(Default)]
+struct ArchetypeInner {
+    runs: FxHashMap<TypeId, Vec<Option<&'static dyn Any>>>,
+    block_masks: Vec<u128>,
+    open_blocks: Vec<usize>,
+    entity_count: usize,
 }
 
 // === Entity === //
@@ -1382,29 +1503,13 @@ static DEBUG_ENTITY_COUNTER: AtomicU64 = AtomicU64::new(0);
 ///
 /// TODO
 ///
-#[derive(Copy, Clone, Hash, Eq, PartialEq)]
+#[derive(Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Entity(NonZeroU64);
 
 impl Entity {
     pub fn new_unmanaged() -> Self {
         // Allocate a slot
-        thread_local! {
-            // This doesn't directly leak anything so we're fine with not checking the blessed status
-            // of this value.
-            static ID_GEN: Cell<NonZeroU64> = const { Cell::new(match NonZeroU64::new(1) {
-                Some(v) => v,
-                None => unreachable!(),
-            }) };
-        }
-
-        let me = Self(ID_GEN.with(|v| {
-            // N.B. `xorshift`, like all other well-constructed LSFRs, produces a full cycle of non-zero
-            // values before repeating itself. Thus, this is an effective way to generate random but
-            // unique IDs without using additional storage.
-            let state = xorshift64(v.get());
-            v.set(state);
-            state
-        }));
+        let me = Self(random_uid());
 
         // Register our slot in the alive set
         // N.B. we call `ComponentList::empty()` within the `ALIVE.with` section to ensure that blessed
@@ -1525,7 +1630,7 @@ impl fmt::Debug for Entity {
 
 // === OwnedEntity === //
 
-#[derive(Debug, Hash, Eq, PartialEq)]
+#[derive(Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct OwnedEntity {
     entity: Entity,
 }
