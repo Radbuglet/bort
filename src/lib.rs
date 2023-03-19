@@ -412,6 +412,30 @@ fn xorshift64(state: NonZeroU64) -> NonZeroU64 {
     NonZeroU64::new(state).unwrap()
 }
 
+fn get_vec_slot<T>(target: &mut Vec<T>, index: usize, fill: impl FnMut() -> T) -> &mut T {
+    let min_len = index + 1;
+
+    if target.len() < min_len {
+        target.resize_with(min_len, fill);
+    }
+
+    &mut target[index]
+}
+
+fn set_none_and_shrink<T>(target: &mut Vec<Option<T>>, index: usize) -> Option<T> {
+    let removed = target[index].take();
+
+    while target.last().filter(|slot| slot.is_none()).is_some() {
+        target.pop();
+    }
+
+    if target.len() < target.capacity() / 2 {
+        target.shrink_to_fit();
+    }
+
+    removed
+}
+
 // === ComponentList === //
 
 #[derive(Copy, Clone)]
@@ -810,8 +834,9 @@ impl<T: 'static> Storage<T> {
     }
 
     pub fn insert_and_return_slot(&self, entity: Entity, value: T) -> (CompSlot<T>, Option<T>) {
-        // Ensure that the entity is alive and extend the component list.
-        ALIVE.with(|slots| {
+        // Ensure that the entity is alive and extend the component list. Also, fetch the entity's
+        // archetype.
+        let arch = ALIVE.with(|slots| {
             let mut slots = slots.borrow_mut();
             let slot = slots.get_mut(&entity).unwrap_or_else(|| {
                 panic!(
@@ -821,7 +846,8 @@ impl<T: 'static> Storage<T> {
                 )
             });
 
-            *slot = slot.extend(ComponentType::of::<T>());
+            slot.components = slot.components.extend(ComponentType::of::<T>());
+            slot.archetype
         });
 
         // Update the storage
@@ -830,18 +856,41 @@ impl<T: 'static> Storage<T> {
         let slot = match me.mappings.entry(entity) {
             hashbrown::hash_map::Entry::Occupied(entry) => entry.get().slot,
             hashbrown::hash_map::Entry::Vacant(entry) => {
-                let slot = {
-                    if me.free_slots.is_empty() {
-                        me.free_slots.extend(alloc_block::<T>().iter());
-                    }
+                // Try to fetch the slot from the archetype
+                let slot = 'a: {
+                    let Some((arch, slot)) = arch else {
+						break 'a None;
+					};
 
-                    me.free_slots.pop().unwrap()
+                    let arch = arch.borrow();
+
+                    let Some(arch) = arch.as_ref().unwrap().value.runs.get(&TypeId::of::<T>()) else {
+						break 'a None;
+					};
+
+                    Some(
+                        &arch[slot / COMP_BLOCK_SIZE]
+                            .unwrap()
+                            .downcast_ref::<CompBlockPointee<T>>()
+                            .unwrap()[slot % COMP_BLOCK_SIZE],
+                    )
                 };
 
-                entry.insert(EntityStorageMapping {
-                    slot,
-                    is_external: false,
-                });
+                // ...otherwise, allocate the slot in the storage directly.
+                let (slot, is_external) = match slot {
+                    Some(external_slot) => (external_slot, true),
+                    None => {
+                        if me.free_slots.is_empty() {
+                            me.free_slots.extend(alloc_block::<T>().iter());
+                        }
+
+                        let slot = me.free_slots.pop().unwrap();
+
+                        (slot, false)
+                    }
+                };
+
+                entry.insert(EntityStorageMapping { slot, is_external });
                 slot
             }
         };
@@ -909,7 +958,7 @@ impl<T: 'static> Storage<T> {
                 let mut slots = slots.borrow_mut();
                 let Some(slot) = slots.get_mut(&entity) else { return };
 
-                *slot = slot.de_extend(ComponentType::of::<T>());
+                slot.components = slot.components.de_extend(ComponentType::of::<T>());
             });
 
             Some(removed)
@@ -1139,10 +1188,15 @@ impl<T: 'static> Storage<T> {
 static DEBUG_ENTITY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
-    static ALIVE: RefCell<NopHashMap<Entity, &'static ComponentList>> = {
+    static ALIVE: RefCell<NopHashMap<Entity, EntitySlot>> = {
         threading::assert_blessed("Spawned, despawned, or checked the liveness of an entity");
         Default::default()
     };
+}
+
+struct EntitySlot {
+    components: &'static ComponentList,
+    archetype: Option<(ThinArchetype, usize)>,
 }
 
 /// An entity represents a [`Copy`]able reference single logical object (e.g. a player, a zombie, a
@@ -1401,13 +1455,31 @@ pub struct Entity(NonZeroU64);
 
 impl Entity {
     pub fn new_unmanaged() -> Self {
+        Self::new_unmanaged_in_arch(None)
+    }
+
+    pub fn new_unmanaged_in_arch(archetype: Option<Archetype>) -> Self {
         // Allocate a slot
         let me = Self(random_uid());
+
+        // If an archetype is specified, allocate a spot in it.
+        let archetype = archetype.map(|archetype| {
+            let slot = archetype.0.get_mut().allocate_slot(me);
+            (archetype.0.slot(), slot)
+        });
 
         // Register our slot in the alive set
         // N.B. we call `ComponentList::empty()` within the `ALIVE.with` section to ensure that blessed
         // validation occurs before we allocate an empty component list.
-        ALIVE.with(|slots| slots.borrow_mut().insert(me, ComponentList::empty()));
+        ALIVE.with(|slots| {
+            slots.borrow_mut().insert(
+                me,
+                EntitySlot {
+                    components: ComponentList::empty(),
+                    archetype,
+                },
+            )
+        });
 
         // Increment the total entity counter
         // N.B. we do this once everything else has succeeded so that calls to `new_unmanaged` on
@@ -1481,14 +1553,25 @@ impl Entity {
 
     pub fn destroy(self) {
         ALIVE.with(|slots| {
-            let comp_list = slots.borrow_mut().remove(&self).unwrap_or_else(|| {
+            // Remove the slot
+            let slot = slots.borrow_mut().remove(&self).unwrap_or_else(|| {
                 panic!(
                     "attempted to destroy the already-dead or cross-threaded {:?}.",
                     self
                 )
             });
 
-            comp_list.run_dtors(self);
+            // Run the component destructors
+            slot.components.run_dtors(self);
+
+            // Remove the object from its owning archetype if necessary
+            if let Some((arch, slot)) = slot.archetype {
+                arch.borrow_mut()
+                    .as_mut()
+                    .unwrap()
+                    .value
+                    .deallocate_slot(slot);
+            }
         });
     }
 }
@@ -1507,7 +1590,7 @@ impl fmt::Debug for Entity {
             #[derive(Debug)]
             struct Id(NonZeroU64);
 
-            if let Some(comp_list) = alive.borrow().get(self).copied() {
+            if let Some(EntitySlot { components, .. }) = alive.borrow().get(self) {
                 let mut builder = f.debug_tuple("Entity");
 
                 if let Some(label) = self.try_get::<DebugLabel>() {
@@ -1516,7 +1599,7 @@ impl fmt::Debug for Entity {
 
                 builder.field(&Id(self.0));
 
-                for v in comp_list.comps.iter() {
+                for v in components.comps.iter() {
                     if v.id != TypeId::of::<DebugLabel>() {
                         builder.field(&StrLit(v.name));
                     }
@@ -1544,7 +1627,11 @@ impl OwnedEntity {
     // === Lifecycle === //
 
     pub fn new() -> Self {
-        Self::from_raw_entity(Entity::new_unmanaged())
+        Self::new_in_arch(None)
+    }
+
+    pub fn new_in_arch(archetype: Option<Archetype>) -> Self {
+        Self::from_raw_entity(Entity::new_unmanaged_in_arch(archetype))
     }
 
     pub fn from_raw_entity(entity: Entity) -> Self {
@@ -1926,26 +2013,28 @@ impl<T: 'static> Borrow<Entity> for OwnedObj<T> {
 
 // === Archetype === //
 
+#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
+pub struct Archetype(Obj<ArchetypeState>);
+
+type ThinArchetype = ObjPointeeSlot<ArchetypeState>;
+
 #[derive(Debug)]
 struct ArchetypeState {
     entity_count: usize,
     entities: Vec<Option<Entity>>,
-    block_occupied_masks: Vec<u128>,
+    block_occupy_masks: Vec<u128>,
     open_block_indices: Vec<usize>,
-    blocks: FxHashMap<TypeId, Vec<&'static dyn Any>>,
+    runs: FxHashMap<TypeId, Vec<Option<&'static dyn Any>>>,
 }
-
-#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
-pub struct Archetype(Obj<ArchetypeState>);
 
 impl Archetype {
     pub fn new_unmanaged(comps: impl IntoIterator<Item = TypeId>) -> Self {
         Self(Obj::new_unmanaged(ArchetypeState {
             entity_count: 0,
             entities: Vec::new(),
-            block_occupied_masks: Vec::new(),
+            block_occupy_masks: Vec::new(),
             open_block_indices: Vec::new(),
-            blocks: comps.into_iter().map(|id| (id, Vec::new())).collect(),
+            runs: comps.into_iter().map(|id| (id, Vec::new())).collect(),
         }))
     }
 
@@ -1966,23 +2055,92 @@ impl Archetype {
     }
 
     pub fn component_run<T: 'static>(self) -> Option<ArchetypeRun<T>> {
-        CompRef::filter_map(self.0.get(), |me| me.blocks.get(&TypeId::of::<T>()))
+        CompRef::filter_map(self.0.get(), |me| me.runs.get(&TypeId::of::<T>()))
             .ok()
-            .map(|blocks| ArchetypeRun {
+            .map(|run| ArchetypeRun {
                 _ty: PhantomData,
-                blocks,
+                run,
             })
+    }
+}
+
+impl ArchetypeState {
+    fn allocate_slot(&mut self, entity: Entity) -> usize {
+        // Find an appropriate slot
+        let slot = if let Some(&block) = self.open_block_indices.last() {
+            // Find the smallest unoccupied slot in the block
+            let block_state = &mut self.block_occupy_masks[block];
+            let lowest_unset = block_state.trailing_ones();
+
+            // Set its bit
+            *block_state |= 1 << lowest_unset;
+
+            // Remove it from the open block list if needed
+            if *block_state == u128::MAX {
+                self.open_block_indices.pop();
+            }
+
+            // Construct an entity index to that slot
+            block * COMP_BLOCK_SIZE + lowest_unset as usize
+        } else {
+            let block = self.block_occupy_masks.len();
+            self.block_occupy_masks.push(0);
+
+            block * COMP_BLOCK_SIZE + 0
+        };
+
+        // Register the entity
+        *get_vec_slot(&mut self.entities, slot, || None) = Some(entity);
+
+        // Increment the entity count
+        self.entity_count += 1;
+
+        slot
+    }
+
+    fn deallocate_slot(&mut self, slot: usize) {
+        // Find the appropriate block
+        let block = slot / COMP_BLOCK_SIZE;
+        let bit_index = slot % COMP_BLOCK_SIZE;
+        let block_state = &mut self.block_occupy_masks[block];
+
+        // If we're about to remove an entity from a full block, add it to the now-open block list
+        if *block_state == u128::MAX {
+            self.open_block_indices.push(block);
+        }
+
+        // Unset the appropriate bit
+        *block_state &= !(1 << bit_index);
+
+        // Set the entity slot to none
+        set_none_and_shrink(&mut self.entities, slot);
+
+        // If this block is now empty, release its allocations.
+        if *block_state == 0 {
+            for (&comp_id, run_blocks) in &mut self.runs {
+                let Some(run_block) = run_blocks.get_mut(block) else {
+					continue;
+				};
+
+                let Some(run_block) = run_block.take() else {
+					continue
+				};
+
+                release_blocks_untyped(comp_id, [run_block]);
+            }
+        }
     }
 }
 
 pub struct ArchetypeRun<T: 'static> {
     _ty: PhantomData<fn(T) -> T>,
-    blocks: CompRef<Vec<&'static dyn Any>>,
+    run: CompRef<Vec<Option<&'static dyn Any>>>,
 }
 
 impl<T: 'static> ArchetypeRun<T> {
     pub fn slot(&self, index: usize) -> CompSlot<T> {
-        &self.blocks[index / COMP_BLOCK_SIZE]
+        &self.run[index / COMP_BLOCK_SIZE]
+            .unwrap()
             .downcast_ref::<CompBlockPointee<T>>()
             .unwrap()[index % COMP_BLOCK_SIZE]
     }
