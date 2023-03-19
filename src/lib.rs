@@ -327,7 +327,9 @@ use std::{
     any::{type_name, Any, TypeId},
     borrow::{Borrow, Cow},
     cell::{Cell, Ref, RefCell, RefMut},
-    fmt, hash, iter, mem,
+    fmt, hash, iter,
+    marker::PhantomData,
+    mem,
     num::NonZeroU64,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -627,17 +629,20 @@ fn random_uid() -> NonZeroU64 {
 
 // === Block allocator === //
 
-type Block<T> = &'static [BlockItem<T>];
-
-type BlockItem<T> = RefCell<Option<T>>;
-
 // The size of the block in elements. Unfortunately, this cannot be made adaptive because of the way
-// in which archetypes rely on fixed size blocks.
-const BLOCK_SIZE: usize = 128;
+// in which archetypes rely on fixed size blocks. At least we save some memory from making pointers
+// to these thin and simplify the process of unsizing these slices.
+const COMP_BLOCK_SIZE: usize = 128;
 
-fn use_pool<T: 'static, R>(f: impl FnOnce(&mut Vec<T>) -> R) -> R {
+type CompBlock<T> = &'static CompBlockPointee<T>;
+
+type CompBlockPointee<T> = [CompSlotPointee<T>; COMP_BLOCK_SIZE];
+
+type CompSlotPointee<T> = RefCell<Option<T>>;
+
+fn use_pool<R>(id: TypeId, f: impl FnOnce(&mut Vec<&'static dyn Any>) -> R) -> R {
     thread_local! {
-        static POOLS: RefCell<FxHashMap<TypeId, Box<dyn Any>>> = {
+        static POOLS: RefCell<FxHashMap<TypeId, Vec<&'static dyn Any>>> = {
             threading::assert_blessed("Accessed object pools");
             Default::default()
         };
@@ -645,39 +650,31 @@ fn use_pool<T: 'static, R>(f: impl FnOnce(&mut Vec<T>) -> R) -> R {
 
     POOLS.with(|pools| {
         let mut pools = pools.borrow_mut();
-        let pool = pools
-            .entry(TypeId::of::<T>())
-            .or_insert_with(|| Box::new(Vec::<T>::new()))
-            .downcast_mut::<Vec<T>>()
-            .unwrap();
-
+        let pool = pools.entry(id).or_insert_with(Vec::new);
         f(pool)
     })
 }
 
-fn alloc_block<T: 'static>() -> Block<T> {
-    use_pool::<Block<T>, _>(|pool| {
+fn alloc_block<T: 'static>() -> CompBlock<T> {
+    use_pool(TypeId::of::<T>(), |pool| {
         if let Some(block) = pool.pop() {
-            block
+            block.downcast_ref::<CompBlockPointee<T>>().unwrap()
         } else {
-            Box::leak(
-                iter::repeat_with(|| RefCell::new(None))
-                    .take(BLOCK_SIZE)
-                    .collect::<Box<[BlockItem<T>]>>(),
-            )
+            // TODO: Ensure that this doesn't cause stack overflows
+            leak(std::array::from_fn(|_| RefCell::new(None)))
         }
     })
 }
 
-fn release_blocks<T: 'static>(blocks: impl IntoIterator<Item = Block<T>>) {
-    use_pool::<Block<T>, _>(|pool| {
+fn release_blocks_untyped(id: TypeId, blocks: impl IntoIterator<Item = &'static dyn Any>) {
+    use_pool(id, |pool| {
         pool.extend(blocks);
     });
 }
 
 // === Storage === //
 
-pub type CompSlot<T> = &'static BlockItem<T>;
+pub type CompSlot<T> = &'static CompSlotPointee<T>;
 
 /// The type of an immutable reference to a component. These are essentially [`Ref`]s from the
 /// standard library. See [`CompMut`] for its mutable counterpart.
@@ -792,7 +789,7 @@ struct StorageInner<T: 'static> {
 
 #[derive(Debug)]
 struct EntityStorageMapping<T: 'static> {
-    slot: &'static BlockItem<T>,
+    slot: &'static CompSlotPointee<T>,
     is_external: bool,
 }
 
@@ -1139,14 +1136,14 @@ impl<T: 'static> Storage<T> {
 
 // === Entity === //
 
+static DEBUG_ENTITY_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 thread_local! {
     static ALIVE: RefCell<NopHashMap<Entity, &'static ComponentList>> = {
         threading::assert_blessed("Spawned, despawned, or checked the liveness of an entity");
         Default::default()
     };
 }
-
-static DEBUG_ENTITY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// An entity represents a [`Copy`]able reference single logical object (e.g. a player, a zombie, a
 /// UI widget, etc) containing an arbitrary number of typed components.
@@ -1652,12 +1649,15 @@ impl Drop for OwnedEntity {
 
 pub struct Obj<T: 'static> {
     entity: Entity,
-    slot: CompSlot<ObjPointee<T>>,
+    slot: ObjPointeeSlot<T>,
 }
 
-struct ObjPointee<T> {
-    entity: Entity,
-    value: T,
+pub type ObjPointeeSlot<T> = CompSlot<ObjPointee<T>>;
+
+#[derive(Debug, Copy, Clone)]
+pub struct ObjPointee<T> {
+    pub entity: Entity,
+    pub value: T,
 }
 
 impl<T: 'static> Obj<T> {
@@ -1677,6 +1677,10 @@ impl<T: 'static> Obj<T> {
     pub fn with_debug_label<L: AsDebugLabel>(self, label: L) -> Self {
         self.entity.with_debug_label(label);
         self
+    }
+
+    pub fn slot(self) -> ObjPointeeSlot<T> {
+        self.entity.get_slot()
     }
 
     pub fn try_get(self) -> Option<CompRef<T>> {
@@ -1841,6 +1845,10 @@ impl<T: 'static> OwnedObj<T> {
         self
     }
 
+    pub fn slot(&self) -> ObjPointeeSlot<T> {
+        self.obj.slot()
+    }
+
     pub fn try_get(self) -> Option<CompRef<T>> {
         self.obj.try_get()
     }
@@ -1913,6 +1921,70 @@ impl<T: 'static> Borrow<Obj<T>> for OwnedObj<T> {
 impl<T: 'static> Borrow<Entity> for OwnedObj<T> {
     fn borrow(&self) -> &Entity {
         &self.obj.entity
+    }
+}
+
+// === Archetype === //
+
+#[derive(Debug)]
+struct ArchetypeState {
+    entity_count: usize,
+    entities: Vec<Option<Entity>>,
+    block_occupied_masks: Vec<u128>,
+    open_block_indices: Vec<usize>,
+    blocks: FxHashMap<TypeId, Vec<&'static dyn Any>>,
+}
+
+#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
+pub struct Archetype(Obj<ArchetypeState>);
+
+impl Archetype {
+    pub fn new_unmanaged(comps: impl IntoIterator<Item = TypeId>) -> Self {
+        Self(Obj::new_unmanaged(ArchetypeState {
+            entity_count: 0,
+            entities: Vec::new(),
+            block_occupied_masks: Vec::new(),
+            open_block_indices: Vec::new(),
+            blocks: comps.into_iter().map(|id| (id, Vec::new())).collect(),
+        }))
+    }
+
+    pub fn is_alive(self) -> bool {
+        self.0.is_alive()
+    }
+
+    pub fn entity_count(self) -> usize {
+        self.0.get().entity_count
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.entity_count() == 0
+    }
+
+    pub fn entities(self) -> CompRef<[Option<Entity>]> {
+        CompRef::map(self.0.get(), |v| v.entities.as_slice())
+    }
+
+    pub fn component_run<T: 'static>(self) -> Option<ArchetypeRun<T>> {
+        CompRef::filter_map(self.0.get(), |me| me.blocks.get(&TypeId::of::<T>()))
+            .ok()
+            .map(|blocks| ArchetypeRun {
+                _ty: PhantomData,
+                blocks,
+            })
+    }
+}
+
+pub struct ArchetypeRun<T: 'static> {
+    _ty: PhantomData<fn(T) -> T>,
+    blocks: CompRef<Vec<&'static dyn Any>>,
+}
+
+impl<T: 'static> ArchetypeRun<T> {
+    pub fn slot(&self, index: usize) -> CompSlot<T> {
+        &self.blocks[index / COMP_BLOCK_SIZE]
+            .downcast_ref::<CompBlockPointee<T>>()
+            .unwrap()[index % COMP_BLOCK_SIZE]
     }
 }
 
