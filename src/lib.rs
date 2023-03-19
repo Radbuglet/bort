@@ -336,21 +336,29 @@ use debug::{AsDebugLabel, DebugLabel};
 
 // === Helpers === //
 
-fn xorshift64(state: NonZeroU64) -> NonZeroU64 {
-    // Adapted from: https://en.wikipedia.org/w/index.php?title=Xorshift&oldid=1123949358
-    let state = state.get();
-    let state = state ^ (state << 13);
-    let state = state ^ (state >> 7);
-    let state = state ^ (state << 17);
-    NonZeroU64::new(state).unwrap()
-}
-
 type NopHashBuilder = hash::BuildHasherDefault<NoOpHasher>;
 type NopHashMap<K, V> = hashbrown::HashMap<K, V, NopHashBuilder>;
 
 type FxHashBuilder = hash::BuildHasherDefault<rustc_hash::FxHasher>;
 type FxHashMap<K, V> = hashbrown::HashMap<K, V, FxHashBuilder>;
 type FxHashSet<T> = hashbrown::HashSet<T, FxHashBuilder>;
+
+#[derive(Debug, Default)]
+struct NoOpHasher(u64);
+
+impl hash::Hasher for NoOpHasher {
+    fn write_u64(&mut self, i: u64) {
+        self.0 = i;
+    }
+
+    fn write(&mut self, _bytes: &[u8]) {
+        unimplemented!("This is only supported for `u64`s.")
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
 
 fn hash_iter<H, E, I>(state: &mut H, iter: I)
 where
@@ -393,21 +401,13 @@ fn leak<T>(value: T) -> &'static T {
     Box::leak(Box::new(value))
 }
 
-#[derive(Debug, Default)]
-struct NoOpHasher(u64);
-
-impl hash::Hasher for NoOpHasher {
-    fn write_u64(&mut self, i: u64) {
-        self.0 = i;
-    }
-
-    fn write(&mut self, _bytes: &[u8]) {
-        unimplemented!("This is only supported for `u64`s.")
-    }
-
-    fn finish(&self) -> u64 {
-        self.0
-    }
+fn xorshift64(state: NonZeroU64) -> NonZeroU64 {
+    // Adapted from: https://en.wikipedia.org/w/index.php?title=Xorshift&oldid=1123949358
+    let state = state.get();
+    let state = state ^ (state << 13);
+    let state = state ^ (state >> 7);
+    let state = state ^ (state << 17);
+    NonZeroU64::new(state).unwrap()
 }
 
 // === ComponentList === //
@@ -669,13 +669,15 @@ fn alloc_block<T: 'static>() -> Block<T> {
     })
 }
 
-fn release_block<T: 'static>(block: Block<T>) {
+fn release_blocks<T: 'static>(blocks: impl IntoIterator<Item = Block<T>>) {
     use_pool::<Block<T>, _>(|pool| {
-        pool.push(block);
+        pool.extend(blocks);
     });
 }
 
 // === Storage === //
+
+pub type CompSlot<T> = &'static BlockItem<T>;
 
 /// The type of an immutable reference to a component. These are essentially [`Ref`]s from the
 /// standard library. See [`CompMut`] for its mutable counterpart.
@@ -945,12 +947,12 @@ impl<T: 'static> Storage<T> {
     }
 
     #[inline(always)]
-    fn try_get_slot(&self, entity: Entity) -> Option<&'static BlockItem<T>> {
+    pub fn try_get_slot(&self, entity: Entity) -> Option<CompSlot<T>> {
         self.0.borrow().mappings.get(&entity).map(|slot| slot.comp)
     }
 
     #[inline(always)]
-    fn get_slot(&self, entity: Entity) -> &'static BlockItem<T> {
+    pub fn get_slot(&self, entity: Entity) -> CompSlot<T> {
         #[cold]
         #[inline(never)]
         fn get_slot_failed<T: 'static>(entity: Entity) -> ! {
@@ -1132,113 +1134,6 @@ impl<T: 'static> Storage<T> {
     pub fn has(&self, entity: Entity) -> bool {
         self.try_get_slot(entity).is_some()
     }
-}
-
-// === Archetype === //
-
-thread_local! {
-    static ARCHETYPES: RefCell<NopHashMap<Archetype, ArchetypeInner>> = {
-        threading::assert_blessed("Created an archetype");
-        Default::default()
-    };
-}
-
-#[derive(Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
-pub struct Archetype(NonZeroU64);
-
-impl Archetype {
-    pub fn new() -> Self {
-        Self(random_uid())
-    }
-
-    pub fn entity_count(self) -> usize {
-        ARCHETYPES.with(|archetypes| {
-            let archetypes = archetypes.borrow();
-
-            match archetypes.get(&self) {
-                Some(state) => state.entity_count,
-                None => 0,
-            }
-        })
-    }
-
-    pub fn is_empty(self) -> bool {
-        self.entity_count() == 0
-    }
-
-    fn with_state<F, R>(self, f: F) -> R
-    where
-        F: FnOnce(&mut ArchetypeInner) -> R,
-    {
-        ARCHETYPES.with(|archetypes| {
-            let mut archetypes = archetypes.borrow_mut();
-
-            let state = archetypes
-                .entry(self)
-                .or_insert_with(ArchetypeInner::default);
-
-            let res = f(state);
-
-            if state.entity_count == 0 {
-                archetypes.remove(&self);
-            }
-
-            res
-        })
-    }
-
-    fn reserve(self) -> usize {
-        self.with_state(|state| {
-            let my_loc = if let Some(&block) = state.open_blocks.last() {
-                // Take an existing block and allocate a new bit inside it
-                let mask = &mut state.block_masks[block];
-                let zeros_in_front = mask.trailing_zeros();
-                *mask |= 1 << zeros_in_front;
-
-                // Unmark the block as open if all the slots have become occupied
-                if *mask == u128::MAX {
-                    state.open_blocks.pop();
-                }
-
-                // Construct an index for this slot
-                block * BLOCK_SIZE + zeros_in_front as usize
-            } else {
-                // Create a new block and allocate the least significant slot for ourselves
-                let block = state.block_masks.len();
-                state.block_masks.push(1);
-                block * BLOCK_SIZE + 0
-            };
-
-            state.entity_count += 1;
-            my_loc
-        })
-    }
-
-    fn unreserve(self, target: usize) {
-        self.with_state(|state| {
-            let block = target / BLOCK_SIZE;
-            let mask = &mut state.block_masks[block];
-
-            // Mark the block as open if it used to not be free
-            if *mask == u128::MAX {
-                state.open_blocks.push(block);
-            }
-
-            // Unset the bit
-            *mask ^= 1 << (target % BLOCK_SIZE);
-
-            // Decrement the entity count
-            state.entity_count -= 1;
-        });
-    }
-}
-
-#[derive(Default)]
-struct ArchetypeInner {
-    runs: FxHashMap<TypeId, Vec<Option<&'static dyn Any>>>,
-    block_masks: Vec<u128>,
-    open_blocks: Vec<usize>,
-    entity_count: usize,
 }
 
 // === Entity === //
@@ -1550,12 +1445,20 @@ impl Entity {
         storage::<T>().remove(self)
     }
 
+    pub fn try_get_slot<T: 'static>(self) -> Option<CompSlot<T>> {
+        storage::<T>().try_get_slot(self)
+    }
+
     pub fn try_get<T: 'static>(self) -> Option<CompRef<T>> {
         storage::<T>().try_get(self)
     }
 
     pub fn try_get_mut<T: 'static>(self) -> Option<CompMut<T>> {
         storage::<T>().try_get_mut(self)
+    }
+
+    pub fn get_slot<T: 'static>(self) -> CompSlot<T> {
+        storage::<T>().get_slot(self)
     }
 
     pub fn get<T: 'static>(self) -> CompRef<T> {
@@ -1687,12 +1590,20 @@ impl OwnedEntity {
         self.entity.remove()
     }
 
+    pub fn try_get_slot<T: 'static>(&self) -> Option<CompSlot<T>> {
+        self.entity.try_get_slot()
+    }
+
     pub fn try_get<T: 'static>(&self) -> Option<CompRef<T>> {
         self.entity.try_get()
     }
 
     pub fn try_get_mut<T: 'static>(&self) -> Option<CompMut<T>> {
         self.entity.try_get_mut()
+    }
+
+    pub fn get_slot<T: 'static>(&self) -> CompSlot<T> {
+        self.entity.get_slot()
     }
 
     pub fn get<T: 'static>(&self) -> CompRef<T> {
