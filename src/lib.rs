@@ -786,13 +786,13 @@ pub struct Storage<T: 'static>(RefCell<StorageInner<T>>);
 
 #[derive(Debug)]
 struct StorageInner<T: 'static> {
-    free_slots: Vec<&'static BlockItem<T>>,
+    free_slots: Vec<CompSlot<T>>,
     mappings: NopHashMap<Entity, EntityStorageMapping<T>>,
 }
 
 #[derive(Debug)]
 struct EntityStorageMapping<T: 'static> {
-    comp: &'static BlockItem<T>,
+    slot: &'static BlockItem<T>,
     is_external: bool,
 }
 
@@ -810,6 +810,46 @@ impl<T: 'static> Storage<T> {
     ///
     pub fn acquire() -> &'static Storage<T> {
         storage()
+    }
+
+    pub fn insert_and_return_slot(&self, entity: Entity, value: T) -> (CompSlot<T>, Option<T>) {
+        // Ensure that the entity is alive and extend the component list.
+        ALIVE.with(|slots| {
+            let mut slots = slots.borrow_mut();
+            let slot = slots.get_mut(&entity).unwrap_or_else(|| {
+                panic!(
+                    "attempted to attach a component of type {} to the dead or cross-thread {:?}.",
+                    type_name::<T>(),
+                    entity
+                )
+            });
+
+            *slot = slot.extend(ComponentType::of::<T>());
+        });
+
+        // Update the storage
+        let me = &mut *self.0.borrow_mut();
+
+        let slot = match me.mappings.entry(entity) {
+            hashbrown::hash_map::Entry::Occupied(entry) => entry.get().slot,
+            hashbrown::hash_map::Entry::Vacant(entry) => {
+                let slot = {
+                    if me.free_slots.is_empty() {
+                        me.free_slots.extend(alloc_block::<T>().iter());
+                    }
+
+                    me.free_slots.pop().unwrap()
+                };
+
+                entry.insert(EntityStorageMapping {
+                    slot,
+                    is_external: false,
+                });
+                slot
+            }
+        };
+
+        (slot, slot.borrow_mut().replace(value))
     }
 
     /// Inserts the provided component `value` onto the specified `entity`.
@@ -836,50 +876,7 @@ impl<T: 'static> Storage<T> {
     /// See [`Entity::insert`] for a short version of this method that fetches the appropriate storage
     /// automatically.
     pub fn insert(&self, entity: Entity, value: T) -> Option<T> {
-        ALIVE.with(|slots| {
-            let mut slots = slots.borrow_mut();
-            let slot = slots.get_mut(&entity).unwrap_or_else(|| {
-                panic!(
-                    "attempted to attach a component of type {} to the dead or cross-thread {:?}.",
-                    type_name::<T>(),
-                    entity
-                )
-            });
-
-            *slot = slot.extend(ComponentType::of::<T>());
-        });
-
-        self.insert_untracked(entity, value, None)
-    }
-
-    fn insert_untracked(
-        &self,
-        entity: Entity,
-        value: T,
-        external_comp: Option<&'static BlockItem<T>>,
-    ) -> Option<T> {
-        let me = &mut *self.0.borrow_mut();
-
-        let slot = match me.mappings.entry(entity) {
-            hashbrown::hash_map::Entry::Occupied(entry) => entry.get().comp,
-            hashbrown::hash_map::Entry::Vacant(entry) => {
-                let comp = external_comp.unwrap_or_else(|| {
-                    if me.free_slots.is_empty() {
-                        me.free_slots.extend(alloc_block::<T>().iter());
-                    }
-
-                    me.free_slots.pop().unwrap()
-                });
-
-                entry.insert(EntityStorageMapping {
-                    comp,
-                    is_external: external_comp.is_some(),
-                });
-                comp
-            }
-        };
-
-        slot.borrow_mut().replace(value)
+        self.insert_and_return_slot(entity, value).1
     }
 
     /// Removes the component of type `T` from the specified `entity`, returning the component value
@@ -934,11 +931,11 @@ impl<T: 'static> Storage<T> {
     fn remove_untracked(&self, entity: Entity) -> Option<T> {
         let mut me = self.0.borrow_mut();
 
-        if let Some(slot) = me.mappings.remove(&entity) {
-            let taken = slot.comp.borrow_mut().take();
+        if let Some(mapping) = me.mappings.remove(&entity) {
+            let taken = mapping.slot.borrow_mut().take();
 
-            if !slot.is_external {
-                me.free_slots.push(slot.comp);
+            if !mapping.is_external {
+                me.free_slots.push(mapping.slot);
             }
             taken
         } else {
@@ -948,7 +945,11 @@ impl<T: 'static> Storage<T> {
 
     #[inline(always)]
     pub fn try_get_slot(&self, entity: Entity) -> Option<CompSlot<T>> {
-        self.0.borrow().mappings.get(&entity).map(|slot| slot.comp)
+        self.0
+            .borrow()
+            .mappings
+            .get(&entity)
+            .map(|mapping| mapping.slot)
     }
 
     #[inline(always)]
@@ -1437,6 +1438,10 @@ impl Entity {
         self
     }
 
+    pub fn insert_and_return_slot<T: 'static>(self, comp: T) -> (CompSlot<T>, Option<T>) {
+        storage::<T>().insert_and_return_slot(self, comp)
+    }
+
     pub fn insert<T: 'static>(self, comp: T) -> Option<T> {
         storage::<T>().insert(self, comp)
     }
@@ -1582,6 +1587,10 @@ impl OwnedEntity {
         self
     }
 
+    pub fn insert_and_return_slot<T: 'static>(&self, comp: T) -> (CompSlot<T>, Option<T>) {
+        self.entity.insert_and_return_slot(comp)
+    }
+
     pub fn insert<T: 'static>(&self, comp: T) -> Option<T> {
         self.entity.insert(comp)
     }
@@ -1636,6 +1645,274 @@ impl Borrow<Entity> for OwnedEntity {
 impl Drop for OwnedEntity {
     fn drop(&mut self) {
         self.entity.destroy();
+    }
+}
+
+// === Obj === //
+
+pub struct Obj<T: 'static> {
+    entity: Entity,
+    slot: CompSlot<ObjPointee<T>>,
+}
+
+struct ObjPointee<T> {
+    entity: Entity,
+    value: T,
+}
+
+impl<T: 'static> Obj<T> {
+    pub fn new_unmanaged(value: T) -> Self {
+        Self::wrap(Entity::new_unmanaged(), value)
+    }
+
+    pub fn wrap(entity: Entity, value: T) -> Self {
+        let (slot, _) = entity.insert_and_return_slot(ObjPointee { entity, value });
+        Self { entity, slot }
+    }
+
+    pub fn entity(self) -> Entity {
+        self.entity
+    }
+
+    pub fn with_debug_label<L: AsDebugLabel>(self, label: L) -> Self {
+        self.entity.with_debug_label(label);
+        self
+    }
+
+    pub fn try_get(self) -> Option<CompRef<T>> {
+        CompRef::filter_map(self.slot.borrow(), |slot| match slot {
+            Some(slot) if slot.entity == self.entity => Some(&slot.value),
+            _ => None,
+        })
+        .ok()
+    }
+
+    pub fn try_get_mut(self) -> Option<CompMut<T>> {
+        CompMut::filter_map(self.slot.borrow_mut(), |slot| match slot {
+            Some(slot) if slot.entity == self.entity => Some(&mut slot.value),
+            _ => None,
+        })
+        .ok()
+    }
+
+    pub fn get(self) -> CompRef<T> {
+        self.try_get()
+            .expect("attempted to get the value of a dead Obj")
+    }
+
+    pub fn get_mut(self) -> CompMut<T> {
+        self.try_get_mut()
+            .expect("attempted to get the value of a dead Obj")
+    }
+
+    pub fn is_alive(self) -> bool {
+        self.entity.is_alive()
+    }
+
+    pub fn destroy(self) {
+        self.entity.destroy()
+    }
+}
+
+impl<T: 'static + fmt::Debug> fmt::Debug for Obj<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut builder = f.debug_struct("Obj");
+        builder.field("entity", &self.entity);
+
+        // If it's already borrowed...
+        let Ok(pointee) = self.slot.try_borrow() else {
+			// Ensure that it is borrowed by us and not someone else.
+			return if self.is_alive() {
+				#[derive(Debug)]
+				struct AlreadyBorrowed;
+
+				builder.field("value", &AlreadyBorrowed).finish()
+			} else {
+				builder.finish_non_exhaustive()
+			};
+		};
+
+        // If the slot is inappropriate for our value, we are dead.
+        let Some(pointee) = &*pointee else {
+			return builder.finish_non_exhaustive();
+		};
+
+        if pointee.entity != self.entity {
+            return builder.finish_non_exhaustive();
+        }
+
+        // Otherwise, display the value
+        builder.field("value", &pointee.value);
+        builder.finish()
+    }
+}
+
+impl<T: 'static> Copy for Obj<T> {}
+
+impl<T: 'static> Clone for Obj<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T: 'static> hash::Hash for Obj<T> {
+    fn hash<H: hash::Hasher>(&self, state: &mut H) {
+        self.entity.hash(state);
+    }
+}
+
+impl<T: 'static> Eq for Obj<T> {}
+
+impl<T: 'static> PartialEq for Obj<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.entity == other.entity
+    }
+}
+
+impl<T: 'static> Ord for Obj<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.entity.cmp(&other.entity)
+    }
+}
+
+impl<T: 'static> PartialOrd for Obj<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<T: 'static> Borrow<Entity> for Obj<T> {
+    fn borrow(&self) -> &Entity {
+        &self.entity
+    }
+}
+
+// === OwnedObj === //
+
+pub struct OwnedObj<T: 'static> {
+    obj: Obj<T>,
+}
+
+impl<T: 'static> OwnedObj<T> {
+    // === Lifecycle === //
+
+    pub fn new(value: T) -> Self {
+        Self::from_raw_obj(Obj::new_unmanaged(value))
+    }
+
+    pub fn wrap(entity: OwnedEntity, value: T) -> Self {
+        let obj = Self::from_raw_obj(Obj::wrap(entity.entity(), value));
+        // N.B. we unmanage the entity here to ensure that it gets dropped if the above call panics.
+        entity.unmanage();
+        obj
+    }
+
+    pub fn from_raw_obj(obj: Obj<T>) -> Self {
+        Self { obj }
+    }
+
+    pub fn obj(&self) -> Obj<T> {
+        self.obj
+    }
+
+    pub fn entity(&self) -> Entity {
+        self.obj.entity()
+    }
+
+    pub fn owned_entity(self) -> OwnedEntity {
+        OwnedEntity::from_raw_entity(self.unmanage().entity())
+    }
+
+    pub fn unmanage(self) -> Obj<T> {
+        let obj = self.obj;
+        mem::forget(self);
+        obj
+    }
+
+    pub fn split_guard(self) -> (Self, Obj<T>) {
+        let obj = self.obj();
+        (self, obj)
+    }
+
+    // === Forwards === //
+
+    pub fn with_debug_label<L: AsDebugLabel>(self, label: L) -> Self {
+        self.obj.with_debug_label(label);
+        self
+    }
+
+    pub fn try_get(self) -> Option<CompRef<T>> {
+        self.obj.try_get()
+    }
+
+    pub fn try_get_mut(self) -> Option<CompMut<T>> {
+        self.obj.try_get_mut()
+    }
+
+    pub fn get(self) -> CompRef<T> {
+        self.obj.get()
+    }
+
+    pub fn get_mut(self) -> CompMut<T> {
+        self.obj.get_mut()
+    }
+
+    pub fn is_alive(&self) -> bool {
+        self.obj.is_alive()
+    }
+
+    pub fn destroy(self) {
+        drop(self);
+    }
+}
+
+impl<T: 'static> Drop for OwnedObj<T> {
+    fn drop(&mut self) {
+        self.obj.destroy();
+    }
+}
+
+impl<T: 'static + fmt::Debug> fmt::Debug for OwnedObj<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OwnedObj").field("obj", &self.obj).finish()
+    }
+}
+
+impl<T: 'static> hash::Hash for OwnedObj<T> {
+    fn hash<H: hash::Hasher>(&self, state: &mut H) {
+        self.obj.hash(state);
+    }
+}
+
+impl<T: 'static> Eq for OwnedObj<T> {}
+
+impl<T: 'static> PartialEq for OwnedObj<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.obj == other.obj
+    }
+}
+
+impl<T: 'static> Ord for OwnedObj<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.obj.cmp(&other.obj)
+    }
+}
+
+impl<T: 'static> PartialOrd for OwnedObj<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.obj.partial_cmp(&other.obj)
+    }
+}
+
+impl<T: 'static> Borrow<Obj<T>> for OwnedObj<T> {
+    fn borrow(&self) -> &Obj<T> {
+        &self.obj
+    }
+}
+
+impl<T: 'static> Borrow<Entity> for OwnedObj<T> {
+    fn borrow(&self) -> &Entity {
+        &self.obj.entity
     }
 }
 
