@@ -328,8 +328,7 @@ use std::{
     borrow::{Borrow, Cow},
     cell::{Cell, Ref, RefCell, RefMut},
     fmt, hash, iter,
-    marker::PhantomData,
-    mem,
+    mem::{self, replace},
     num::NonZeroU64,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -345,7 +344,7 @@ type FxHashBuilder = hash::BuildHasherDefault<rustc_hash::FxHasher>;
 type FxHashMap<K, V> = hashbrown::HashMap<K, V, FxHashBuilder>;
 type FxHashSet<T> = hashbrown::HashSet<T, FxHashBuilder>;
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct NoOpHasher(u64);
 
 impl hash::Hasher for NoOpHasher {
@@ -422,10 +421,35 @@ fn get_vec_slot<T>(target: &mut Vec<T>, index: usize, fill: impl FnMut() -> T) -
     &mut target[index]
 }
 
-fn set_none_and_shrink<T>(target: &mut Vec<Option<T>>, index: usize) -> Option<T> {
-    let removed = target[index].take();
+trait SlotLike {
+    fn new_empty() -> Self;
+    fn is_empty(&mut self) -> bool;
+}
 
-    while target.last().filter(|slot| slot.is_none()).is_some() {
+impl<T> SlotLike for Option<T> {
+    fn new_empty() -> Self {
+        None
+    }
+
+    fn is_empty(&mut self) -> bool {
+        self.is_none()
+    }
+}
+
+impl<T> SlotLike for Cell<Option<T>> {
+    fn new_empty() -> Self {
+        Cell::new(None)
+    }
+
+    fn is_empty(&mut self) -> bool {
+        self.get_mut().is_none()
+    }
+}
+
+fn take_from_vec_and_shrink<T: SlotLike>(target: &mut Vec<T>, index: usize) -> T {
+    let removed = replace(&mut target[index], T::new_empty());
+
+    while target.last_mut().map_or(false, |value| value.is_empty()) {
         target.pop();
     }
 
@@ -448,7 +472,7 @@ struct ComponentType {
 impl ComponentType {
     fn of<T: 'static>() -> Self {
         fn dtor<T: 'static>(entity: Entity) {
-            drop(storage::<T>().remove_untracked(entity)); // (ignores missing components)
+            drop(storage::<T>().try_remove_untracked(entity)); // (ignores missing components)
         }
 
         Self {
@@ -508,8 +532,8 @@ impl PartialEq for ComponentList {
 impl ComponentList {
     pub fn empty() -> &'static Self {
         thread_local! {
-            // N.B. we don't need `assert_blessed` here because methods on `ComponentList` are only called
-            // when liveness has been determined.
+            // N.B. we don't need `assert_blessed` here because methods on `ComponentList` are only
+            // called after liveness has been determined.
             static EMPTY: &'static ComponentList = leak(ComponentList {
                 comps: Box::new([]),
                 extensions: Default::default(),
@@ -527,32 +551,36 @@ impl ComponentList {
     }
 
     pub fn extend(&'static self, with: ComponentType) -> &'static Self {
-        if self.comps.contains(&with) {
-            return self;
-        }
-
         self.extensions
             .borrow_mut()
             .entry(with.id)
-            .or_insert_with(|| Self::find_extension_in_db(&self.comps, with))
+            .or_insert_with(|| {
+                if self.comps.contains(&with) {
+                    self
+                } else {
+                    Self::find_extension_in_db(&self.comps, with)
+                }
+            })
     }
 
     pub fn de_extend(&'static self, without: ComponentType) -> &'static Self {
-        if !self.comps.contains(&without) {
-            return self;
-        }
-
         self.de_extensions
             .borrow_mut()
             .entry(without.id)
-            .or_insert_with(|| Self::find_de_extension_in_db(&self.comps, without))
+            .or_insert_with(|| {
+                if !self.comps.contains(&without) {
+                    self
+                } else {
+                    Self::find_de_extension_in_db(&self.comps, without)
+                }
+            })
     }
 
     // === Database === //
 
     thread_local! {
-        // N.B. we don't need `assert_blessed` here because methods on `ComponentList` are only called
-        // when liveness has been determined.
+        // N.B. we don't need `assert_blessed` here because methods on `ComponentList` are only
+        // called after liveness has been determined.
         static COMP_LISTS: RefCell<FxHashSet<&'static ComponentList>> = {
             RefCell::new(FxHashSet::from_iter([
                 ComponentList::empty(),
@@ -571,8 +599,8 @@ impl ComponentList {
 
         impl hashbrown::Equivalent<&'static ComponentList> for ComponentListSearch<'_> {
             fn equivalent(&self, key: &&'static ComponentList) -> bool {
-                // See if the key component list without the additional component
-                // is equal to the base list.
+                // See if the key component list without the additional component is equal to the
+                // base list.
                 key.comps.iter().filter(|v| **v == self.1).eq(self.0.iter())
             }
         }
@@ -605,8 +633,8 @@ impl ComponentList {
 
         impl hashbrown::Equivalent<&'static ComponentList> for ComponentListSearch<'_> {
             fn equivalent(&self, key: &&'static ComponentList) -> bool {
-                // See if the base component list without the removed component
-                // is equal to the key list.
+                // See if the base component list without the removed component is equal to the key
+                // list.
                 self.0.iter().filter(|v| **v == self.1).eq(key.comps.iter())
             }
         }
@@ -858,22 +886,31 @@ impl<T: 'static> Storage<T> {
             hashbrown::hash_map::Entry::Vacant(entry) => {
                 // Try to fetch the slot from the archetype
                 let slot = 'a: {
+                    // If the entity has an archetype...
                     let Some((arch, slot)) = arch else {
 						break 'a None;
 					};
 
                     let arch = arch.borrow();
 
-                    let Some(arch) = arch.as_ref().unwrap().value.runs.get(&TypeId::of::<T>()) else {
+                    // And that archetype has a run...
+                    let Some(run) = arch.as_ref().unwrap().value.runs.get(&TypeId::of::<T>()) else {
 						break 'a None;
 					};
 
-                    Some(
-                        &arch[slot / COMP_BLOCK_SIZE]
-                            .unwrap()
-                            .downcast_ref::<CompBlockPointee<T>>()
-                            .unwrap()[slot % COMP_BLOCK_SIZE],
-                    )
+                    // Fetch the corresponding block from the run.
+                    let block_slot = &run[slot / COMP_BLOCK_SIZE];
+
+                    let block = if let Some(block) = block_slot.get() {
+                        block.downcast_ref::<CompBlockPointee<T>>().unwrap()
+                    } else {
+                        let block = alloc_block::<T>();
+                        // Allocate a block for the slot if that has not yet been done.
+                        block_slot.set(Some(alloc_block::<T>()));
+                        block
+                    };
+
+                    Some(&block[slot % COMP_BLOCK_SIZE])
                 };
 
                 // ...otherwise, allocate the slot in the storage directly.
@@ -948,7 +985,7 @@ impl<T: 'static> Storage<T> {
     /// See [`Entity::remove`] for a short version of this method that fetches the appropriate storage
     /// automatically.
     pub fn remove(&self, entity: Entity) -> Option<T> {
-        if let Some(removed) = self.remove_untracked(entity) {
+        if let Some(removed) = self.try_remove_untracked(entity) {
             // Modify the component list or fail silently if the entity lacks the component.
             // This behavior allows users to `remove` components explicitly from entities that are
             // in the of being destroyed. This is the opposite behavior of `insert`, which requires
@@ -974,7 +1011,7 @@ impl<T: 'static> Storage<T> {
         }
     }
 
-    fn remove_untracked(&self, entity: Entity) -> Option<T> {
+    fn try_remove_untracked(&self, entity: Entity) -> Option<T> {
         let mut me = self.0.borrow_mut();
 
         if let Some(mapping) = me.mappings.remove(&entity) {
@@ -2024,7 +2061,7 @@ struct ArchetypeState {
     entities: Vec<Option<Entity>>,
     block_occupy_masks: Vec<u128>,
     open_block_indices: Vec<usize>,
-    runs: FxHashMap<TypeId, Vec<Option<&'static dyn Any>>>,
+    runs: FxHashMap<TypeId, Vec<Cell<Option<&'static dyn Any>>>>,
 }
 
 impl Archetype {
@@ -2053,15 +2090,6 @@ impl Archetype {
     pub fn entities(self) -> CompRef<[Option<Entity>]> {
         CompRef::map(self.0.get(), |v| v.entities.as_slice())
     }
-
-    pub fn component_run<T: 'static>(self) -> Option<ArchetypeRun<T>> {
-        CompRef::filter_map(self.0.get(), |me| me.runs.get(&TypeId::of::<T>()))
-            .ok()
-            .map(|run| ArchetypeRun {
-                _ty: PhantomData,
-                run,
-            })
-    }
 }
 
 impl ArchetypeState {
@@ -2075,7 +2103,7 @@ impl ArchetypeState {
             // Set its bit
             *block_state |= 1 << lowest_unset;
 
-            // Remove it from the open block list if needed
+            // Remove it from the open block list if necessary
             if *block_state == u128::MAX {
                 self.open_block_indices.pop();
             }
@@ -2113,36 +2141,18 @@ impl ArchetypeState {
         *block_state &= !(1 << bit_index);
 
         // Set the entity slot to none
-        set_none_and_shrink(&mut self.entities, slot);
+        take_from_vec_and_shrink(&mut self.entities, slot);
 
         // If this block is now empty, release its allocations.
         if *block_state == 0 {
             for (&comp_id, run_blocks) in &mut self.runs {
-                let Some(run_block) = run_blocks.get_mut(block) else {
+                let Some(run_block) = take_from_vec_and_shrink(run_blocks, block).into_inner() else {
 					continue;
-				};
-
-                let Some(run_block) = run_block.take() else {
-					continue
 				};
 
                 release_blocks_untyped(comp_id, [run_block]);
             }
         }
-    }
-}
-
-pub struct ArchetypeRun<T: 'static> {
-    _ty: PhantomData<fn(T) -> T>,
-    run: CompRef<Vec<Option<&'static dyn Any>>>,
-}
-
-impl<T: 'static> ArchetypeRun<T> {
-    pub fn slot(&self, index: usize) -> CompSlot<T> {
-        &self.run[index / COMP_BLOCK_SIZE]
-            .unwrap()
-            .downcast_ref::<CompBlockPointee<T>>()
-            .unwrap()[index % COMP_BLOCK_SIZE]
     }
 }
 
