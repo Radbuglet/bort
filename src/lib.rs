@@ -444,45 +444,6 @@ fn get_vec_slot<T>(target: &mut Vec<T>, index: usize, fill: impl FnMut() -> T) -
     &mut target[index]
 }
 
-trait SlotLike {
-    fn new_empty() -> Self;
-    fn is_empty(&mut self) -> bool;
-}
-
-impl<T> SlotLike for Option<T> {
-    fn new_empty() -> Self {
-        None
-    }
-
-    fn is_empty(&mut self) -> bool {
-        self.is_none()
-    }
-}
-
-impl<T> SlotLike for Cell<Option<T>> {
-    fn new_empty() -> Self {
-        Cell::new(None)
-    }
-
-    fn is_empty(&mut self) -> bool {
-        self.get_mut().is_none()
-    }
-}
-
-fn take_from_vec_and_shrink<T: SlotLike>(target: &mut Vec<T>, index: usize) -> T {
-    let removed = mem::replace(&mut target[index], T::new_empty());
-
-    while target.last_mut().map_or(false, |value| value.is_empty()) {
-        target.pop();
-    }
-
-    if target.len() < target.capacity() / 2 {
-        target.shrink_to_fit();
-    }
-
-    removed
-}
-
 // === ComponentList === //
 
 #[derive(Copy, Clone)]
@@ -705,7 +666,7 @@ fn random_uid() -> NonZeroU64 {
 // === Block allocator === //
 
 // The size of the block in elements. Unfortunately, this cannot be made adaptive because of the way
-// in which archetypes rely on fixed size blocks. At least we save some memory from making pointers
+// in which archetypes rely on fixed size blocks. At least we save some memory by making pointers
 // to these thin and simplify the process of unsizing these slices.
 const COMP_BLOCK_SIZE: usize = 128;
 
@@ -885,7 +846,7 @@ impl<T: 'static> Storage<T> {
     }
 
     pub fn insert_and_return_slot(&self, entity: Entity, value: T) -> (CompSlot<T>, Option<T>) {
-        // Ensure that the entity is alive and extend the component list. Also, fetch the entity's
+        // Ensure that the entity is alive and extend the component list and fetch the entity's
         // archetype.
         let arch = ALIVE.with(|slots| {
             let mut slots = slots.borrow_mut();
@@ -908,33 +869,13 @@ impl<T: 'static> Storage<T> {
             hashbrown::hash_map::Entry::Occupied(entry) => entry.get().slot,
             hashbrown::hash_map::Entry::Vacant(entry) => {
                 // Try to fetch the slot from the archetype
-                let slot = 'a: {
-                    // If the entity has an archetype...
-                    let Some((arch, slot)) = arch else {
-						break 'a None;
-					};
-
-                    let arch = arch.borrow();
-
-                    // And that archetype has a run...
-                    let Some(run) = arch.as_ref().unwrap().value.runs.get(&TypeId::of::<T>()) else {
-						break 'a None;
-					};
-
-                    // Fetch the corresponding block from the run.
-                    let block_slot = &run[slot / COMP_BLOCK_SIZE];
-
-                    let block = if let Some(block) = block_slot.get() {
-                        block.downcast_ref::<CompBlockPointee<T>>().unwrap()
-                    } else {
-                        let block = alloc_block::<T>();
-                        // Allocate a block for the slot if that has not yet been done.
-                        block_slot.set(Some(alloc_block::<T>()));
-                        block
-                    };
-
-                    Some(&block[slot % COMP_BLOCK_SIZE])
-                };
+                let slot = arch.and_then(|(arch, slot)| {
+                    arch.borrow()
+                        .as_ref()
+                        .unwrap()
+                        .value
+                        .get_run_slot_if_exists(slot)
+                });
 
                 // ...otherwise, allocate the slot in the storage directly.
                 let (slot, is_external) = match slot {
@@ -2137,6 +2078,11 @@ impl ArchetypeState {
             let block = self.block_occupy_masks.len();
             self.block_occupy_masks.push(0);
 
+            // Allocate a slot in every run.
+            for run in self.runs.values_mut() {
+                run.push(Cell::new(None));
+            }
+
             block * COMP_BLOCK_SIZE + 0
         };
 
@@ -2164,18 +2110,33 @@ impl ArchetypeState {
         *block_state &= !(1 << bit_index);
 
         // Set the entity slot to none
-        take_from_vec_and_shrink(&mut self.entities, slot);
+        self.entities[slot] = None;
 
         // If this block is now empty, release its allocations.
         if *block_state == 0 {
             for (&comp_id, run_blocks) in &mut self.runs {
-                let Some(run_block) = take_from_vec_and_shrink(run_blocks, block).into_inner() else {
+                let Some(run_block) = run_blocks[block].take() else {
 					continue;
 				};
 
                 release_blocks_untyped(comp_id, [run_block]);
             }
         }
+    }
+
+    fn get_run_slot_if_exists<T: 'static>(&self, slot: usize) -> Option<CompSlot<T>> {
+        let run = self.runs.get(&TypeId::of::<T>())?;
+		let block = &run[slot / COMP_BLOCK_SIZE];
+		let block = match block.get() {
+			Some(block) => block.downcast_ref::<CompBlock<T>>().unwrap(),
+			None => {
+				let new_block = alloc_block::<T>();
+				block.set(Some(new_block));
+				new_block
+			}
+		};
+
+		Some(&block[slot % COMP_BLOCK_SIZE])
     }
 }
 
@@ -2709,18 +2670,18 @@ pub mod threading_util {
         }
     }
 
-    // === CoolRefCell === //
+    // === NamespacedCell === //
 
-    pub type SingleCoolRefCell<T> = CoolRefCell<T, Singlethreaded>;
-    pub type MultiCoolRefCell<'a, T> = CoolRefCell<T, Multithreaded<'a>>;
+    pub type SingleNamespacedCell<T> = NamespacedCell<T, Singlethreaded>;
+    pub type MultiNamespacedCell<'a, T> = NamespacedCell<T, Multithreaded<'a>>;
 
-    pub struct CoolRefCell<T: 'static, M> {
+    pub struct NamespacedCell<T: 'static, M> {
         _no_auto: PhantomData<*mut ()>,
         _marker: PhantomData<M>,
         value: RefCell<T>,
     }
 
-    impl<T: 'static> SingleCoolRefCell<T> {
+    impl<T: 'static> SingleNamespacedCell<T> {
         pub fn new(value: T) -> Self {
             Self {
                 _no_auto: PhantomData,
@@ -2738,10 +2699,10 @@ pub mod threading_util {
         }
     }
 
-    unsafe impl<T: 'static + Send> Send for MultiCoolRefCell<'_, T> {}
-    unsafe impl<T: 'static + Sync> Sync for MultiCoolRefCell<'_, T> {}
+    unsafe impl<T: 'static + Send> Send for MultiNamespacedCell<'_, T> {}
+    unsafe impl<T: 'static + Sync> Sync for MultiNamespacedCell<'_, T> {}
 
-    impl<T: 'static> MultiCoolRefCell<'_, T> {
+    impl<T: 'static> MultiNamespacedCell<'_, T> {
         pub fn read<'a>(&'a self, _token: &'a ReadToken<T>) -> &'a T {
             unsafe { self.value.try_borrow_unguarded().unwrap() }
         }
@@ -2752,6 +2713,44 @@ pub mod threading_util {
 
         pub fn borrow_mut<'a>(&'a self, _token: &'a WriteToken<T>) -> RefMut<'a, T> {
             self.value.borrow_mut()
+        }
+    }
+
+    // === ExtCell === //
+
+    pub type SingleExtCell<T> = ExtCell<T, Singlethreaded>;
+    pub type MultiExtCell<'a, T> = ExtCell<T, Multithreaded<'a>>;
+
+    pub struct ExtCell<T: ?Sized, M> {
+        _no_auto: PhantomData<*mut ()>,
+        _marker: PhantomData<M>,
+        value: RefCell<T>,
+    }
+
+    impl<T: ?Sized> SingleExtCell<T> {
+        pub fn new(value: T) -> Self
+        where
+            T: Sized,
+        {
+            Self {
+                _no_auto: PhantomData,
+                _marker: PhantomData,
+                value: RefCell::new(value),
+            }
+        }
+
+        pub fn borrow(&self) -> Ref<T> {
+            self.value.borrow()
+        }
+
+        pub fn borrow_mut(&mut self) -> RefMut<T> {
+            self.value.borrow_mut()
+        }
+    }
+
+    impl<T: ?Sized> MultiExtCell<'_, T> {
+        pub fn get(&self) -> &T {
+            unsafe { self.value.try_borrow_unguarded().unwrap() }
         }
     }
 }
