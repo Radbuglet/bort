@@ -837,7 +837,22 @@ impl<T: 'static> Storage<T> {
         storage()
     }
 
-    // TODO: Implement `preallocate_slot` to help with userland `Archetype` implementations.
+    pub fn try_preallocate_slot(
+        &self,
+        entity: Entity,
+        slot: Option<CompSlot<T>>,
+    ) -> Result<CompSlot<T>, CompSlot<T>> {
+        let me = &mut *self.0.borrow_mut();
+
+        match me.mappings.entry(entity) {
+            hashbrown::hash_map::Entry::Occupied(entry) => Err(entry.get().slot),
+            hashbrown::hash_map::Entry::Vacant(entry) => {
+                let (slot, is_external) = Self::allocate_slot_if_needed(&mut me.free_slots, slot);
+                entry.insert(EntityStorageMapping { slot, is_external });
+                Ok(slot)
+            }
+        }
+    }
 
     pub fn insert_in_slot(
         &self,
@@ -856,6 +871,8 @@ impl<T: 'static> Storage<T> {
                 )
             });
 
+            // N.B. we always run this, regardless of entry state, to account for preallocated slots,
+            // which don't update the entry yet.
             *slot = slot.extend(ComponentType::of::<T>());
         });
 
@@ -865,26 +882,31 @@ impl<T: 'static> Storage<T> {
         let slot = match me.mappings.entry(entity) {
             hashbrown::hash_map::Entry::Occupied(entry) => entry.get().slot,
             hashbrown::hash_map::Entry::Vacant(entry) => {
-                // If an explicit slot has been specified, store it there.
-                let (slot, is_external) = match slot {
-                    Some(external_slot) => (external_slot, true),
-                    None => {
-                        if me.free_slots.is_empty() {
-                            me.free_slots.extend(alloc_block::<T>().iter());
-                        }
-
-                        let slot = me.free_slots.pop().unwrap();
-
-                        (slot, false)
-                    }
-                };
-
+                let (slot, is_external) = Self::allocate_slot_if_needed(&mut me.free_slots, slot);
                 entry.insert(EntityStorageMapping { slot, is_external });
                 slot
             }
         };
 
         (slot, slot.borrow_mut().replace(value))
+    }
+
+    fn allocate_slot_if_needed(
+        free_slots: &mut Vec<CompSlot<T>>,
+        slot: Option<CompSlot<T>>,
+    ) -> (CompSlot<T>, bool) {
+        match slot {
+            Some(external_slot) => (external_slot, true),
+            None => {
+                if free_slots.is_empty() {
+                    free_slots.extend(alloc_block::<T>().iter());
+                }
+
+                let slot = free_slots.pop().unwrap();
+
+                (slot, false)
+            }
+        }
     }
 
     pub fn insert_and_return_slot(&self, entity: Entity, value: T) -> (CompSlot<T>, Option<T>) {
@@ -1043,7 +1065,7 @@ impl<T: 'static> Storage<T> {
     #[inline(always)]
     pub fn try_get(&self, entity: Entity) -> Option<CompRef<T>> {
         self.try_get_slot(entity)
-            .map(|slot| Ref::map(slot.borrow(), |v| v.as_ref().unwrap()))
+            .and_then(|slot| Ref::filter_map(slot.borrow(), |v| v.as_ref()).ok())
     }
 
     /// Attempts to fetch and mutably borrow the component belonging to the specified `entity`,
@@ -1477,6 +1499,13 @@ impl Entity {
         self
     }
 
+    pub fn try_preallocate_slot<T: 'static>(
+        self,
+        slot: Option<CompSlot<T>>,
+    ) -> Result<CompSlot<T>, CompSlot<T>> {
+        storage::<T>().try_preallocate_slot(self, slot)
+    }
+
     pub fn insert_in_slot<T: 'static>(
         self,
         comp: T,
@@ -1634,6 +1663,13 @@ impl OwnedEntity {
     pub fn with_debug_label<L: AsDebugLabel>(self, label: L) -> Self {
         self.entity.with_debug_label(label);
         self
+    }
+
+    pub fn try_preallocate_slot<T: 'static>(
+        &self,
+        slot: Option<CompSlot<T>>,
+    ) -> Result<CompSlot<T>, CompSlot<T>> {
+        self.entity.try_preallocate_slot(slot)
     }
 
     pub fn insert_in_slot<T: 'static>(
