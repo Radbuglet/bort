@@ -2338,14 +2338,14 @@ pub mod threading {
             }
         }
 
-        pub unsafe trait Token<T: 'static>: fmt::Debug {
+        pub unsafe trait Token<T: ?Sized>: fmt::Debug {
             fn can_access(&self, namespace: Option<Namespace>) -> bool;
             fn is_write(&self) -> bool;
         }
 
-        pub unsafe trait ReadToken<T: 'static>: Token<T> {}
+        pub unsafe trait ReadToken<T: ?Sized>: Token<T> {}
 
-        pub unsafe trait WriteToken<T: 'static>: Token<T> {}
+        pub unsafe trait WriteToken<T: ?Sized>: Token<T> {}
 
         // GlobalToken
         #[derive(Debug)]
@@ -2402,7 +2402,7 @@ pub mod threading {
             }
         }
 
-        unsafe impl<T: 'static> Token<T> for GlobalToken {
+        unsafe impl<T: ?Sized> Token<T> for GlobalToken {
             fn can_access(&self, _: Option<Namespace>) -> bool {
                 true
             }
@@ -2412,17 +2412,17 @@ pub mod threading {
             }
         }
 
-        unsafe impl<T: 'static> WriteToken<T> for GlobalToken {}
+        unsafe impl<T: ?Sized> WriteToken<T> for GlobalToken {}
 
         // TypeReadToken
-        pub struct TypeReadToken<T: 'static> {
+        pub struct TypeReadToken<T: ?Sized + 'static> {
             // N.B. this can't be `Send` or `Sync` because we could be
             // derived from a `GlobalToken`.
             _no_send_sync: PhantomData<*const ()>,
             _ty: PhantomData<fn() -> T>,
         }
 
-        impl<T: 'static> fmt::Debug for TypeReadToken<T> {
+        impl<T: ?Sized + 'static> fmt::Debug for TypeReadToken<T> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.debug_struct("TypeReadToken")
                     .field("_ty", &self._ty)
@@ -2430,33 +2430,33 @@ pub mod threading {
             }
         }
 
-        impl<T: 'static> TypeReadToken<T> {
+        impl<T: ?Sized + 'static> TypeReadToken<T> {
             pub fn acquire() -> Self {
-                become_main_or_run_if_multithreaded(
-                    format_args!(
-                        "Attempted to acquire TypeReadToken for component of type {}",
+                let TokenDb::Multithreaded(db) = &mut *get_db() else {
+                    panic!(
+                        "Attempted to acquire TypeReadToken for component of type {} \
+                         in non-multithreaded context.",
                         type_name::<T>(),
-                    ),
-                    |db| {
-                        let entry = db
-                            .locks
-                            .entry((TypeId::of::<T>(), None))
-                            .or_insert_with(ComponentLockState::default);
+                    );
+                };
 
-                        if entry.rc <= 0 {
-                            entry.rc = entry.rc.checked_sub(1).expect("created too many tokens!");
-                        } else {
-                            panic!(
-                            "Attempted to acquire TypeReadToken for component of type {}: component has \
-                             {} mutable borrower{} on thread {:?}",
-                            type_name::<T>(),
-                            entry.rc,
-                            if entry.rc == 1 { "" } else { "s" },
-                            entry.multithread_owner.as_ref().unwrap(),
-                        );
-                        }
-                    },
-                );
+                let entry = db
+                    .locks
+                    .entry((TypeId::of::<T>(), None))
+                    .or_insert_with(ComponentLockState::default);
+
+                if entry.rc <= 0 {
+                    entry.rc = entry.rc.checked_sub(1).expect("created too many tokens!");
+                } else {
+                    panic!(
+                        "Attempted to acquire TypeReadToken for component of type {}: component has \
+                            {} mutable borrower{} on thread {:?}",
+                        type_name::<T>(),
+                        entry.rc,
+                        if entry.rc == 1 { "" } else { "s" },
+                        entry.multithread_owner.as_ref().unwrap(),
+                    );
+                }
 
                 Self {
                     _no_send_sync: PhantomData,
@@ -2465,7 +2465,7 @@ pub mod threading {
             }
         }
 
-        unsafe impl<T: 'static> Token<T> for TypeReadToken<T> {
+        unsafe impl<T: ?Sized + 'static> Token<T> for TypeReadToken<T> {
             fn can_access(&self, _: Option<Namespace>) -> bool {
                 true
             }
@@ -2475,37 +2475,33 @@ pub mod threading {
             }
         }
 
-        unsafe impl<T: 'static> ReadToken<T> for TypeReadToken<T> {}
+        unsafe impl<T: ?Sized + 'static> ReadToken<T> for TypeReadToken<T> {}
 
-        impl<T: 'static> Drop for TypeReadToken<T> {
+        impl<T: ?Sized + 'static> Drop for TypeReadToken<T> {
             fn drop(&mut self) {
-                let db = &mut *get_db();
+                let TokenDb::Multithreaded(db) = &mut *get_db() else {
+                    unreachable!();
+                };
 
-                match db {
-                    TokenDb::Unacquired => unreachable!(),
-                    TokenDb::Singlethreaded { main } => {
-                        debug_assert_eq!(current().id(), main.id());
-                    }
-                    TokenDb::Multithreaded(db) => match db.locks.entry((TypeId::of::<T>(), None)) {
-                        hashbrown::hash_map::Entry::Occupied(mut entry) => {
-                            entry.get_mut().rc += 1;
-                            if entry.get().rc == 0 {
-                                entry.remove();
-                            }
+                match db.locks.entry((TypeId::of::<T>(), None)) {
+                    hashbrown::hash_map::Entry::Occupied(mut entry) => {
+                        entry.get_mut().rc += 1;
+                        if entry.get().rc == 0 {
+                            entry.remove();
                         }
-                        hashbrown::hash_map::Entry::Vacant(_) => unreachable!(),
-                    },
+                    }
+                    hashbrown::hash_map::Entry::Vacant(_) => unreachable!(),
                 }
             }
         }
 
         // TypeWriteToken
-        pub struct TypeWriteToken<T: 'static> {
+        pub struct TypeWriteToken<T: ?Sized + 'static> {
             _no_send_sync: PhantomData<*const ()>,
             _ty: PhantomData<fn() -> T>,
         }
 
-        impl<T: 'static> fmt::Debug for TypeWriteToken<T> {
+        impl<T: ?Sized + 'static> fmt::Debug for TypeWriteToken<T> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.debug_struct("TypeWriteToken")
                     .field("_ty", &self._ty)
@@ -2513,7 +2509,7 @@ pub mod threading {
             }
         }
 
-        impl<T: 'static> TypeWriteToken<T> {
+        impl<T: ?Sized + 'static> TypeWriteToken<T> {
             pub fn acquire() -> Self {
                 become_main_or_run_if_multithreaded(
                     format_args!(
@@ -2568,7 +2564,7 @@ pub mod threading {
             }
         }
 
-        unsafe impl<T: 'static> Token<T> for TypeWriteToken<T> {
+        unsafe impl<T: ?Sized + 'static> Token<T> for TypeWriteToken<T> {
             fn can_access(&self, _: Option<Namespace>) -> bool {
                 true
             }
@@ -2578,9 +2574,9 @@ pub mod threading {
             }
         }
 
-        unsafe impl<T: 'static> WriteToken<T> for TypeWriteToken<T> {}
+        unsafe impl<T: ?Sized + 'static> WriteToken<T> for TypeWriteToken<T> {}
 
-        impl<T: 'static> Drop for TypeWriteToken<T> {
+        impl<T: ?Sized + 'static> Drop for TypeWriteToken<T> {
             fn drop(&mut self) {
                 let db = &mut *get_db();
 
@@ -2610,18 +2606,12 @@ pub mod threading {
             result.unwrap_or_else(|e| panic!("{e}"))
         }
 
-        pub struct NRefCell<T: 'static> {
+        pub struct NRefCell<T: ?Sized> {
             namespace: AtomicU64,
             value: RefCell<T>,
         }
 
-        unsafe impl<T: Send + Sync> Sync for NRefCell<T> {}
-
-        impl<T: Default> Default for NRefCell<T> {
-            fn default() -> Self {
-                Self::new(T::default())
-            }
-        }
+        unsafe impl<T: ?Sized + Send + Sync> Sync for NRefCell<T> {}
 
         impl<T> NRefCell<T> {
             pub const fn new(value: T) -> Self {
@@ -2643,7 +2633,9 @@ pub mod threading {
                 // not impacted by our potentially dangerous `Sync` impl.
                 self.value.into_inner()
             }
+        }
 
+        impl<T: ?Sized> NRefCell<T> {
             pub fn get_mut(&mut self) -> &mut T {
                 // Safety: this is a method that takes exclusive ownership of the object. Hence, it is
                 // not impacted by our potentially dangerous `Sync` impl.
@@ -2756,6 +2748,19 @@ pub mod threading {
 
             pub fn borrow_mut<'a>(&'a self, guard: &'a impl WriteToken<T>) -> RefMut<'a, T> {
                 unwrap_error(self.try_borrow_mut(guard))
+            }
+        }
+
+        impl<T: 'static + fmt::Debug> fmt::Debug for NRefCell<T> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                // TODO: Implement
+                f.debug_struct("NRefCell").finish_non_exhaustive()
+            }
+        }
+
+        impl<T: 'static + Default> Default for NRefCell<T> {
+            fn default() -> Self {
+                Self::new(T::default())
             }
         }
     }
