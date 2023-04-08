@@ -313,15 +313,7 @@
 //!
 //! ### Threading
 //!
-//! Most globals in Bort are thread local and therefore, most entity operations will not work on other
-//! threads. Additionally, because Bort relies so much on allocating global memory pools for the
-//! duration of the program to handle component allocations, using Bort on a non-main thread and then
-//! destroying that thread would leak memory.
-//!
-//! Because of these two hazards, only the first thread to call into Bort will be allowed to use its
-//! thread-specific functionality. You can circumvent this restriction by explicitly calling
-//! [`threading::bless()`](threading::bless) on the additional threads on which you wish to use Bort. Just know
-//! that the caveats still apply.
+//! TODO
 //!
 use std::{
     any::{type_name, Any, TypeId},
@@ -667,7 +659,7 @@ pub type CompSlotPointee<T> = RefCell<Option<T>>;
 fn use_pool<R>(id: TypeId, f: impl FnOnce(&mut Vec<&'static dyn Any>) -> R) -> R {
     thread_local! {
         static POOLS: RefCell<FxHashMap<TypeId, Vec<&'static dyn Any>>> = {
-            threading::assert_blessed("Accessed object pools");
+            threading::ensure_main_thread("Accessed object pools");
             Default::default()
         };
     }
@@ -757,7 +749,7 @@ pub type CompMut<T> = RefMut<'static, T>;
 pub fn storage<T: 'static>() -> &'static Storage<T> {
     thread_local! {
         static STORAGES: RefCell<FxHashMap<TypeId, &'static dyn Any>> = {
-            threading::assert_blessed("Accessed a storage");
+            threading::ensure_main_thread("Accessed a storage");
             Default::default()
         };
     }
@@ -1204,7 +1196,7 @@ static DEBUG_ENTITY_COUNTER: atomic::AtomicU64 = atomic::AtomicU64::new(0);
 
 thread_local! {
     static ALIVE: RefCell<NopHashMap<Entity, &'static ComponentList>> = {
-        threading::assert_blessed("Spawned, despawned, or checked the liveness of an entity");
+        threading::ensure_main_thread("Spawned, despawned, or checked the liveness of an entity");
         Default::default()
     };
 }
@@ -1821,21 +1813,21 @@ impl<T: 'static + fmt::Debug> fmt::Debug for Obj<T> {
 
         // If it's already borrowed...
         let Ok(pointee) = self.slot.try_borrow() else {
-			// Ensure that it is borrowed by us and not someone else.
-			return if self.is_alive() {
-				#[derive(Debug)]
-				struct AlreadyBorrowed;
+            // Ensure that it is borrowed by us and not someone else.
+            return if self.is_alive() {
+                #[derive(Debug)]
+                struct AlreadyBorrowed;
 
-				builder.field("value", &AlreadyBorrowed).finish()
-			} else {
-				builder.finish_non_exhaustive()
-			};
-		};
+                builder.field("value", &AlreadyBorrowed).finish()
+            } else {
+                builder.finish_non_exhaustive()
+            };
+        };
 
         // If the slot is inappropriate for our value, we are dead.
         let Some(pointee) = &*pointee else {
-			return builder.finish_non_exhaustive();
-		};
+            return builder.finish_non_exhaustive();
+        };
 
         if pointee.entity != self.entity {
             return builder.finish_non_exhaustive();
@@ -2225,56 +2217,85 @@ pub mod debug {
 
 pub mod threading {
     use std::{
+        any::TypeId,
         cell::{BorrowError, BorrowMutError, Cell, Ref, RefCell, RefMut},
         fmt,
         marker::PhantomData,
         num::NonZeroU64,
-        sync::atomic::{AtomicBool, AtomicU64, Ordering},
-        thread::current,
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            Mutex, MutexGuard,
+        },
+        thread::{current, Thread},
     };
 
-    // === Blessing === //
+    use crate::FxHashMap;
 
-    static HAS_AUTO_BLESSED: AtomicBool = AtomicBool::new(false);
+    // === Token Database === //
+
+    enum TokenDb {
+        Unacquired,
+        Singlethreaded {
+            main: Thread,
+        },
+        Multithreaded {
+            token_locks: FxHashMap<(TypeId, Option<Namespace>), isize>,
+        },
+    }
 
     thread_local! {
-        static IS_BLESSED: Cell<bool> = const { Cell::new(false) };
+        static IS_MAIN_THREAD: Cell<bool> = const { Cell::new(false) };
     }
 
-    pub fn is_blessed() -> bool {
-        IS_BLESSED.with(Cell::get)
+    fn get_db() -> MutexGuard<'static, TokenDb> {
+        static DB: Mutex<TokenDb> = Mutex::new(TokenDb::Unacquired);
+
+        match DB.lock() {
+            Ok(db) => db,
+            Err(err) => err.into_inner(),
+        }
     }
 
-    pub fn is_blessed_or_auto_bless() -> bool {
-        IS_BLESSED.with(|v| {
-            if !v.get()
-                // Short-circuiting makes this mutating exchange O.K.
-                && HAS_AUTO_BLESSED
-                    .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-                    .is_ok()
-            {
-                v.set(true)
+    pub fn is_main_thread() -> bool {
+        IS_MAIN_THREAD.with(|v| v.get())
+    }
+
+    pub fn become_main_thread() {
+        ensure_main_thread("Tried to become the main thread");
+    }
+
+    pub(crate) fn ensure_main_thread(action: &str) {
+        // If we're already the main thread, short-circuit.
+        if is_main_thread() {
+            return;
+        }
+
+        // Otherwise, attempt to acquire the thread token.
+        let db = &mut *get_db();
+        let thread = current();
+
+        match db {
+            TokenDb::Unacquired => {
+                *db = TokenDb::Singlethreaded { main: thread };
+                IS_MAIN_THREAD.with(|v| v.set(true));
             }
-
-            v.get()
-        })
-    }
-
-    pub(crate) fn assert_blessed(action: &str) {
-        assert!(
-            is_blessed_or_auto_bless(),
-            "{} on a non-primary or non-`bless`ed thread {:?}. See multi-threading \
-             documentation stub in the main module docs for help.",
-            action,
-            current(),
-        );
-    }
-
-    pub fn bless() {
-        IS_BLESSED.with(|v| {
-            HAS_AUTO_BLESSED.store(true, Ordering::Relaxed);
-            v.set(true);
-        })
+            TokenDb::Singlethreaded { main } => {
+                assert_eq!(
+                    main.id(),
+                    thread.id(),
+                    "{action} on non-main thread. Running on {thread:?} while {main:?} has already been set \
+                     as the main thread. See the \"multi-threading\" section of the module documenation for \
+                     details.",
+                );
+            }
+            TokenDb::Multithreaded { .. } => {
+                panic!(
+                    "{action} on a worker {thread:?}. This action is only intended for singlethreaded use. \
+                     Try queueing the action until the multithreaded application section finishes. See the \
+                     \"multi-threading\" section of the module documenation for details.",
+                );
+            }
+        }
     }
 
     // === Tokens === //
@@ -2306,10 +2327,14 @@ pub mod threading {
 
     impl GlobalToken {
         pub fn acquire() -> Self {
-            todo!()
+            ensure_main_thread("Attempted to acquire a GlobalToken");
+
+            Self {
+                _no_send_sync: PhantomData,
+            }
         }
 
-        pub fn relinquish<F, R>(&self, f: F) -> R
+        pub fn reborrow<F, R>(&self, f: F) -> R
         where
             F: FnOnce() -> R,
         {
@@ -2328,12 +2353,6 @@ pub mod threading {
     }
 
     unsafe impl<T: 'static> WriteToken<T> for GlobalToken {}
-
-    impl Drop for GlobalToken {
-        fn drop(&mut self) {
-            todo!()
-        }
-    }
 
     // === NRefCell === //
 
@@ -2406,7 +2425,7 @@ pub mod threading {
                 Err(err) => {
                     panic!(
                         "Failed to release NRefCell from namespace {:?}; dynamic borrows are still \
-						 ongoing: {err}",
+                         ongoing: {err}",
                         self.namespace(),
                     );
                 }
