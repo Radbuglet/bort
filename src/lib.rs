@@ -326,7 +326,10 @@ use std::{
     sync::atomic,
 };
 
-use debug::{AsDebugLabel, DebugLabel};
+use crate::{
+    debug::{AsDebugLabel, DebugLabel},
+    threading::cell::ensure_main_thread,
+};
 
 // === Helpers === //
 
@@ -659,7 +662,7 @@ pub type CompSlotPointee<T> = RefCell<Option<T>>;
 fn use_pool<R>(id: TypeId, f: impl FnOnce(&mut Vec<&'static dyn Any>) -> R) -> R {
     thread_local! {
         static POOLS: RefCell<FxHashMap<TypeId, Vec<&'static dyn Any>>> = {
-            threading::ensure_main_thread("Accessed object pools");
+            ensure_main_thread("Accessed object pools");
             Default::default()
         };
     }
@@ -749,7 +752,7 @@ pub type CompMut<T> = RefMut<'static, T>;
 pub fn storage<T: 'static>() -> &'static Storage<T> {
     thread_local! {
         static STORAGES: RefCell<FxHashMap<TypeId, &'static dyn Any>> = {
-            threading::ensure_main_thread("Accessed a storage");
+            ensure_main_thread("Accessed a storage");
             Default::default()
         };
     }
@@ -1196,7 +1199,7 @@ static DEBUG_ENTITY_COUNTER: atomic::AtomicU64 = atomic::AtomicU64::new(0);
 
 thread_local! {
     static ALIVE: RefCell<NopHashMap<Entity, &'static ComponentList>> = {
-        threading::ensure_main_thread("Spawned, despawned, or checked the liveness of an entity");
+        ensure_main_thread("Spawned, despawned, or checked the liveness of an entity");
         Default::default()
     };
 }
@@ -2216,289 +2219,536 @@ pub mod debug {
 // === Threading === /
 
 pub mod threading {
-    use std::{
-        any::TypeId,
-        cell::{BorrowError, BorrowMutError, Cell, Ref, RefCell, RefMut},
-        fmt,
-        marker::PhantomData,
-        num::NonZeroU64,
-        sync::{
-            atomic::{AtomicU64, Ordering},
-            Mutex, MutexGuard,
-        },
-        thread::{current, Thread},
-    };
+    // === Re-exports === //
 
-    use crate::FxHashMap;
-
-    // === Token Database === //
-
-    enum TokenDb {
-        Unacquired,
-        Singlethreaded {
-            main: Thread,
-        },
-        Multithreaded {
-            token_locks: FxHashMap<(TypeId, Option<Namespace>), isize>,
-        },
-    }
-
-    thread_local! {
-        static IS_MAIN_THREAD: Cell<bool> = const { Cell::new(false) };
-    }
-
-    fn get_db() -> MutexGuard<'static, TokenDb> {
-        static DB: Mutex<TokenDb> = Mutex::new(TokenDb::Unacquired);
-
-        match DB.lock() {
-            Ok(db) => db,
-            Err(err) => err.into_inner(),
-        }
-    }
-
-    pub fn is_main_thread() -> bool {
-        IS_MAIN_THREAD.with(|v| v.get())
-    }
+    pub use cell::is_main_thread;
 
     pub fn become_main_thread() {
-        ensure_main_thread("Tried to become the main thread");
+        cell::ensure_main_thread("Tried to become the main thread");
     }
 
-    pub(crate) fn ensure_main_thread(action: &str) {
-        // If we're already the main thread, short-circuit.
-        if is_main_thread() {
-            return;
+    // === Cell === //
+
+    pub mod cell {
+        use std::{
+            any::{type_name, TypeId},
+            cell::{BorrowError, BorrowMutError, Cell, Ref, RefCell, RefMut},
+            fmt,
+            marker::PhantomData,
+            num::NonZeroU64,
+            sync::{
+                atomic::{AtomicU64, Ordering},
+                Mutex, MutexGuard,
+            },
+            thread::{current, Thread},
+        };
+
+        use crate::FxHashMap;
+
+        // === Token Database === //
+
+        enum TokenDb {
+            Unacquired,
+            Singlethreaded { main: Thread },
+            Multithreaded(TokenDbMultithreaded),
         }
 
-        // Otherwise, attempt to acquire the thread token.
-        let db = &mut *get_db();
-        let thread = current();
+        #[derive(Default)]
+        struct TokenDbMultithreaded {
+            locks: FxHashMap<(TypeId, Option<Namespace>), ComponentLockState>,
+        }
 
-        match db {
-            TokenDb::Unacquired => {
-                *db = TokenDb::Singlethreaded { main: thread };
-                IS_MAIN_THREAD.with(|v| v.set(true));
+        #[derive(Default)]
+        struct ComponentLockState {
+            rc: isize,
+            multithread_owner: Option<Thread>,
+        }
+
+        thread_local! {
+            static IS_MAIN_THREAD: Cell<bool> = const { Cell::new(false) };
+        }
+
+        fn get_db() -> MutexGuard<'static, TokenDb> {
+            static DB: Mutex<TokenDb> = Mutex::new(TokenDb::Unacquired);
+
+            match DB.lock() {
+                Ok(db) => db,
+                Err(err) => err.into_inner(),
             }
-            TokenDb::Singlethreaded { main } => {
-                assert_eq!(
-                    main.id(),
-                    thread.id(),
-                    "{action} on non-main thread. Running on {thread:?} while {main:?} has already been set \
-                     as the main thread. See the \"multi-threading\" section of the module documenation for \
-                     details.",
-                );
+        }
+
+        pub fn is_main_thread() -> bool {
+            IS_MAIN_THREAD.with(|v| v.get())
+        }
+
+        fn become_main_or_run_if_multithreaded<A, F>(action: A, f: F)
+        where
+            A: fmt::Display,
+            F: FnOnce(&mut TokenDbMultithreaded),
+        {
+            if is_main_thread() {
+                return;
             }
-            TokenDb::Multithreaded { .. } => {
+
+            let db = &mut *get_db();
+
+            match db {
+                TokenDb::Unacquired => {
+                    debug_assert!(matches!(db, TokenDb::Unacquired));
+                    *db = TokenDb::Singlethreaded { main: current() };
+                    IS_MAIN_THREAD.with(|v| v.set(true));
+                }
+                TokenDb::Singlethreaded { main } => {
+                    let thread = current();
+                    debug_assert_ne!(main.id(), thread.id());
+                    panic!(
+                        "{action} on non-main thread. Running on {thread:?} while {main:?} has already been set \
+                        as the main thread. See the \"multi-threading\" section of the module documenation for \
+                        details."
+                    );
+                }
+                TokenDb::Multithreaded(state) => f(state),
+            }
+        }
+
+        pub(crate) fn ensure_main_thread(action: impl fmt::Display) {
+            become_main_or_run_if_multithreaded(&action, |_| {
+                let thread = current();
                 panic!(
                     "{action} on a worker {thread:?}. This action is only intended for singlethreaded use. \
                      Try queueing the action until the multithreaded application section finishes. See the \
                      \"multi-threading\" section of the module documenation for details.",
                 );
-            }
+            });
         }
-    }
 
-    // === Tokens === //
+        // === Tokens === //
 
-    #[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
-    pub struct Namespace(NonZeroU64);
+        // Core
+        #[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
+        pub struct Namespace(NonZeroU64);
 
-    impl Namespace {
-        pub fn new() -> Self {
-            static ALLOC: AtomicU64 = AtomicU64::new(1);
+        impl Namespace {
+            pub fn new() -> Self {
+                static ALLOC: AtomicU64 = AtomicU64::new(1);
 
-            Self(NonZeroU64::new(ALLOC.fetch_add(1, Ordering::Relaxed)).unwrap())
-        }
-    }
-
-    pub unsafe trait Token<T: 'static>: fmt::Debug {
-        fn can_access(&self, namespace: Option<Namespace>) -> bool;
-        fn is_write(&self) -> bool;
-    }
-
-    pub unsafe trait ReadToken<T: 'static>: Token<T> {}
-
-    pub unsafe trait WriteToken<T: 'static>: Token<T> {}
-
-    #[derive(Debug)]
-    pub struct GlobalToken {
-        _no_send_sync: PhantomData<*const ()>,
-    }
-
-    impl GlobalToken {
-        pub fn acquire() -> Self {
-            ensure_main_thread("Attempted to acquire a GlobalToken");
-
-            Self {
-                _no_send_sync: PhantomData,
+                Self(NonZeroU64::new(ALLOC.fetch_add(1, Ordering::Relaxed)).unwrap())
             }
         }
 
-        pub fn reborrow<F, R>(&self, f: F) -> R
-        where
-            F: FnOnce() -> R,
-        {
-            todo!()
-        }
-    }
-
-    unsafe impl<T: 'static> Token<T> for GlobalToken {
-        fn can_access(&self, _: Option<Namespace>) -> bool {
-            true
+        pub unsafe trait Token<T: 'static>: fmt::Debug {
+            fn can_access(&self, namespace: Option<Namespace>) -> bool;
+            fn is_write(&self) -> bool;
         }
 
-        fn is_write(&self) -> bool {
-            true
-        }
-    }
+        pub unsafe trait ReadToken<T: 'static>: Token<T> {}
 
-    unsafe impl<T: 'static> WriteToken<T> for GlobalToken {}
+        pub unsafe trait WriteToken<T: 'static>: Token<T> {}
 
-    // === NRefCell === //
-
-    pub struct NRefCell<T: 'static> {
-        namespace: AtomicU64,
-        value: RefCell<T>,
-    }
-
-    unsafe impl<T: Send + Sync> Sync for NRefCell<T> {}
-
-    impl<T: Default> Default for NRefCell<T> {
-        fn default() -> Self {
-            Self::new(T::default())
-        }
-    }
-
-    impl<T> NRefCell<T> {
-        pub const fn new(value: T) -> Self {
-            Self::new_namespaced(value, None)
+        // GlobalToken
+        #[derive(Debug)]
+        pub struct GlobalToken {
+            _no_send_sync: PhantomData<*const ()>,
         }
 
-        pub const fn new_namespaced(value: T, namespace: Option<Namespace>) -> Self {
-            Self {
-                value: RefCell::new(value),
-                namespace: AtomicU64::new(match namespace {
-                    Some(Namespace(id)) => id.get(),
-                    None => 0,
-                }),
+        impl GlobalToken {
+            pub fn acquire() -> Self {
+                ensure_main_thread("Attempted to acquire a GlobalToken");
+
+                Self {
+                    _no_send_sync: PhantomData,
+                }
+            }
+
+            pub fn reborrow<F, R>(&self, f: F) -> R
+            where
+                F: Send + FnOnce() -> R,
+                R: Send,
+            {
+                let mut result = None;
+
+                std::thread::scope(|s| {
+                    debug_assert!(is_main_thread());
+
+                    // Transition to a multithreaded state.
+                    {
+                        let db = &mut *get_db();
+                        *db = TokenDb::Multithreaded(TokenDbMultithreaded::default());
+                    }
+
+                    // Construct a drop guard to return to a singlethreaded state once
+                    // we're done.
+                    struct Guard;
+
+                    impl Drop for Guard {
+                        fn drop(&mut self) {
+                            let db = &mut *get_db();
+                            *db = TokenDb::Singlethreaded { main: current() };
+                        }
+                    }
+
+                    let _guard = Guard;
+
+                    // Spawn a new thread and join it immediately.
+                    // This ensures that, while borrows originating from our `GlobalToken`
+                    // could still be ongoing, only one thread may actually act upon their
+                    // token's access.
+                    result = Some(s.spawn(f).join().unwrap());
+                });
+
+                result.unwrap()
             }
         }
 
-        pub fn into_inner(self) -> T {
-            // Safety: this is a method that takes exclusive ownership of the object. Hence, it is
-            // not impacted by our potentially dangerous `Sync` impl.
-            self.value.into_inner()
+        unsafe impl<T: 'static> Token<T> for GlobalToken {
+            fn can_access(&self, _: Option<Namespace>) -> bool {
+                true
+            }
+
+            fn is_write(&self) -> bool {
+                true
+            }
         }
 
-        pub fn get_mut(&mut self) -> &mut T {
-            // Safety: this is a method that takes exclusive ownership of the object. Hence, it is
-            // not impacted by our potentially dangerous `Sync` impl.
-            self.value.get_mut()
+        unsafe impl<T: 'static> WriteToken<T> for GlobalToken {}
+
+        // TypeReadToken
+        pub struct TypeReadToken<T: 'static> {
+            _no_send_sync: PhantomData<*const ()>,
+            _ty: PhantomData<fn() -> T>,
         }
 
-        // === Namespace management === //
-
-        pub fn namespace(&self) -> Option<Namespace> {
-            NonZeroU64::new(self.namespace.load(Ordering::Relaxed)).map(Namespace)
+        impl<T: 'static> fmt::Debug for TypeReadToken<T> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_struct("TypeReadToken")
+                    .field("_ty", &self._ty)
+                    .finish_non_exhaustive()
+            }
         }
 
-        fn assert_accessible_by(&self, token: &impl Token<T>) {
-            let owner = self.namespace();
-            assert!(
-                token.can_access(owner),
-                "{token:?} cannot access NRefCell under namespace {owner:?}.",
-            );
+        impl<T: 'static> TypeReadToken<T> {
+            pub fn acquire() -> Self {
+                become_main_or_run_if_multithreaded(
+                    format_args!(
+                        "Attempted to acquire TypeReadToken for component of type {}",
+                        type_name::<T>(),
+                    ),
+                    |db| {
+                        let entry = db
+                            .locks
+                            .entry((TypeId::of::<T>(), None))
+                            .or_insert_with(ComponentLockState::default);
+
+                        if entry.rc <= 0 {
+                            entry.rc = entry.rc.checked_sub(1).expect("created too many tokens!");
+                        } else {
+                            panic!(
+                            "Attempted to acquire TypeReadToken for component of type {}: component has \
+                             {} mutable borrower{} on thread {:?}",
+                            type_name::<T>(),
+                            entry.rc,
+                            if entry.rc == 1 { "" } else { "s" },
+                            entry.multithread_owner.as_ref().unwrap(),
+                        );
+                        }
+                    },
+                );
+
+                Self {
+                    _no_send_sync: PhantomData,
+                    _ty: PhantomData,
+                }
+            }
         }
 
-        pub fn set_namespace(&mut self, namespace: Option<Namespace>) {
-            *self.namespace.get_mut() = namespace.map_or(0, |Namespace(id)| id.get());
+        unsafe impl<T: 'static> Token<T> for TypeReadToken<T> {
+            fn can_access(&self, _: Option<Namespace>) -> bool {
+                true
+            }
+
+            fn is_write(&self) -> bool {
+                false
+            }
         }
 
-        pub fn set_namespace_ref(&self, guard: &impl WriteToken<T>, namespace: Option<Namespace>) {
-            self.assert_accessible_by(guard);
+        unsafe impl<T: 'static> ReadToken<T> for TypeReadToken<T> {}
 
-            // Safety: we can read and mutate the `value`'s borrow count safely because we are the
-            // only thread with "write" namespace access and we know that fact will not change during
-            // this operation because *this is the operation we're using to change that fact!*
-            match self.value.try_borrow_mut() {
-                Ok(_) => {}
-                Err(err) => {
-                    panic!(
+        impl<T: 'static> Drop for TypeReadToken<T> {
+            fn drop(&mut self) {
+                let db = &mut *get_db();
+
+                match db {
+                    TokenDb::Unacquired => unreachable!(),
+                    TokenDb::Singlethreaded { main } => {
+                        debug_assert_eq!(current().id(), main.id());
+                    }
+                    TokenDb::Multithreaded(db) => match db.locks.entry((TypeId::of::<T>(), None)) {
+                        hashbrown::hash_map::Entry::Occupied(mut entry) => {
+                            entry.get_mut().rc += 1;
+                            if entry.get().rc == 0 {
+                                entry.remove();
+                            }
+                        }
+                        hashbrown::hash_map::Entry::Vacant(_) => unreachable!(),
+                    },
+                }
+            }
+        }
+
+        // TypeWriteToken
+        pub struct TypeWriteToken<T: 'static> {
+            _no_send_sync: PhantomData<*const ()>,
+            _ty: PhantomData<fn() -> T>,
+        }
+
+        impl<T: 'static> fmt::Debug for TypeWriteToken<T> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_struct("TypeWriteToken")
+                    .field("_ty", &self._ty)
+                    .finish_non_exhaustive()
+            }
+        }
+
+        impl<T: 'static> TypeWriteToken<T> {
+            pub fn acquire() -> Self {
+                become_main_or_run_if_multithreaded(
+                    format_args!(
+                        "Attempted to acquire TypeWriteToken for component of type {}",
+                        type_name::<T>(),
+                    ),
+                    |db| {
+                        let entry = db
+                            .locks
+                            .entry((TypeId::of::<T>(), None))
+                            .or_insert_with(ComponentLockState::default);
+
+                        if entry.rc == 0 {
+                            entry.rc = 1;
+                            entry.multithread_owner = Some(current());
+                        } else if entry.rc > 0 {
+                            // Ensure that we're running on an appropriate thread.
+                            let owning_thread = entry.multithread_owner.as_ref().unwrap();
+                            let current_thread = current();
+
+                            assert_eq!(
+                            owning_thread.id(),
+                            current_thread.id(),
+                            "Attempted to acquire TypeWriteToken for component of type {}: component has \
+                             {} mutable borrower{} on thread {:?}; we're running on {:?}",
+                            type_name::<T>(),
+                            entry.rc,
+                            if entry.rc == 1 { "" } else { "s" },
+                            owning_thread,
+                            current_thread,
+                        );
+
+                            // Increment the reference count
+                            entry.rc = entry.rc.checked_add(1).expect("created too many tokens!");
+                        } else {
+                            panic!(
+                            "Attempted to acquire TypeWriteToken for component of type {}: component has \
+                             {} mutable borrower{} on thread {:?}",
+                            type_name::<T>(),
+                            entry.rc,
+                            if entry.rc == 1 { "" } else { "s" },
+                            entry.multithread_owner.as_ref().unwrap(),
+                        );
+                        }
+                    },
+                );
+
+                Self {
+                    _no_send_sync: PhantomData,
+                    _ty: PhantomData,
+                }
+            }
+        }
+
+        unsafe impl<T: 'static> Token<T> for TypeWriteToken<T> {
+            fn can_access(&self, _: Option<Namespace>) -> bool {
+                true
+            }
+
+            fn is_write(&self) -> bool {
+                true
+            }
+        }
+
+        unsafe impl<T: 'static> WriteToken<T> for TypeWriteToken<T> {}
+
+        impl<T: 'static> Drop for TypeWriteToken<T> {
+            fn drop(&mut self) {
+                let db = &mut *get_db();
+
+                match db {
+                    TokenDb::Unacquired => unreachable!(),
+                    TokenDb::Singlethreaded { main } => {
+                        debug_assert_eq!(current().id(), main.id());
+                    }
+                    TokenDb::Multithreaded(db) => match db.locks.entry((TypeId::of::<T>(), None)) {
+                        hashbrown::hash_map::Entry::Occupied(mut entry) => {
+                            entry.get_mut().rc -= 1;
+                            if entry.get().rc == 0 {
+                                entry.remove();
+                            }
+                        }
+                        hashbrown::hash_map::Entry::Vacant(_) => unreachable!(),
+                    },
+                }
+            }
+        }
+
+        // TODO: NamespacedReadToken and NamespacedWriteToken
+
+        // === NRefCell === //
+
+        pub struct NRefCell<T: 'static> {
+            namespace: AtomicU64,
+            value: RefCell<T>,
+        }
+
+        unsafe impl<T: Send + Sync> Sync for NRefCell<T> {}
+
+        impl<T: Default> Default for NRefCell<T> {
+            fn default() -> Self {
+                Self::new(T::default())
+            }
+        }
+
+        impl<T> NRefCell<T> {
+            pub const fn new(value: T) -> Self {
+                Self::new_namespaced(value, None)
+            }
+
+            pub const fn new_namespaced(value: T, namespace: Option<Namespace>) -> Self {
+                Self {
+                    value: RefCell::new(value),
+                    namespace: AtomicU64::new(match namespace {
+                        Some(Namespace(id)) => id.get(),
+                        None => 0,
+                    }),
+                }
+            }
+
+            pub fn into_inner(self) -> T {
+                // Safety: this is a method that takes exclusive ownership of the object. Hence, it is
+                // not impacted by our potentially dangerous `Sync` impl.
+                self.value.into_inner()
+            }
+
+            pub fn get_mut(&mut self) -> &mut T {
+                // Safety: this is a method that takes exclusive ownership of the object. Hence, it is
+                // not impacted by our potentially dangerous `Sync` impl.
+                self.value.get_mut()
+            }
+
+            // === Namespace management === //
+
+            pub fn namespace(&self) -> Option<Namespace> {
+                NonZeroU64::new(self.namespace.load(Ordering::Relaxed)).map(Namespace)
+            }
+
+            fn assert_accessible_by(&self, token: &impl Token<T>) {
+                let owner = self.namespace();
+                assert!(
+                    token.can_access(owner),
+                    "{token:?} cannot access NRefCell under namespace {owner:?}.",
+                );
+            }
+
+            pub fn set_namespace(&mut self, namespace: Option<Namespace>) {
+                *self.namespace.get_mut() = namespace.map_or(0, |Namespace(id)| id.get());
+            }
+
+            pub fn set_namespace_ref(
+                &self,
+                guard: &impl WriteToken<T>,
+                namespace: Option<Namespace>,
+            ) {
+                self.assert_accessible_by(guard);
+
+                // Safety: we can read and mutate the `value`'s borrow count safely because we are the
+                // only thread with "write" namespace access and we know that fact will not change during
+                // this operation because *this is the operation we're using to change that fact!*
+                match self.value.try_borrow_mut() {
+                    Ok(_) => {}
+                    Err(err) => {
+                        panic!(
                         "Failed to release NRefCell from namespace {:?}; dynamic borrows are still \
                          ongoing: {err}",
                         self.namespace(),
                     );
+                    }
+                }
+
+                // Safety: It is forget our namespace because all write tokens on this thread acting on
+                // this object have relinquished their dynamic borrows.
+                self.namespace.store(
+                    match namespace {
+                        Some(Namespace(id)) => id.get(),
+                        None => 0,
+                    },
+                    Ordering::Relaxed,
+                );
+            }
+
+            // === Borrow methods === //
+
+            pub fn try_get<'a>(
+                &'a self,
+                guard: &'a impl ReadToken<T>,
+            ) -> Result<&'a T, BorrowError> {
+                self.assert_accessible_by(guard);
+
+                // Safety: we know we can read from the `value`'s borrow count safely because this method
+                // can only be run so long as we have `NamespaceReadGuard`s alive and we can't cause reads
+                // until we get a `NamespaceWriteGuard`s, which is only possible once `guard` is dead.
+                unsafe {
+                    // Safety: additionally, we know nobody can borrow this cell mutably until all
+                    // `NamespaceReadGuard`s die out so this is safe as well.
+                    self.value.try_borrow_unguarded()
                 }
             }
 
-            // Safety: It is forget our namespace because all write tokens on this thread acting on
-            // this object have relinquished their dynamic borrows.
-            self.namespace.store(
-                match namespace {
-                    Some(Namespace(id)) => id.get(),
-                    None => 0,
-                },
-                Ordering::Relaxed,
-            );
-        }
-
-        // === Borrow methods === //
-
-        pub fn try_get<'a>(&'a self, guard: &'a impl ReadToken<T>) -> Result<&'a T, BorrowError> {
-            self.assert_accessible_by(guard);
-
-            // Safety: we know we can read from the `value`'s borrow count safely because this method
-            // can only be run so long as we have `NamespaceReadGuard`s alive and we can't cause reads
-            // until we get a `NamespaceWriteGuard`s, which is only possible once `guard` is dead.
-            unsafe {
-                // Safety: additionally, we know nobody can borrow this cell mutably until all
-                // `NamespaceReadGuard`s die out so this is safe as well.
-                self.value.try_borrow_unguarded()
+            pub fn get<'a>(&'a self, guard: &'a impl ReadToken<T>) -> &'a T {
+                self.try_get(guard).unwrap()
             }
-        }
 
-        pub fn get<'a>(&'a self, guard: &'a impl ReadToken<T>) -> &'a T {
-            self.try_get(guard).unwrap()
-        }
+            pub fn try_borrow<'a>(
+                &'a self,
+                guard: &'a impl WriteToken<T>,
+            ) -> Result<Ref<'a, T>, BorrowError> {
+                self.assert_accessible_by(guard);
 
-        pub fn try_borrow<'a>(
-            &'a self,
-            guard: &'a impl WriteToken<T>,
-        ) -> Result<Ref<'a, T>, BorrowError> {
-            self.assert_accessible_by(guard);
+                // Safety: we know we can read and write from the `value`'s borrow count safely because
+                // this method can only be run so long as we have `NamespaceWriteGuard`s alive and we
+                // can't...
+                //
+                // a) construct `NamespaceReadGuard`s to use on other threads until `guard` dies out
+                // b) move this `guard` to another thread because it's neither `Send` nor `Sync`
+                // c) change the owner to admit new namespaces on other threads until all the borrows
+                //    expire.
+                //
+                self.value.try_borrow()
+            }
 
-            // Safety: we know we can read and write from the `value`'s borrow count safely because
-            // this method can only be run so long as we have `NamespaceWriteGuard`s alive and we
-            // can't...
-            //
-            // a) construct `NamespaceReadGuard`s to use on other threads until `guard` dies out
-            // b) move this `guard` to another thread because it's neither `Send` nor `Sync`
-            // c) change the owner to admit new namespaces on other threads until all the borrows
-            //    expire.
-            //
-            self.value.try_borrow()
-        }
+            pub fn borrow<'a>(&'a self, guard: &'a impl WriteToken<T>) -> Ref<'a, T> {
+                self.try_borrow(guard).unwrap()
+            }
 
-        pub fn borrow<'a>(&'a self, guard: &'a impl WriteToken<T>) -> Ref<'a, T> {
-            self.try_borrow(guard).unwrap()
-        }
+            pub fn try_borrow_mut<'a>(
+                &'a self,
+                guard: &'a impl WriteToken<T>,
+            ) -> Result<RefMut<'a, T>, BorrowMutError> {
+                self.assert_accessible_by(guard);
 
-        pub fn try_borrow_mut<'a>(
-            &'a self,
-            guard: &'a impl WriteToken<T>,
-        ) -> Result<RefMut<'a, T>, BorrowMutError> {
-            self.assert_accessible_by(guard);
+                // Safety: see `try_borrow`.
+                self.value.try_borrow_mut()
+            }
 
-            // Safety: see `try_borrow`.
-            self.value.try_borrow_mut()
-        }
-
-        pub fn borrow_mut<'a>(&'a self, guard: &'a impl WriteToken<T>) -> RefMut<'a, T> {
-            self.try_borrow_mut(guard).unwrap()
-        }
-
-        pub fn get_any<'a>(&'a self, guard: &'a impl Token<T>) {
-            todo!()
+            pub fn borrow_mut<'a>(&'a self, guard: &'a impl WriteToken<T>) -> RefMut<'a, T> {
+                self.try_borrow_mut(guard).unwrap()
+            }
         }
     }
 }
