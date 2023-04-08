@@ -2219,8 +2219,9 @@ pub mod debug {
 // === Threading === /
 
 pub mod threading {
-    // === Re-exports === //
+    // === Queries === //
 
+    // Re-export `is_main_thread`
     pub use cell::is_main_thread;
 
     pub fn become_main_thread() {
@@ -2233,6 +2234,7 @@ pub mod threading {
         use std::{
             any::{type_name, TypeId},
             cell::{BorrowError, BorrowMutError, Cell, Ref, RefCell, RefMut},
+            error::Error,
             fmt,
             marker::PhantomData,
             num::NonZeroU64,
@@ -2414,6 +2416,8 @@ pub mod threading {
 
         // TypeReadToken
         pub struct TypeReadToken<T: 'static> {
+            // N.B. this can't be `Send` or `Sync` because we could be
+            // derived from a `GlobalToken`.
             _no_send_sync: PhantomData<*const ()>,
             _ty: PhantomData<fn() -> T>,
         }
@@ -2602,6 +2606,10 @@ pub mod threading {
 
         // === NRefCell === //
 
+        fn unwrap_error<T, E: Error>(result: Result<T, E>) -> T {
+            result.unwrap_or_else(|e| panic!("{e}"))
+        }
+
         pub struct NRefCell<T: 'static> {
             namespace: AtomicU64,
             value: RefCell<T>,
@@ -2711,7 +2719,7 @@ pub mod threading {
             }
 
             pub fn get<'a>(&'a self, guard: &'a impl ReadToken<T>) -> &'a T {
-                self.try_get(guard).unwrap()
+                unwrap_error(self.try_get(guard))
             }
 
             pub fn try_borrow<'a>(
@@ -2733,7 +2741,7 @@ pub mod threading {
             }
 
             pub fn borrow<'a>(&'a self, guard: &'a impl WriteToken<T>) -> Ref<'a, T> {
-                self.try_borrow(guard).unwrap()
+                unwrap_error(self.try_borrow(guard))
             }
 
             pub fn try_borrow_mut<'a>(
@@ -2747,7 +2755,7 @@ pub mod threading {
             }
 
             pub fn borrow_mut<'a>(&'a self, guard: &'a impl WriteToken<T>) -> RefMut<'a, T> {
-                self.try_borrow_mut(guard).unwrap()
+                unwrap_error(self.try_borrow_mut(guard))
             }
         }
     }
