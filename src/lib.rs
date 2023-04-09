@@ -752,6 +752,20 @@ struct StorageDb {
     storages: FxHashMap<TypeId, &'static (dyn Any + Sync)>,
 }
 
+type StorageData<T> = NRefCell<StorageInner<T>>;
+
+#[derive(Debug)]
+struct StorageInner<T: 'static> {
+    free_slots: Vec<CompSlot<T>>,
+    mappings: NopHashMap<Entity, EntityStorageMapping<T>>,
+}
+
+#[derive(Debug)]
+struct EntityStorageMapping<T: 'static> {
+    slot: &'static CompSlotPointee<T>,
+    is_external: bool,
+}
+
 static STORAGES: NRefCell<StorageDb> = NRefCell::new(StorageDb {
     storages: FxHashMap::with_hasher(ConstSafeBuildHasherDefault::new()),
 });
@@ -832,22 +846,8 @@ pub fn storage<T: 'static>() -> Storage<T> {
 /// [`RefCell`]'ed components.
 #[derive(Debug)]
 pub struct Storage<T: 'static> {
-    inner: &'static NRefCell<StorageInner<T>>,
+    inner: &'static StorageData<T>,
     token: &'static MainThreadToken,
-}
-
-type StorageData<T> = NRefCell<StorageInner<T>>;
-
-#[derive(Debug)]
-struct StorageInner<T: 'static> {
-    free_slots: Vec<CompSlot<T>>,
-    mappings: NopHashMap<Entity, EntityStorageMapping<T>>,
-}
-
-#[derive(Debug)]
-struct EntityStorageMapping<T: 'static> {
-    slot: &'static CompSlotPointee<T>,
-    is_external: bool,
 }
 
 impl<T: 'static> Storage<T> {
@@ -1042,7 +1042,6 @@ impl<T: 'static> Storage<T> {
         }
     }
 
-    #[inline(always)]
     pub fn try_get_slot(&self, entity: Entity) -> Option<CompSlot<T>> {
         self.inner
             .borrow(self.token)
@@ -1051,20 +1050,14 @@ impl<T: 'static> Storage<T> {
             .map(|mapping| mapping.slot)
     }
 
-    #[inline(always)]
     pub fn get_slot(&self, entity: Entity) -> CompSlot<T> {
-        #[cold]
-        #[inline(never)]
-        fn get_slot_failed<T: 'static>(entity: Entity) -> ! {
+        self.try_get_slot(entity).unwrap_or_else(|| {
             panic!(
                 "failed to find component of type {} for {:?}",
                 type_name::<T>(),
                 entity,
-            );
-        }
-
-        self.try_get_slot(entity)
-            .unwrap_or_else(|| get_slot_failed::<T>(entity))
+            )
+        })
     }
 
     /// Attempts to fetch and immutably borrow the component belonging to the specified `entity`,
@@ -1100,7 +1093,6 @@ impl<T: 'static> Storage<T> {
     ///
     /// See [`Entity::try_get`] for a short version of this method that fetches the appropriate
     /// storage automatically.
-    #[inline(always)]
     pub fn try_get(&self, entity: Entity) -> Option<CompRef<T>> {
         self.try_get_slot(entity).and_then(|slot| {
             Ref::filter_map(slot.get_on_main(self.token).borrow(self.token), |v| {
@@ -1143,7 +1135,6 @@ impl<T: 'static> Storage<T> {
     ///
     /// See [`Entity::try_get_mut`] for a short version of this method that fetches the appropriate
     /// storage automatically.
-    #[inline(always)]
     pub fn try_get_mut(&self, entity: Entity) -> Option<CompMut<T>> {
         self.try_get_slot(entity).map(|slot| {
             RefMut::map(slot.get_on_main(self.token).borrow_mut(self.token), |v| {
@@ -1177,7 +1168,6 @@ impl<T: 'static> Storage<T> {
     ///
     /// See [`Entity::get`] for a short version of this method that fetches the appropriate
     /// storage automatically.
-    #[inline(always)]
     pub fn get(&self, entity: Entity) -> CompRef<T> {
         Ref::map(
             self.get_slot(entity)
@@ -1216,7 +1206,6 @@ impl<T: 'static> Storage<T> {
     ///
     /// See [`Entity::get_mut`] for a short version of this method that fetches the appropriate
     /// storage automatically.
-    #[inline(always)]
     pub fn get_mut(&self, entity: Entity) -> CompMut<T> {
         RefMut::map(
             self.get_slot(entity)
@@ -1247,7 +1236,6 @@ impl<T: 'static> Storage<T> {
     /// assert!(!storage.has(my_entity_ref));
     /// ```
     ///
-    #[inline(always)]
     pub fn has(&self, entity: Entity) -> bool {
         self.try_get_slot(entity).is_some()
     }
@@ -2302,11 +2290,219 @@ pub mod debug {
 // === Threading === /
 
 pub mod threading {
+    use std::{
+        any::{type_name, TypeId},
+        cell::{Ref, RefMut},
+    };
+
+    use crate::{AnyDowncastExt, CompSlot, Entity, StorageData, StorageDb, StorageInner, STORAGES};
+
+    use self::cell::{MainThreadToken, ParallelTokenSource, TypeExclusiveToken, TypeReadToken};
+
     // Re-export `is_main_thread`
     pub use cell::is_main_thread;
 
     pub fn become_main_thread() {
         cell::ensure_main_thread("Tried to become the main thread");
+    }
+
+    pub fn parallelize<F, R>(f: F) -> R
+    where
+        F: Send + FnOnce(ParallismSession<'_>) -> R,
+        R: Send,
+    {
+        MainThreadToken::acquire().parallelize(|cx| f(ParallismSession::new(cx)))
+    }
+
+    // ParallismSession
+    #[derive(Debug, Clone)]
+    pub struct ParallismSession<'a> {
+        cx: &'a ParallelTokenSource,
+        db_token: TypeReadToken<'a, StorageDb>,
+    }
+
+    impl<'a> ParallismSession<'a> {
+        pub fn new(cx: &'a ParallelTokenSource) -> Self {
+            Self {
+                cx,
+                db_token: cx.read_token(),
+            }
+        }
+
+        pub fn token_source(&self) -> &'a ParallelTokenSource {
+            self.cx
+        }
+
+        pub fn storage<T: 'static + Send + Sync>(&self) -> ReadStorageView<T> {
+            let storage = STORAGES
+                .get(&self.db_token)
+                .storages
+                .get(&TypeId::of::<T>())
+                .map(|inner| inner.downcast_ref::<StorageData<T>>().unwrap());
+
+            ReadStorageView {
+                inner: storage.map(|storage| ReadStorageViewInner {
+                    storage,
+                    storage_token: self.cx.read_token(),
+                    value_token: self.cx.read_token(),
+                }),
+            }
+        }
+
+        pub fn storage_mut<T: 'static + Send + Sync>(&self) -> MutStorageView<T> {
+            let storage = STORAGES
+                .get(&self.db_token)
+                .storages
+                .get(&TypeId::of::<T>())
+                .map(|inner| inner.downcast_ref::<StorageData<T>>().unwrap());
+
+            MutStorageView {
+                inner: storage.map(|storage| MutStorageViewInner {
+                    storage,
+                    storage_token: self.cx.read_token(),
+                    value_token: self.cx.exclusive_token(),
+                }),
+            }
+        }
+    }
+
+    // MutStorageView
+    // TODO: De-duplicate code in all three storage variants
+    #[derive(Debug, Clone)]
+    pub struct MutStorageView<'a, T: 'static> {
+        inner: Option<MutStorageViewInner<'a, T>>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct MutStorageViewInner<'a, T: 'static> {
+        storage: &'a StorageData<T>,
+        storage_token: TypeReadToken<'a, StorageInner<T>>,
+        value_token: TypeExclusiveToken<'a, Option<T>>,
+    }
+
+    impl<T: 'static + Send + Sync> MutStorageView<'_, T> {
+        fn inner(&self) -> &MutStorageViewInner<'_, T> {
+            self.inner.as_ref().unwrap()
+        }
+
+        pub fn try_get_slot(&self, entity: Entity) -> Option<CompSlot<T>> {
+            let inner = self.inner.as_ref()?;
+
+            inner
+                .storage
+                .get(&inner.storage_token)
+                .mappings
+                .get(&entity)
+                .map(|mapping| mapping.slot)
+        }
+
+        pub fn get_slot(&self, entity: Entity) -> CompSlot<T> {
+            self.try_get_slot(entity).unwrap_or_else(|| {
+                panic!(
+                    "failed to find component of type {} for {:?}",
+                    type_name::<T>(),
+                    entity,
+                )
+            })
+        }
+
+        pub fn try_get(&self, entity: Entity) -> Option<Ref<T>> {
+            self.try_get_slot(entity).and_then(|slot| {
+                Ref::filter_map(slot.get().borrow(&self.inner().value_token), |v| v.as_ref()).ok()
+            })
+        }
+
+        pub fn try_get_mut(&self, entity: Entity) -> Option<RefMut<T>> {
+            self.try_get_slot(entity).map(|slot| {
+                RefMut::map(slot.get().borrow_mut(&self.inner().value_token), |v| {
+                    v.as_mut().unwrap()
+                })
+            })
+        }
+
+        pub fn get(&self, entity: Entity) -> Ref<T> {
+            Ref::map(
+                self.get_slot(entity)
+                    .get()
+                    .borrow(&self.inner().value_token),
+                |v| v.as_ref().unwrap(),
+            )
+        }
+
+        pub fn get_mut(&self, entity: Entity) -> RefMut<T> {
+            RefMut::map(
+                self.get_slot(entity)
+                    .get()
+                    .borrow_mut(&self.inner().value_token),
+                |v| v.as_mut().unwrap(),
+            )
+        }
+
+        pub fn has(&self, entity: Entity) -> bool {
+            self.try_get_slot(entity).is_some()
+        }
+    }
+
+    // ReadStorageView
+    #[derive(Debug, Clone)]
+    pub struct ReadStorageView<'a, T: 'static> {
+        inner: Option<ReadStorageViewInner<'a, T>>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct ReadStorageViewInner<'a, T: 'static> {
+        storage: &'a StorageData<T>,
+        storage_token: TypeReadToken<'a, StorageInner<T>>,
+        value_token: TypeReadToken<'a, Option<T>>,
+    }
+
+    impl<T: 'static + Send + Sync> ReadStorageView<'_, T> {
+        fn inner(&self) -> &ReadStorageViewInner<'_, T> {
+            self.inner.as_ref().unwrap()
+        }
+
+        pub fn try_get_slot(&self, entity: Entity) -> Option<CompSlot<T>> {
+            let inner = self.inner.as_ref()?;
+
+            inner
+                .storage
+                .get(&inner.storage_token)
+                .mappings
+                .get(&entity)
+                .map(|mapping| mapping.slot)
+        }
+
+        pub fn get_slot(&self, entity: Entity) -> CompSlot<T> {
+            self.try_get_slot(entity).unwrap_or_else(|| {
+                panic!(
+                    "failed to find component of type {} for {:?}",
+                    type_name::<T>(),
+                    entity,
+                )
+            })
+        }
+
+        pub fn try_get(&self, entity: Entity) -> Option<&T> {
+            Some(
+                self.try_get_slot(entity)?
+                    .get()
+                    .get(&self.inner().value_token)
+                    .as_ref()
+                    .unwrap(),
+            )
+        }
+
+        pub fn get(&self, entity: Entity) -> &T {
+            self.get_slot(entity)
+                .get()
+                .get(&self.inner().value_token)
+                .as_ref()
+                .unwrap()
+        }
+
+        pub fn has(&self, entity: Entity) -> bool {
+            self.try_get_slot(entity).is_some()
+        }
     }
 
     pub mod cell {
@@ -2619,7 +2815,7 @@ pub mod threading {
                     // This ensures that, while borrows originating from our `MainThreadToken`
                     // could still be ongoing, they will never be acted upon until the
                     // "reborrowing" tokens expire, which live for at most the lifetime of
-                    // `ParallismSession`.
+                    // `ParallelTokenSource`.
                     s.spawn(|| {
                         result = Some(f(&mut ParallelTokenSource {
                             borrows: Default::default(),
@@ -2643,7 +2839,7 @@ pub mod threading {
 
         unsafe impl<T: ?Sized> ExclusiveToken<T> for MainThreadToken {}
 
-        // ParallismSession
+        // ParallelTokenSource
         const TOO_MANY_EXCLUSIVE_ERR: &str = "too many TypeExclusiveTokens!";
         const TOO_MANY_READ_ERR: &str = "too many TypeReadTokens!";
 
