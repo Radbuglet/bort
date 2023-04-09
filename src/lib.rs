@@ -2606,9 +2606,9 @@ pub mod threading {
                 }
             }
 
-            pub fn parallelize<F, R>(f: F) -> R
+            pub fn parallelize<F, R>(&self, f: F) -> R
             where
-                F: Send + FnOnce(&mut ParallismSession) -> R,
+                F: Send + FnOnce(&mut ParallelTokenSource) -> R,
                 R: Send,
             {
                 let mut result = None;
@@ -2621,7 +2621,7 @@ pub mod threading {
                     // "reborrowing" tokens expire, which live for at most the lifetime of
                     // `ParallismSession`.
                     s.spawn(|| {
-                        result = Some(f(&mut ParallismSession {
+                        result = Some(f(&mut ParallelTokenSource {
                             borrows: Default::default(),
                         }));
                     });
@@ -2645,15 +2645,16 @@ pub mod threading {
 
         // ParallismSession
         const TOO_MANY_EXCLUSIVE_ERR: &str = "too many TypeExclusiveTokens!";
+        const TOO_MANY_READ_ERR: &str = "too many TypeReadTokens!";
 
         type BorrowMap = FxHashMap<(TypeId, Option<Namespace>), (isize, Option<Thread>)>;
 
         #[derive(Debug)]
-        pub struct ParallismSession {
+        pub struct ParallelTokenSource {
             borrows: Mutex<BorrowMap>,
         }
 
-        impl ParallismSession {
+        impl ParallelTokenSource {
             fn borrows(&self) -> MutexGuard<BorrowMap> {
                 match self.borrows.lock() {
                     Ok(guard) => guard,
@@ -2696,16 +2697,57 @@ pub mod threading {
                 }
             }
 
-            // TODO: Remaining token types (shared + namespaced variants)
+            pub fn read_token<T: ?Sized + 'static>(&self) -> TypeReadToken<'_, T> {
+                // Increment reference count
+                match self.borrows().entry((TypeId::of::<T>(), None)) {
+                    HashMapEntry::Occupied(mut entry) => {
+                        let (rc, owner) = entry.get_mut();
+                        debug_assert!(owner.is_none());
+
+                        // Decrement rc
+                        *rc = rc.checked_sub(1).expect(TOO_MANY_READ_ERR);
+                    }
+                    HashMapEntry::Vacant(entry) => {
+                        entry.insert((-1, None));
+                    }
+                }
+
+                // Construct token
+                TypeReadToken {
+                    _ty: PhantomData,
+                    session: self,
+                }
+            }
+
+            // TODO: Remaining token types (read + namespaced variants)
         }
 
         // TypeExclusiveToken
-        #[derive(Debug)]
         pub struct TypeExclusiveToken<'a, T: ?Sized + 'static> {
             _no_send_or_sync: PhantomData<*const ()>,
             _ty: PhantomData<fn() -> T>,
-            session: Option<&'a ParallismSession>,
+            session: Option<&'a ParallelTokenSource>,
         }
+
+        impl<T: ?Sized + 'static> fmt::Debug for TypeExclusiveToken<'_, T> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_struct("TypeExclusiveToken")
+                    .field("session", &self.session)
+                    .finish_non_exhaustive()
+            }
+        }
+
+        unsafe impl<T: ?Sized + 'static> Token<T> for TypeExclusiveToken<'_, T> {
+            fn can_access(&self, _: Option<Namespace>) -> bool {
+                true
+            }
+
+            fn is_exclusive(&self) -> bool {
+                true
+            }
+        }
+
+        unsafe impl<T: ?Sized + 'static> ExclusiveToken<T> for TypeExclusiveToken<'_, T> {}
 
         impl<T: ?Sized + 'static> Clone for TypeExclusiveToken<'_, T> {
             fn clone(&self) -> Self {
@@ -2736,6 +2778,60 @@ pub mod threading {
                     if *rc == 0 {
                         entry.remove();
                     }
+                }
+            }
+        }
+
+        // TypeReadToken
+        pub struct TypeReadToken<'a, T: ?Sized + 'static> {
+            _ty: PhantomData<fn() -> T>,
+            session: &'a ParallelTokenSource,
+        }
+
+        impl<T: ?Sized + 'static> fmt::Debug for TypeReadToken<'_, T> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_struct("TypeReadToken")
+                    .field("session", &self.session)
+                    .finish_non_exhaustive()
+            }
+        }
+
+        unsafe impl<T: ?Sized + 'static> Token<T> for TypeReadToken<'_, T> {
+            fn can_access(&self, _: Option<Namespace>) -> bool {
+                true
+            }
+
+            fn is_exclusive(&self) -> bool {
+                false
+            }
+        }
+
+        unsafe impl<T: ?Sized + 'static> ReadToken<T> for TypeReadToken<'_, T> {}
+
+        impl<T: ?Sized + 'static> Clone for TypeReadToken<'_, T> {
+            fn clone(&self) -> Self {
+                let mut borrows = self.session.borrows();
+                let (rc, _) = borrows.get_mut(&(TypeId::of::<T>(), None)).unwrap();
+                *rc = rc.checked_sub(1).expect(TOO_MANY_READ_ERR);
+
+                Self {
+                    _ty: PhantomData,
+                    session: self.session,
+                }
+            }
+        }
+
+        impl<T: ?Sized + 'static> Drop for TypeReadToken<'_, T> {
+            fn drop(&mut self) {
+                let mut borrows = self.session.borrows();
+                let HashMapEntry::Occupied(mut entry) = borrows.entry((TypeId::of::<T>(), None)) else {
+                    unreachable!()
+                };
+
+                let (rc, _) = entry.get_mut();
+                *rc += 1;
+                if *rc == 0 {
+                    entry.remove();
                 }
             }
         }
