@@ -328,7 +328,7 @@ use std::{
 
 use crate::{
     debug::{AsDebugLabel, DebugLabel},
-    threading::cell::{ensure_main_thread, GlobalToken, NRefCell},
+    threading::cell::{ensure_main_thread, MainThreadToken, NRefCell},
 };
 
 // === Helpers === //
@@ -751,9 +751,9 @@ pub type CompMut<T> = RefMut<'static, T>;
 ///
 pub fn storage<T: 'static>() -> Storage<T> {
     thread_local! {
-        static STORAGES: (&'static GlobalToken, RefCell<FxHashMap<TypeId, &'static dyn Any>>) = {
+        static STORAGES: (&'static MainThreadToken, RefCell<FxHashMap<TypeId, &'static dyn Any>>) = {
             ensure_main_thread("Accessed a storage");
-            (GlobalToken::acquire(), Default::default())
+            (MainThreadToken::acquire(), Default::default())
         };
     }
 
@@ -807,7 +807,7 @@ pub fn storage<T: 'static>() -> Storage<T> {
 #[derive(Debug)]
 pub struct Storage<T: 'static> {
     inner: &'static NRefCell<StorageInner<T>>,
-    token: &'static GlobalToken,
+    token: &'static MainThreadToken,
 }
 
 type StorageData<T> = NRefCell<StorageInner<T>>;
@@ -1788,7 +1788,7 @@ impl<T: 'static> Obj<T> {
 
     pub fn try_get(self) -> Option<CompRef<T>> {
         CompRef::filter_map(
-            self.slot.borrow(GlobalToken::acquire()),
+            self.slot.borrow(MainThreadToken::acquire()),
             |slot| match slot {
                 Some(slot) if slot.entity == self.entity => Some(&slot.value),
                 _ => None,
@@ -1799,7 +1799,7 @@ impl<T: 'static> Obj<T> {
 
     pub fn try_get_mut(self) -> Option<CompMut<T>> {
         CompMut::filter_map(
-            self.slot.borrow_mut(GlobalToken::acquire()),
+            self.slot.borrow_mut(MainThreadToken::acquire()),
             |slot| match slot {
                 Some(slot) if slot.entity == self.entity => Some(&mut slot.value),
                 _ => None,
@@ -1833,7 +1833,7 @@ impl<T: 'static + fmt::Debug> fmt::Debug for Obj<T> {
         builder.field("entity", &self.entity);
 
         // If we're not the main thread...
-        let Some(token) = GlobalToken::try_acquire() else {
+        let Some(token) = MainThreadToken::try_acquire() else {
             // Ensure that it is borrowed by us and not someone else.
             return if self.is_alive() {
                 #[derive(Debug)]
@@ -2275,6 +2275,16 @@ pub mod threading {
 
         use crate::FxHashMap;
 
+        // === Helpers === //
+
+        struct NotOnMainThread;
+
+        impl fmt::Debug for NotOnMainThread {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("<not on main thread>")
+            }
+        }
+
         // === NRefCell === //
 
         #[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
@@ -2446,14 +2456,23 @@ pub mod threading {
             }
         }
 
-        impl<T: 'static + fmt::Debug> fmt::Debug for NRefCell<T> {
+        impl<T: fmt::Debug> fmt::Debug for NRefCell<T> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                // TODO: Implement
-                f.debug_struct("NRefCell").finish_non_exhaustive()
+                if is_main_thread() {
+                    f.debug_struct("NRefCell")
+                        .field("namespace", &self.namespace())
+                        .field("value", &self.value)
+                        .finish()
+                } else {
+                    f.debug_struct("NRefCell")
+                        .field("namespace", &self.namespace())
+                        .field("value", &NotOnMainThread)
+                        .finish()
+                }
             }
         }
 
-        impl<T: 'static + Default> Default for NRefCell<T> {
+        impl<T: Default> Default for NRefCell<T> {
             fn default() -> Self {
                 Self::new(T::default())
             }
@@ -2497,19 +2516,19 @@ pub mod threading {
             );
         }
 
-        // GlobalToken
+        // MainThreadToken
         #[derive(Debug, Copy, Clone)]
-        pub struct GlobalToken {
+        pub struct MainThreadToken {
             _no_send_or_sync: PhantomData<*const ()>,
         }
 
-        impl Default for GlobalToken {
+        impl Default for MainThreadToken {
             fn default() -> Self {
                 *Self::acquire()
             }
         }
 
-        impl GlobalToken {
+        impl MainThreadToken {
             pub fn try_acquire() -> Option<&'static Self> {
                 if try_become_main_thread() {
                     Some(&Self {
@@ -2521,7 +2540,7 @@ pub mod threading {
             }
 
             pub fn acquire() -> &'static Self {
-                ensure_main_thread("Attempted to acquire GlobalToken");
+                ensure_main_thread("Attempted to acquire MainThreadToken");
                 &Self {
                     _no_send_or_sync: PhantomData,
                 }
@@ -2545,7 +2564,7 @@ pub mod threading {
                 thread::scope(|s| {
                     // Spawn a new thread and join it immediately.
                     //
-                    // This ensures that, while borrows originating from our `GlobalToken`
+                    // This ensures that, while borrows originating from our `MainThreadToken`
                     // could still be ongoing, they will never be acted upon until the
                     // "reborrowing" tokens expire, which live for at most the lifetime of
                     // `ParallismSession`.
@@ -2560,7 +2579,7 @@ pub mod threading {
             }
         }
 
-        unsafe impl<T: ?Sized> Token<T> for GlobalToken {
+        unsafe impl<T: ?Sized> Token<T> for MainThreadToken {
             fn can_access(&self, _: Option<Namespace>) -> bool {
                 true
             }
@@ -2570,7 +2589,7 @@ pub mod threading {
             }
         }
 
-        unsafe impl<T: ?Sized> ExclusiveToken<T> for GlobalToken {}
+        unsafe impl<T: ?Sized> ExclusiveToken<T> for MainThreadToken {}
 
         // ParallismSession
         const TOO_MANY_EXCLUSIVE_ERR: &str = "too many TypeExclusiveTokens!";
@@ -2666,6 +2685,51 @@ pub mod threading {
                         entry.remove();
                     }
                 }
+            }
+        }
+
+        // MainThreadJail
+        pub struct MainThreadJail<T: ?Sized>(T);
+
+        impl<T: ?Sized + fmt::Debug> fmt::Debug for MainThreadJail<T> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                if is_main_thread() {
+                    f.debug_tuple("MainThreadJail").field(&&self.0).finish()
+                } else {
+                    f.debug_tuple("MainThreadJail")
+                        .field(&NotOnMainThread)
+                        .finish()
+                }
+            }
+        }
+
+        // Safety: you can only get a reference to `T` on the main thread which
+        // created the object.
+        unsafe impl<T> Sync for MainThreadJail<T> {}
+
+        impl<T> MainThreadJail<T> {
+            pub fn new(_: &MainThreadToken, value: T) -> Self {
+                MainThreadJail(value)
+            }
+
+            pub fn into_inner(self) -> T {
+                self.0
+            }
+
+            pub fn get(&self) -> &T
+            where
+                T: Sync,
+            {
+                &self.0
+            }
+
+            pub fn get_on_main(&self, _: &MainThreadToken) -> &T {
+                assert!(is_main_thread());
+                &self.0
+            }
+
+            pub fn get_mut(&mut self) -> &mut T {
+                &mut self.0
             }
         }
     }
