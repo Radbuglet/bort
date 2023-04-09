@@ -326,6 +326,8 @@ use std::{
     sync::atomic,
 };
 
+use threading::cell::{GlobalToken, NRefCell};
+
 use crate::{
     debug::{AsDebugLabel, DebugLabel},
     threading::cell::ensure_main_thread,
@@ -657,7 +659,7 @@ pub type CompBlock<T> = &'static CompBlockPointee<T>;
 
 pub type CompBlockPointee<T> = [CompSlotPointee<T>; COMP_BLOCK_SIZE];
 
-pub type CompSlotPointee<T> = RefCell<Option<T>>;
+pub type CompSlotPointee<T> = NRefCell<Option<T>>;
 
 fn use_pool<R>(id: TypeId, f: impl FnOnce(&mut Vec<&'static dyn Any>) -> R) -> R {
     thread_local! {
@@ -680,7 +682,7 @@ pub fn alloc_block<T: 'static>() -> CompBlock<T> {
             block.downcast_ref::<CompBlockPointee<T>>().unwrap()
         } else {
             // TODO: Ensure that this doesn't cause stack overflows
-            leak(std::array::from_fn(|_| RefCell::new(None)))
+            leak(std::array::from_fn(|_| NRefCell::new(None)))
         }
     })
 }
@@ -749,25 +751,28 @@ pub type CompMut<T> = RefMut<'static, T>;
 ///
 /// This is a short alias to [`Storage::<T>::acquire()`].
 ///
-pub fn storage<T: 'static>() -> &'static Storage<T> {
+pub fn storage<T: 'static>() -> Storage<T> {
     thread_local! {
-        static STORAGES: RefCell<FxHashMap<TypeId, &'static dyn Any>> = {
+        static STORAGES: (&'static GlobalToken, RefCell<FxHashMap<TypeId, &'static dyn Any>>) = {
             ensure_main_thread("Accessed a storage");
-            Default::default()
+            (GlobalToken::acquire_ref(), Default::default())
         };
     }
 
-    STORAGES.with(|db| {
-        db.borrow_mut()
+    STORAGES.with(|(token, db)| {
+        let cell = db
+            .borrow_mut()
             .entry(TypeId::of::<T>())
             .or_insert_with(|| {
-                leak(Storage::<T>(RefCell::new(StorageInner {
+                leak::<StorageData<T>>(NRefCell::new(StorageInner {
                     free_slots: Vec::new(),
                     mappings: NopHashMap::default(),
-                })))
+                }))
             })
-            .downcast_ref::<Storage<T>>()
-            .unwrap()
+            .downcast_ref::<StorageData<T>>()
+            .unwrap();
+
+        Storage { inner: cell, token }
     })
 }
 
@@ -802,7 +807,12 @@ pub fn storage<T: 'static>() -> &'static Storage<T> {
 /// `Storages` are not `Sync` because they employ un-synchronized interior mutability in the form of
 /// [`RefCell`]'ed components.
 #[derive(Debug)]
-pub struct Storage<T: 'static>(RefCell<StorageInner<T>>);
+pub struct Storage<T: 'static> {
+    inner: &'static NRefCell<StorageInner<T>>,
+    token: &'static GlobalToken,
+}
+
+type StorageData<T> = NRefCell<StorageInner<T>>;
 
 #[derive(Debug)]
 struct StorageInner<T: 'static> {
@@ -828,7 +838,7 @@ impl<T: 'static> Storage<T> {
     /// let bar = storage::<u32>();  // This is an equivalent shorter form.
     /// ```
     ///
-    pub fn acquire() -> &'static Storage<T> {
+    pub fn acquire() -> Storage<T> {
         storage()
     }
 
@@ -837,7 +847,7 @@ impl<T: 'static> Storage<T> {
         entity: Entity,
         slot: Option<CompSlot<T>>,
     ) -> Result<CompSlot<T>, CompSlot<T>> {
-        let me = &mut *self.0.borrow_mut();
+        let me = &mut *self.inner.borrow_mut(self.token);
 
         match me.mappings.entry(entity) {
             hashbrown::hash_map::Entry::Occupied(entry) => Err(entry.get().slot),
@@ -872,7 +882,7 @@ impl<T: 'static> Storage<T> {
         });
 
         // Update the storage
-        let me = &mut *self.0.borrow_mut();
+        let me = &mut *self.inner.borrow_mut(self.token);
 
         let slot = match me.mappings.entry(entity) {
             hashbrown::hash_map::Entry::Occupied(entry) => entry.get().slot,
@@ -883,7 +893,7 @@ impl<T: 'static> Storage<T> {
             }
         };
 
-        (slot, slot.borrow_mut().replace(value))
+        (slot, slot.borrow_mut(self.token).replace(value))
     }
 
     fn allocate_slot_if_needed(
@@ -985,10 +995,10 @@ impl<T: 'static> Storage<T> {
     }
 
     fn try_remove_untracked(&self, entity: Entity) -> Option<T> {
-        let mut me = self.0.borrow_mut();
+        let mut me = self.inner.borrow_mut(self.token);
 
         if let Some(mapping) = me.mappings.remove(&entity) {
-            let taken = mapping.slot.borrow_mut().take();
+            let taken = mapping.slot.borrow_mut(self.token).take();
 
             if !mapping.is_external {
                 me.free_slots.push(mapping.slot);
@@ -1001,8 +1011,8 @@ impl<T: 'static> Storage<T> {
 
     #[inline(always)]
     pub fn try_get_slot(&self, entity: Entity) -> Option<CompSlot<T>> {
-        self.0
-            .borrow()
+        self.inner
+            .borrow(self.token)
             .mappings
             .get(&entity)
             .map(|mapping| mapping.slot)
@@ -1060,7 +1070,7 @@ impl<T: 'static> Storage<T> {
     #[inline(always)]
     pub fn try_get(&self, entity: Entity) -> Option<CompRef<T>> {
         self.try_get_slot(entity)
-            .and_then(|slot| Ref::filter_map(slot.borrow(), |v| v.as_ref()).ok())
+            .and_then(|slot| Ref::filter_map(slot.borrow(self.token), |v| v.as_ref()).ok())
     }
 
     /// Attempts to fetch and mutably borrow the component belonging to the specified `entity`,
@@ -1099,7 +1109,7 @@ impl<T: 'static> Storage<T> {
     #[inline(always)]
     pub fn try_get_mut(&self, entity: Entity) -> Option<CompMut<T>> {
         self.try_get_slot(entity)
-            .map(|slot| RefMut::map(slot.borrow_mut(), |v| v.as_mut().unwrap()))
+            .map(|slot| RefMut::map(slot.borrow_mut(self.token), |v| v.as_mut().unwrap()))
     }
 
     /// Fetches and immutably borrow the component belonging to the specified `entity`, returning a
@@ -1129,7 +1139,9 @@ impl<T: 'static> Storage<T> {
     /// storage automatically.
     #[inline(always)]
     pub fn get(&self, entity: Entity) -> CompRef<T> {
-        Ref::map(self.get_slot(entity).borrow(), |v| v.as_ref().unwrap())
+        Ref::map(self.get_slot(entity).borrow(self.token), |v| {
+            v.as_ref().unwrap()
+        })
     }
 
     /// Fetches and mutably borrow the component belonging to the specified `entity`, returning a
@@ -1163,7 +1175,9 @@ impl<T: 'static> Storage<T> {
     /// storage automatically.
     #[inline(always)]
     pub fn get_mut(&self, entity: Entity) -> CompMut<T> {
-        RefMut::map(self.get_slot(entity).borrow_mut(), |v| v.as_mut().unwrap())
+        RefMut::map(self.get_slot(entity).borrow_mut(self.token), |v| {
+            v.as_mut().unwrap()
+        })
     }
 
     /// Returns whether the specified `entity` has a component of this type.
@@ -1775,18 +1789,24 @@ impl<T: 'static> Obj<T> {
     }
 
     pub fn try_get(self) -> Option<CompRef<T>> {
-        CompRef::filter_map(self.slot.borrow(), |slot| match slot {
-            Some(slot) if slot.entity == self.entity => Some(&slot.value),
-            _ => None,
-        })
+        CompRef::filter_map(
+            self.slot.borrow(GlobalToken::acquire_ref()),
+            |slot| match slot {
+                Some(slot) if slot.entity == self.entity => Some(&slot.value),
+                _ => None,
+            },
+        )
         .ok()
     }
 
     pub fn try_get_mut(self) -> Option<CompMut<T>> {
-        CompMut::filter_map(self.slot.borrow_mut(), |slot| match slot {
-            Some(slot) if slot.entity == self.entity => Some(&mut slot.value),
-            _ => None,
-        })
+        CompMut::filter_map(
+            self.slot.borrow_mut(GlobalToken::acquire_ref()),
+            |slot| match slot {
+                Some(slot) if slot.entity == self.entity => Some(&mut slot.value),
+                _ => None,
+            },
+        )
         .ok()
     }
 
@@ -1814,8 +1834,21 @@ impl<T: 'static + fmt::Debug> fmt::Debug for Obj<T> {
         let mut builder = f.debug_struct("Obj");
         builder.field("entity", &self.entity);
 
+        // If we're not the main thread...
+        let Some(token) = GlobalToken::try_acquire_ref() else {
+            // Ensure that it is borrowed by us and not someone else.
+            return if self.is_alive() {
+                #[derive(Debug)]
+                struct NonMainThread;
+
+                builder.field("value", &NonMainThread).finish()
+            } else {
+                builder.finish_non_exhaustive()
+            };
+        };
+
         // If it's already borrowed...
-        let Ok(pointee) = self.slot.try_borrow() else {
+        let Ok(pointee) = self.slot.try_borrow(token) else {
             // Ensure that it is borrowed by us and not someone else.
             return if self.is_alive() {
                 #[derive(Debug)]
@@ -2340,20 +2373,50 @@ pub mod threading {
 
         pub unsafe trait Token<T: ?Sized>: fmt::Debug {
             fn can_access(&self, namespace: Option<Namespace>) -> bool;
-            fn is_write(&self) -> bool;
+            fn is_exclusive(&self) -> bool;
         }
 
         pub unsafe trait ReadToken<T: ?Sized>: Token<T> {}
 
-        pub unsafe trait WriteToken<T: ?Sized>: Token<T> {}
+        pub unsafe trait ExclusiveToken<T: ?Sized>: Token<T> {}
 
         // GlobalToken
-        #[derive(Debug)]
+        #[derive(Debug, Copy, Clone)]
         pub struct GlobalToken {
             _no_send_sync: PhantomData<*const ()>,
         }
 
+        impl Default for GlobalToken {
+            fn default() -> Self {
+                Self::acquire()
+            }
+        }
+
         impl GlobalToken {
+            pub fn try_acquire_ref() -> Option<&'static Self> {
+                if is_main_thread() {
+                    Some(Self::acquire_ref())
+                } else {
+                    None
+                }
+            }
+
+            pub fn acquire_ref() -> &'static Self {
+                ensure_main_thread("Attempted to acquire a GlobalToken");
+
+                &Self {
+                    _no_send_sync: PhantomData,
+                }
+            }
+
+            pub fn try_acquire() -> Option<Self> {
+                if is_main_thread() {
+                    Some(Self::acquire())
+                } else {
+                    None
+                }
+            }
+
             pub fn acquire() -> Self {
                 ensure_main_thread("Attempted to acquire a GlobalToken");
 
@@ -2407,34 +2470,31 @@ pub mod threading {
                 true
             }
 
-            fn is_write(&self) -> bool {
+            fn is_exclusive(&self) -> bool {
                 true
             }
         }
 
-        unsafe impl<T: ?Sized> WriteToken<T> for GlobalToken {}
+        unsafe impl<T: ?Sized> ExclusiveToken<T> for GlobalToken {}
 
-        // TypeReadToken
-        pub struct TypeReadToken<T: ?Sized + 'static> {
-            // N.B. this can't be `Send` or `Sync` because we could be
-            // derived from a `GlobalToken`.
-            _no_send_sync: PhantomData<*const ()>,
+        // SharedTypeToken
+        pub struct SharedTypeToken<T: ?Sized + 'static> {
             _ty: PhantomData<fn() -> T>,
         }
 
-        impl<T: ?Sized + 'static> fmt::Debug for TypeReadToken<T> {
+        impl<T: ?Sized + 'static> fmt::Debug for SharedTypeToken<T> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.debug_struct("TypeReadToken")
+                f.debug_struct("SharedTypeToken")
                     .field("_ty", &self._ty)
                     .finish_non_exhaustive()
             }
         }
 
-        impl<T: ?Sized + 'static> TypeReadToken<T> {
+        impl<T: ?Sized + 'static> SharedTypeToken<T> {
             pub fn acquire() -> Self {
                 let TokenDb::Multithreaded(db) = &mut *get_db() else {
                     panic!(
-                        "Attempted to acquire TypeReadToken for component of type {} \
+                        "Attempted to acquire SharedTypeToken for component of type {} \
                          in non-multithreaded context.",
                         type_name::<T>(),
                     );
@@ -2449,7 +2509,7 @@ pub mod threading {
                     entry.rc = entry.rc.checked_sub(1).expect("created too many tokens!");
                 } else {
                     panic!(
-                        "Attempted to acquire TypeReadToken for component of type {}: component has \
+                        "Attempted to acquire SharedTypeToken for component of type {}: component has \
                             {} mutable borrower{} on thread {:?}",
                         type_name::<T>(),
                         entry.rc,
@@ -2458,26 +2518,23 @@ pub mod threading {
                     );
                 }
 
-                Self {
-                    _no_send_sync: PhantomData,
-                    _ty: PhantomData,
-                }
+                Self { _ty: PhantomData }
             }
         }
 
-        unsafe impl<T: ?Sized + 'static> Token<T> for TypeReadToken<T> {
+        unsafe impl<T: ?Sized + 'static> Token<T> for SharedTypeToken<T> {
             fn can_access(&self, _: Option<Namespace>) -> bool {
                 true
             }
 
-            fn is_write(&self) -> bool {
+            fn is_exclusive(&self) -> bool {
                 false
             }
         }
 
-        unsafe impl<T: ?Sized + 'static> ReadToken<T> for TypeReadToken<T> {}
+        unsafe impl<T: ?Sized + 'static> ReadToken<T> for SharedTypeToken<T> {}
 
-        impl<T: ?Sized + 'static> Drop for TypeReadToken<T> {
+        impl<T: ?Sized + 'static> Drop for SharedTypeToken<T> {
             fn drop(&mut self) {
                 let TokenDb::Multithreaded(db) = &mut *get_db() else {
                     unreachable!();
@@ -2495,25 +2552,25 @@ pub mod threading {
             }
         }
 
-        // TypeWriteToken
-        pub struct TypeWriteToken<T: ?Sized + 'static> {
+        // ExclusiveTypeToken
+        pub struct ExclusiveTypeToken<T: ?Sized + 'static> {
             _no_send_sync: PhantomData<*const ()>,
             _ty: PhantomData<fn() -> T>,
         }
 
-        impl<T: ?Sized + 'static> fmt::Debug for TypeWriteToken<T> {
+        impl<T: ?Sized + 'static> fmt::Debug for ExclusiveTypeToken<T> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.debug_struct("TypeWriteToken")
+                f.debug_struct("ExclusiveTypeToken")
                     .field("_ty", &self._ty)
                     .finish_non_exhaustive()
             }
         }
 
-        impl<T: ?Sized + 'static> TypeWriteToken<T> {
+        impl<T: ?Sized + 'static> ExclusiveTypeToken<T> {
             pub fn acquire() -> Self {
                 become_main_or_run_if_multithreaded(
                     format_args!(
-                        "Attempted to acquire TypeWriteToken for component of type {}",
+                        "Attempted to acquire ExclusiveTypeToken for component of type {}",
                         type_name::<T>(),
                     ),
                     |db| {
@@ -2533,7 +2590,7 @@ pub mod threading {
                             assert_eq!(
                             owning_thread.id(),
                             current_thread.id(),
-                            "Attempted to acquire TypeWriteToken for component of type {}: component has \
+                            "Attempted to acquire ExclusiveTypeToken for component of type {}: component has \
                              {} mutable borrower{} on thread {:?}; we're running on {:?}",
                             type_name::<T>(),
                             entry.rc,
@@ -2546,7 +2603,7 @@ pub mod threading {
                             entry.rc = entry.rc.checked_add(1).expect("created too many tokens!");
                         } else {
                             panic!(
-                            "Attempted to acquire TypeWriteToken for component of type {}: component has \
+                            "Attempted to acquire ExclusiveTypeToken for component of type {}: component has \
                              {} mutable borrower{} on thread {:?}",
                             type_name::<T>(),
                             entry.rc,
@@ -2564,19 +2621,19 @@ pub mod threading {
             }
         }
 
-        unsafe impl<T: ?Sized + 'static> Token<T> for TypeWriteToken<T> {
+        unsafe impl<T: ?Sized + 'static> Token<T> for ExclusiveTypeToken<T> {
             fn can_access(&self, _: Option<Namespace>) -> bool {
                 true
             }
 
-            fn is_write(&self) -> bool {
+            fn is_exclusive(&self) -> bool {
                 true
             }
         }
 
-        unsafe impl<T: ?Sized + 'static> WriteToken<T> for TypeWriteToken<T> {}
+        unsafe impl<T: ?Sized + 'static> ExclusiveToken<T> for ExclusiveTypeToken<T> {}
 
-        impl<T: ?Sized + 'static> Drop for TypeWriteToken<T> {
+        impl<T: ?Sized + 'static> Drop for ExclusiveTypeToken<T> {
             fn drop(&mut self) {
                 let db = &mut *get_db();
 
@@ -2662,7 +2719,7 @@ pub mod threading {
 
             pub fn set_namespace_ref(
                 &self,
-                guard: &impl WriteToken<T>,
+                guard: &impl ExclusiveToken<T>,
                 namespace: Option<Namespace>,
             ) {
                 self.assert_accessible_by(guard);
@@ -2716,7 +2773,7 @@ pub mod threading {
 
             pub fn try_borrow<'a>(
                 &'a self,
-                guard: &'a impl WriteToken<T>,
+                guard: &'a impl ExclusiveToken<T>,
             ) -> Result<Ref<'a, T>, BorrowError> {
                 self.assert_accessible_by(guard);
 
@@ -2732,13 +2789,13 @@ pub mod threading {
                 self.value.try_borrow()
             }
 
-            pub fn borrow<'a>(&'a self, guard: &'a impl WriteToken<T>) -> Ref<'a, T> {
+            pub fn borrow<'a>(&'a self, guard: &'a impl ExclusiveToken<T>) -> Ref<'a, T> {
                 unwrap_error(self.try_borrow(guard))
             }
 
             pub fn try_borrow_mut<'a>(
                 &'a self,
-                guard: &'a impl WriteToken<T>,
+                guard: &'a impl ExclusiveToken<T>,
             ) -> Result<RefMut<'a, T>, BorrowMutError> {
                 self.assert_accessible_by(guard);
 
@@ -2746,7 +2803,7 @@ pub mod threading {
                 self.value.try_borrow_mut()
             }
 
-            pub fn borrow_mut<'a>(&'a self, guard: &'a impl WriteToken<T>) -> RefMut<'a, T> {
+            pub fn borrow_mut<'a>(&'a self, guard: &'a impl ExclusiveToken<T>) -> RefMut<'a, T> {
                 unwrap_error(self.try_borrow_mut(guard))
             }
         }
