@@ -9,6 +9,10 @@ fn access_tests() {
         .measurement_time(Duration::from_millis(900))
         .configure_from_args();
 
+    c.bench_function("storage", |c| {
+        c.iter(|| storage::<i32>());
+    });
+
     c.bench_function("entity.get", |c| {
         let entity = OwnedEntity::new().with(3i32);
 

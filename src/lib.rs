@@ -328,7 +328,7 @@ use std::{
 
 use crate::{
     debug::{AsDebugLabel, DebugLabel},
-    threading::cell::{ensure_main_thread, MainThreadToken, NRefCell},
+    threading::cell::{ensure_main_thread, MainThreadJail, MainThreadToken, NRefCell},
 };
 
 // === Helpers === //
@@ -427,6 +427,31 @@ fn xorshift64(state: NonZeroU64) -> NonZeroU64 {
     let state = state ^ (state >> 7);
     let state = state ^ (state << 17);
     NonZeroU64::new(state).unwrap()
+}
+
+trait AnyDowncastExt: Any {
+    fn as_any(&self) -> &dyn Any;
+
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+
+    fn downcast_ref<T: 'static>(&self) -> Option<&T> {
+        self.as_any().downcast_ref()
+    }
+
+    fn downcast_mut<T: 'static>(&mut self) -> Option<&mut T> {
+        self.as_any_mut().downcast_mut()
+    }
+}
+
+// Rust currently doesn't have inherent downcast impls for `dyn (Any + Sync)`.
+impl AnyDowncastExt for dyn Any + Sync {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 }
 
 // === ComponentList === //
@@ -657,7 +682,7 @@ pub type CompBlock<T> = &'static CompBlockPointee<T>;
 
 pub type CompBlockPointee<T> = [CompSlotPointee<T>; COMP_BLOCK_SIZE];
 
-pub type CompSlotPointee<T> = NRefCell<Option<T>>;
+pub type CompSlotPointee<T> = MainThreadJail<NRefCell<Option<T>>>;
 
 fn use_pool<R>(id: TypeId, f: impl FnOnce(&mut Vec<&'static dyn Any>) -> R) -> R {
     thread_local! {
@@ -680,7 +705,7 @@ pub fn alloc_block<T: 'static>() -> CompBlock<T> {
             block.downcast_ref::<CompBlockPointee<T>>().unwrap()
         } else {
             // TODO: Ensure that this doesn't cause stack overflows
-            leak(std::array::from_fn(|_| NRefCell::new(None)))
+            leak(std::array::from_fn(|_| Default::default()))
         }
     })
 }
@@ -723,6 +748,14 @@ pub type CompRef<T> = Ref<'static, T>;
 /// all referents will expire before the owning entity will*.
 pub type CompMut<T> = RefMut<'static, T>;
 
+struct StorageDb {
+    storages: FxHashMap<TypeId, &'static (dyn Any + Sync)>,
+}
+
+static STORAGES: NRefCell<StorageDb> = NRefCell::new(StorageDb {
+    storages: FxHashMap::with_hasher(ConstSafeBuildHasherDefault::new()),
+});
+
 /// Fetches a [`Storage`] instance for the given component type `T`, which can be used to optimize
 /// tight loops fetching many entity components.
 ///
@@ -750,28 +783,21 @@ pub type CompMut<T> = RefMut<'static, T>;
 /// This is a short alias to [`Storage::<T>::acquire()`].
 ///
 pub fn storage<T: 'static>() -> Storage<T> {
-    thread_local! {
-        static STORAGES: (&'static MainThreadToken, RefCell<FxHashMap<TypeId, &'static dyn Any>>) = {
-            ensure_main_thread("Accessed a storage");
-            (MainThreadToken::acquire(), Default::default())
-        };
-    }
+    let token = MainThreadToken::acquire();
+    let mut db = STORAGES.borrow_mut(token);
+    let inner = db
+        .storages
+        .entry(TypeId::of::<T>())
+        .or_insert_with(|| {
+            leak::<StorageData<T>>(NRefCell::new(StorageInner {
+                free_slots: Vec::new(),
+                mappings: NopHashMap::default(),
+            }))
+        })
+        .downcast_ref::<StorageData<T>>()
+        .unwrap();
 
-    STORAGES.with(|(token, db)| {
-        let cell = db
-            .borrow_mut()
-            .entry(TypeId::of::<T>())
-            .or_insert_with(|| {
-                leak::<StorageData<T>>(NRefCell::new(StorageInner {
-                    free_slots: Vec::new(),
-                    mappings: NopHashMap::default(),
-                }))
-            })
-            .downcast_ref::<StorageData<T>>()
-            .unwrap();
-
-        Storage { inner: cell, token }
-    })
+    Storage { inner, token }
 }
 
 /// Storages are glorified maps from entity IDs to components of type `T` with some extra bookkeeping
@@ -891,7 +917,12 @@ impl<T: 'static> Storage<T> {
             }
         };
 
-        (slot, slot.borrow_mut(self.token).replace(value))
+        (
+            slot,
+            slot.get_on_main(self.token)
+                .borrow_mut(self.token)
+                .replace(value),
+        )
     }
 
     fn allocate_slot_if_needed(
@@ -996,7 +1027,11 @@ impl<T: 'static> Storage<T> {
         let mut me = self.inner.borrow_mut(self.token);
 
         if let Some(mapping) = me.mappings.remove(&entity) {
-            let taken = mapping.slot.borrow_mut(self.token).take();
+            let taken = mapping
+                .slot
+                .get_on_main(self.token)
+                .borrow_mut(self.token)
+                .take();
 
             if !mapping.is_external {
                 me.free_slots.push(mapping.slot);
@@ -1067,8 +1102,12 @@ impl<T: 'static> Storage<T> {
     /// storage automatically.
     #[inline(always)]
     pub fn try_get(&self, entity: Entity) -> Option<CompRef<T>> {
-        self.try_get_slot(entity)
-            .and_then(|slot| Ref::filter_map(slot.borrow(self.token), |v| v.as_ref()).ok())
+        self.try_get_slot(entity).and_then(|slot| {
+            Ref::filter_map(slot.get_on_main(self.token).borrow(self.token), |v| {
+                v.as_ref()
+            })
+            .ok()
+        })
     }
 
     /// Attempts to fetch and mutably borrow the component belonging to the specified `entity`,
@@ -1106,8 +1145,11 @@ impl<T: 'static> Storage<T> {
     /// storage automatically.
     #[inline(always)]
     pub fn try_get_mut(&self, entity: Entity) -> Option<CompMut<T>> {
-        self.try_get_slot(entity)
-            .map(|slot| RefMut::map(slot.borrow_mut(self.token), |v| v.as_mut().unwrap()))
+        self.try_get_slot(entity).map(|slot| {
+            RefMut::map(slot.get_on_main(self.token).borrow_mut(self.token), |v| {
+                v.as_mut().unwrap()
+            })
+        })
     }
 
     /// Fetches and immutably borrow the component belonging to the specified `entity`, returning a
@@ -1137,9 +1179,12 @@ impl<T: 'static> Storage<T> {
     /// storage automatically.
     #[inline(always)]
     pub fn get(&self, entity: Entity) -> CompRef<T> {
-        Ref::map(self.get_slot(entity).borrow(self.token), |v| {
-            v.as_ref().unwrap()
-        })
+        Ref::map(
+            self.get_slot(entity)
+                .get_on_main(self.token)
+                .borrow(self.token),
+            |v| v.as_ref().unwrap(),
+        )
     }
 
     /// Fetches and mutably borrow the component belonging to the specified `entity`, returning a
@@ -1173,9 +1218,12 @@ impl<T: 'static> Storage<T> {
     /// storage automatically.
     #[inline(always)]
     pub fn get_mut(&self, entity: Entity) -> CompMut<T> {
-        RefMut::map(self.get_slot(entity).borrow_mut(self.token), |v| {
-            v.as_mut().unwrap()
-        })
+        RefMut::map(
+            self.get_slot(entity)
+                .get_on_main(self.token)
+                .borrow_mut(self.token),
+            |v| v.as_mut().unwrap(),
+        )
     }
 
     /// Returns whether the specified `entity` has a component of this type.
@@ -1787,8 +1835,10 @@ impl<T: 'static> Obj<T> {
     }
 
     pub fn try_get(self) -> Option<CompRef<T>> {
+        let token = MainThreadToken::acquire();
+
         CompRef::filter_map(
-            self.slot.borrow(MainThreadToken::acquire()),
+            self.slot.get_on_main(token).borrow(token),
             |slot| match slot {
                 Some(slot) if slot.entity == self.entity => Some(&slot.value),
                 _ => None,
@@ -1798,8 +1848,10 @@ impl<T: 'static> Obj<T> {
     }
 
     pub fn try_get_mut(self) -> Option<CompMut<T>> {
+        let token = MainThreadToken::acquire();
+
         CompMut::filter_map(
-            self.slot.borrow_mut(MainThreadToken::acquire()),
+            self.slot.get_on_main(token).borrow_mut(token),
             |slot| match slot {
                 Some(slot) if slot.entity == self.entity => Some(&mut slot.value),
                 _ => None,
@@ -1846,7 +1898,7 @@ impl<T: 'static + fmt::Debug> fmt::Debug for Obj<T> {
         };
 
         // If it's already borrowed...
-        let Ok(pointee) = self.slot.try_borrow(token) else {
+        let Ok(pointee) = self.slot.get_on_main(token).try_borrow(token) else {
             // Ensure that it is borrowed by us and not someone else.
             return if self.is_alive() {
                 #[derive(Debug)]
@@ -2689,6 +2741,7 @@ pub mod threading {
         }
 
         // MainThreadJail
+        #[derive(Default)]
         pub struct MainThreadJail<T: ?Sized>(T);
 
         impl<T: ?Sized + fmt::Debug> fmt::Debug for MainThreadJail<T> {
@@ -2724,7 +2777,6 @@ pub mod threading {
             }
 
             pub fn get_on_main(&self, _: &MainThreadToken) -> &T {
-                assert!(is_main_thread());
                 &self.0
             }
 
