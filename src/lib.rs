@@ -326,11 +326,9 @@ use std::{
     sync::atomic,
 };
 
-use threading::cell::{GlobalToken, NRefCell};
-
 use crate::{
     debug::{AsDebugLabel, DebugLabel},
-    threading::cell::ensure_main_thread,
+    threading::cell::{ensure_main_thread, GlobalToken, NRefCell},
 };
 
 // === Helpers === //
@@ -755,7 +753,7 @@ pub fn storage<T: 'static>() -> Storage<T> {
     thread_local! {
         static STORAGES: (&'static GlobalToken, RefCell<FxHashMap<TypeId, &'static dyn Any>>) = {
             ensure_main_thread("Accessed a storage");
-            (GlobalToken::acquire_ref(), Default::default())
+            (GlobalToken::acquire(), Default::default())
         };
     }
 
@@ -1790,7 +1788,7 @@ impl<T: 'static> Obj<T> {
 
     pub fn try_get(self) -> Option<CompRef<T>> {
         CompRef::filter_map(
-            self.slot.borrow(GlobalToken::acquire_ref()),
+            self.slot.borrow(GlobalToken::acquire()),
             |slot| match slot {
                 Some(slot) if slot.entity == self.entity => Some(&slot.value),
                 _ => None,
@@ -1801,7 +1799,7 @@ impl<T: 'static> Obj<T> {
 
     pub fn try_get_mut(self) -> Option<CompMut<T>> {
         CompMut::filter_map(
-            self.slot.borrow_mut(GlobalToken::acquire_ref()),
+            self.slot.borrow_mut(GlobalToken::acquire()),
             |slot| match slot {
                 Some(slot) if slot.entity == self.entity => Some(&mut slot.value),
                 _ => None,
@@ -1835,7 +1833,7 @@ impl<T: 'static + fmt::Debug> fmt::Debug for Obj<T> {
         builder.field("entity", &self.entity);
 
         // If we're not the main thread...
-        let Some(token) = GlobalToken::try_acquire_ref() else {
+        let Some(token) = GlobalToken::try_acquire() else {
             // Ensure that it is borrowed by us and not someone else.
             return if self.is_alive() {
                 #[derive(Debug)]
@@ -2252,8 +2250,6 @@ pub mod debug {
 // === Threading === /
 
 pub mod threading {
-    // === Queries === //
-
     // Re-export `is_main_thread`
     pub use cell::is_main_thread;
 
@@ -2261,9 +2257,8 @@ pub mod threading {
         cell::ensure_main_thread("Tried to become the main thread");
     }
 
-    // === Cell === //
-
     pub mod cell {
+        use hashbrown::hash_map::Entry as HashMapEntry;
         use std::{
             any::{type_name, TypeId},
             cell::{BorrowError, BorrowMutError, Cell, Ref, RefCell, RefMut},
@@ -2272,94 +2267,16 @@ pub mod threading {
             marker::PhantomData,
             num::NonZeroU64,
             sync::{
-                atomic::{AtomicU64, Ordering},
+                atomic::{AtomicBool, AtomicU64, Ordering},
                 Mutex, MutexGuard,
             },
-            thread::{current, Thread},
+            thread::{self, current, Thread},
         };
 
         use crate::FxHashMap;
 
-        // === Token Database === //
+        // === NRefCell === //
 
-        enum TokenDb {
-            Unacquired,
-            Singlethreaded { main: Thread },
-            Multithreaded(TokenDbMultithreaded),
-        }
-
-        #[derive(Default)]
-        struct TokenDbMultithreaded {
-            locks: FxHashMap<(TypeId, Option<Namespace>), ComponentLockState>,
-        }
-
-        #[derive(Default)]
-        struct ComponentLockState {
-            rc: isize,
-            multithread_owner: Option<Thread>,
-        }
-
-        thread_local! {
-            static IS_MAIN_THREAD: Cell<bool> = const { Cell::new(false) };
-        }
-
-        fn get_db() -> MutexGuard<'static, TokenDb> {
-            static DB: Mutex<TokenDb> = Mutex::new(TokenDb::Unacquired);
-
-            match DB.lock() {
-                Ok(db) => db,
-                Err(err) => err.into_inner(),
-            }
-        }
-
-        pub fn is_main_thread() -> bool {
-            IS_MAIN_THREAD.with(|v| v.get())
-        }
-
-        fn become_main_or_run_if_multithreaded<A, F>(action: A, f: F)
-        where
-            A: fmt::Display,
-            F: FnOnce(&mut TokenDbMultithreaded),
-        {
-            if is_main_thread() {
-                return;
-            }
-
-            let db = &mut *get_db();
-
-            match db {
-                TokenDb::Unacquired => {
-                    debug_assert!(matches!(db, TokenDb::Unacquired));
-                    *db = TokenDb::Singlethreaded { main: current() };
-                    IS_MAIN_THREAD.with(|v| v.set(true));
-                }
-                TokenDb::Singlethreaded { main } => {
-                    let thread = current();
-                    debug_assert_ne!(main.id(), thread.id());
-                    panic!(
-                        "{action} on non-main thread. Running on {thread:?} while {main:?} has already been set \
-                        as the main thread. See the \"multi-threading\" section of the module documenation for \
-                        details."
-                    );
-                }
-                TokenDb::Multithreaded(state) => f(state),
-            }
-        }
-
-        pub(crate) fn ensure_main_thread(action: impl fmt::Display) {
-            become_main_or_run_if_multithreaded(&action, |_| {
-                let thread = current();
-                panic!(
-                    "{action} on a worker {thread:?}. This action is only intended for singlethreaded use. \
-                     Try queueing the action until the multithreaded application section finishes. See the \
-                     \"multi-threading\" section of the module documenation for details.",
-                );
-            });
-        }
-
-        // === Tokens === //
-
-        // Core
         #[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
         pub struct Namespace(NonZeroU64);
 
@@ -2379,285 +2296,6 @@ pub mod threading {
         pub unsafe trait ReadToken<T: ?Sized>: Token<T> {}
 
         pub unsafe trait ExclusiveToken<T: ?Sized>: Token<T> {}
-
-        // GlobalToken
-        #[derive(Debug, Copy, Clone)]
-        pub struct GlobalToken {
-            _no_send_sync: PhantomData<*const ()>,
-        }
-
-        impl Default for GlobalToken {
-            fn default() -> Self {
-                Self::acquire()
-            }
-        }
-
-        impl GlobalToken {
-            pub fn try_acquire_ref() -> Option<&'static Self> {
-                if is_main_thread() {
-                    Some(Self::acquire_ref())
-                } else {
-                    None
-                }
-            }
-
-            pub fn acquire_ref() -> &'static Self {
-                ensure_main_thread("Attempted to acquire a GlobalToken");
-
-                &Self {
-                    _no_send_sync: PhantomData,
-                }
-            }
-
-            pub fn try_acquire() -> Option<Self> {
-                if is_main_thread() {
-                    Some(Self::acquire())
-                } else {
-                    None
-                }
-            }
-
-            pub fn acquire() -> Self {
-                ensure_main_thread("Attempted to acquire a GlobalToken");
-
-                Self {
-                    _no_send_sync: PhantomData,
-                }
-            }
-
-            pub fn reborrow<F, R>(&self, f: F) -> R
-            where
-                F: Send + FnOnce() -> R,
-                R: Send,
-            {
-                let mut result = None;
-
-                std::thread::scope(|s| {
-                    debug_assert!(is_main_thread());
-
-                    // Transition to a multithreaded state.
-                    {
-                        let db = &mut *get_db();
-                        *db = TokenDb::Multithreaded(TokenDbMultithreaded::default());
-                    }
-
-                    // Construct a drop guard to return to a singlethreaded state once
-                    // we're done.
-                    struct Guard;
-
-                    impl Drop for Guard {
-                        fn drop(&mut self) {
-                            let db = &mut *get_db();
-                            *db = TokenDb::Singlethreaded { main: current() };
-                        }
-                    }
-
-                    let _guard = Guard;
-
-                    // Spawn a new thread and join it immediately.
-                    // This ensures that, while borrows originating from our `GlobalToken`
-                    // could still be ongoing, only one thread may actually act upon their
-                    // token's access.
-                    result = Some(s.spawn(f).join().unwrap());
-                });
-
-                result.unwrap()
-            }
-        }
-
-        unsafe impl<T: ?Sized> Token<T> for GlobalToken {
-            fn can_access(&self, _: Option<Namespace>) -> bool {
-                true
-            }
-
-            fn is_exclusive(&self) -> bool {
-                true
-            }
-        }
-
-        unsafe impl<T: ?Sized> ExclusiveToken<T> for GlobalToken {}
-
-        // SharedTypeToken
-        pub struct SharedTypeToken<T: ?Sized + 'static> {
-            _ty: PhantomData<fn() -> T>,
-        }
-
-        impl<T: ?Sized + 'static> fmt::Debug for SharedTypeToken<T> {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.debug_struct("SharedTypeToken")
-                    .field("_ty", &self._ty)
-                    .finish_non_exhaustive()
-            }
-        }
-
-        impl<T: ?Sized + 'static> SharedTypeToken<T> {
-            pub fn acquire() -> Self {
-                let TokenDb::Multithreaded(db) = &mut *get_db() else {
-                    panic!(
-                        "Attempted to acquire SharedTypeToken for component of type {} \
-                         in non-multithreaded context.",
-                        type_name::<T>(),
-                    );
-                };
-
-                let entry = db
-                    .locks
-                    .entry((TypeId::of::<T>(), None))
-                    .or_insert_with(ComponentLockState::default);
-
-                if entry.rc <= 0 {
-                    entry.rc = entry.rc.checked_sub(1).expect("created too many tokens!");
-                } else {
-                    panic!(
-                        "Attempted to acquire SharedTypeToken for component of type {}: component has \
-                            {} mutable borrower{} on thread {:?}",
-                        type_name::<T>(),
-                        entry.rc,
-                        if entry.rc == 1 { "" } else { "s" },
-                        entry.multithread_owner.as_ref().unwrap(),
-                    );
-                }
-
-                Self { _ty: PhantomData }
-            }
-        }
-
-        unsafe impl<T: ?Sized + 'static> Token<T> for SharedTypeToken<T> {
-            fn can_access(&self, _: Option<Namespace>) -> bool {
-                true
-            }
-
-            fn is_exclusive(&self) -> bool {
-                false
-            }
-        }
-
-        unsafe impl<T: ?Sized + 'static> ReadToken<T> for SharedTypeToken<T> {}
-
-        impl<T: ?Sized + 'static> Drop for SharedTypeToken<T> {
-            fn drop(&mut self) {
-                let TokenDb::Multithreaded(db) = &mut *get_db() else {
-                    unreachable!();
-                };
-
-                match db.locks.entry((TypeId::of::<T>(), None)) {
-                    hashbrown::hash_map::Entry::Occupied(mut entry) => {
-                        entry.get_mut().rc += 1;
-                        if entry.get().rc == 0 {
-                            entry.remove();
-                        }
-                    }
-                    hashbrown::hash_map::Entry::Vacant(_) => unreachable!(),
-                }
-            }
-        }
-
-        // ExclusiveTypeToken
-        pub struct ExclusiveTypeToken<T: ?Sized + 'static> {
-            _no_send_sync: PhantomData<*const ()>,
-            _ty: PhantomData<fn() -> T>,
-        }
-
-        impl<T: ?Sized + 'static> fmt::Debug for ExclusiveTypeToken<T> {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.debug_struct("ExclusiveTypeToken")
-                    .field("_ty", &self._ty)
-                    .finish_non_exhaustive()
-            }
-        }
-
-        impl<T: ?Sized + 'static> ExclusiveTypeToken<T> {
-            pub fn acquire() -> Self {
-                become_main_or_run_if_multithreaded(
-                    format_args!(
-                        "Attempted to acquire ExclusiveTypeToken for component of type {}",
-                        type_name::<T>(),
-                    ),
-                    |db| {
-                        let entry = db
-                            .locks
-                            .entry((TypeId::of::<T>(), None))
-                            .or_insert_with(ComponentLockState::default);
-
-                        if entry.rc == 0 {
-                            entry.rc = 1;
-                            entry.multithread_owner = Some(current());
-                        } else if entry.rc > 0 {
-                            // Ensure that we're running on an appropriate thread.
-                            let owning_thread = entry.multithread_owner.as_ref().unwrap();
-                            let current_thread = current();
-
-                            assert_eq!(
-                            owning_thread.id(),
-                            current_thread.id(),
-                            "Attempted to acquire ExclusiveTypeToken for component of type {}: component has \
-                             {} mutable borrower{} on thread {:?}; we're running on {:?}",
-                            type_name::<T>(),
-                            entry.rc,
-                            if entry.rc == 1 { "" } else { "s" },
-                            owning_thread,
-                            current_thread,
-                        );
-
-                            // Increment the reference count
-                            entry.rc = entry.rc.checked_add(1).expect("created too many tokens!");
-                        } else {
-                            panic!(
-                            "Attempted to acquire ExclusiveTypeToken for component of type {}: component has \
-                             {} mutable borrower{} on thread {:?}",
-                            type_name::<T>(),
-                            entry.rc,
-                            if entry.rc == 1 { "" } else { "s" },
-                            entry.multithread_owner.as_ref().unwrap(),
-                        );
-                        }
-                    },
-                );
-
-                Self {
-                    _no_send_sync: PhantomData,
-                    _ty: PhantomData,
-                }
-            }
-        }
-
-        unsafe impl<T: ?Sized + 'static> Token<T> for ExclusiveTypeToken<T> {
-            fn can_access(&self, _: Option<Namespace>) -> bool {
-                true
-            }
-
-            fn is_exclusive(&self) -> bool {
-                true
-            }
-        }
-
-        unsafe impl<T: ?Sized + 'static> ExclusiveToken<T> for ExclusiveTypeToken<T> {}
-
-        impl<T: ?Sized + 'static> Drop for ExclusiveTypeToken<T> {
-            fn drop(&mut self) {
-                let db = &mut *get_db();
-
-                match db {
-                    TokenDb::Unacquired => unreachable!(),
-                    TokenDb::Singlethreaded { main } => {
-                        debug_assert_eq!(current().id(), main.id());
-                    }
-                    TokenDb::Multithreaded(db) => match db.locks.entry((TypeId::of::<T>(), None)) {
-                        hashbrown::hash_map::Entry::Occupied(mut entry) => {
-                            entry.get_mut().rc -= 1;
-                            if entry.get().rc == 0 {
-                                entry.remove();
-                            }
-                        }
-                        hashbrown::hash_map::Entry::Vacant(_) => unreachable!(),
-                    },
-                }
-            }
-        }
-
-        // TODO: NamespacedReadToken and NamespacedWriteToken
-
-        // === NRefCell === //
 
         fn unwrap_error<T, E: Error>(result: Result<T, E>) -> T {
             result.unwrap_or_else(|e| panic!("{e}"))
@@ -2818,6 +2456,216 @@ pub mod threading {
         impl<T: 'static + Default> Default for NRefCell<T> {
             fn default() -> Self {
                 Self::new(T::default())
+            }
+        }
+
+        // === Tokens === //
+
+        // Blessing
+        static HAS_MAIN_THREAD: AtomicBool = AtomicBool::new(false);
+
+        thread_local! {
+            static IS_MAIN_THREAD: Cell<bool> = const { Cell::new(false) };
+        }
+
+        pub fn is_main_thread() -> bool {
+            IS_MAIN_THREAD.with(|v| v.get())
+        }
+
+        #[must_use]
+        pub fn try_become_main_thread() -> bool {
+            if is_main_thread() {
+                return true;
+            }
+
+            if HAS_MAIN_THREAD
+                .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                IS_MAIN_THREAD.with(|v| v.set(true));
+                true
+            } else {
+                false
+            }
+        }
+
+        pub(crate) fn ensure_main_thread(action: impl fmt::Display) {
+            assert!(
+                try_become_main_thread(),
+                "{action} on non-main thread. See the \"multi-threading\" section of \
+                 the module documenation for details.",
+            );
+        }
+
+        // GlobalToken
+        #[derive(Debug, Copy, Clone)]
+        pub struct GlobalToken {
+            _no_send_or_sync: PhantomData<*const ()>,
+        }
+
+        impl Default for GlobalToken {
+            fn default() -> Self {
+                *Self::acquire()
+            }
+        }
+
+        impl GlobalToken {
+            pub fn try_acquire() -> Option<&'static Self> {
+                if try_become_main_thread() {
+                    Some(&Self {
+                        _no_send_or_sync: PhantomData,
+                    })
+                } else {
+                    None
+                }
+            }
+
+            pub fn acquire() -> &'static Self {
+                ensure_main_thread("Attempted to acquire GlobalToken");
+                &Self {
+                    _no_send_or_sync: PhantomData,
+                }
+            }
+
+            pub fn exclusive_token<T: ?Sized + 'static>(&self) -> TypeExclusiveToken<'static, T> {
+                TypeExclusiveToken {
+                    _no_send_or_sync: PhantomData,
+                    _ty: PhantomData,
+                    session: None,
+                }
+            }
+
+            pub fn parallelize<F, R>(f: F) -> R
+            where
+                F: Send + FnOnce(&mut ParallismSession) -> R,
+                R: Send,
+            {
+                let mut result = None;
+
+                thread::scope(|s| {
+                    // Spawn a new thread and join it immediately.
+                    //
+                    // This ensures that, while borrows originating from our `GlobalToken`
+                    // could still be ongoing, they will never be acted upon until the
+                    // "reborrowing" tokens expire, which live for at most the lifetime of
+                    // `ParallismSession`.
+                    s.spawn(|| {
+                        result = Some(f(&mut ParallismSession {
+                            borrows: Default::default(),
+                        }));
+                    });
+                });
+
+                result.unwrap()
+            }
+        }
+
+        unsafe impl<T: ?Sized> Token<T> for GlobalToken {
+            fn can_access(&self, _: Option<Namespace>) -> bool {
+                true
+            }
+
+            fn is_exclusive(&self) -> bool {
+                true
+            }
+        }
+
+        unsafe impl<T: ?Sized> ExclusiveToken<T> for GlobalToken {}
+
+        // ParallismSession
+        const TOO_MANY_EXCLUSIVE_ERR: &str = "too many TypeExclusiveTokens!";
+
+        type BorrowMap = FxHashMap<(TypeId, Option<Namespace>), (isize, Option<Thread>)>;
+
+        #[derive(Debug)]
+        pub struct ParallismSession {
+            borrows: Mutex<BorrowMap>,
+        }
+
+        impl ParallismSession {
+            fn borrows(&self) -> MutexGuard<BorrowMap> {
+                match self.borrows.lock() {
+                    Ok(guard) => guard,
+                    Err(err) => err.into_inner(),
+                }
+            }
+
+            pub fn exclusive_token<T: ?Sized + 'static>(&self) -> TypeExclusiveToken<'_, T> {
+                // Increment reference count
+                match self.borrows().entry((TypeId::of::<T>(), None)) {
+                    HashMapEntry::Occupied(mut entry) => {
+                        let (rc, Some(owner)) = entry.get_mut() else {
+                            unreachable!();
+                        };
+
+                        // Validate thread ID
+                        let ty_name = type_name::<T>();
+                        let current = current();
+
+                        assert_eq!(
+                            owner.id(),
+                            current.id(),
+                            "Cannot acquire a `TypeExclusiveToken<{ty_name}>` to a type already acquired by
+                             the thread {owner:?} (current thread: {current:?})",
+                        );
+
+                        // Increment rc
+                        *rc = rc.checked_add(1).expect(TOO_MANY_EXCLUSIVE_ERR);
+                    }
+                    HashMapEntry::Vacant(entry) => {
+                        entry.insert((1, Some(current())));
+                    }
+                }
+
+                // Construct token
+                TypeExclusiveToken {
+                    _no_send_or_sync: PhantomData,
+                    _ty: PhantomData,
+                    session: Some(self),
+                }
+            }
+
+            // TODO: Remaining token types (shared + namespaced variants)
+        }
+
+        // TypeExclusiveToken
+        #[derive(Debug)]
+        pub struct TypeExclusiveToken<'a, T: ?Sized + 'static> {
+            _no_send_or_sync: PhantomData<*const ()>,
+            _ty: PhantomData<fn() -> T>,
+            session: Option<&'a ParallismSession>,
+        }
+
+        impl<T: ?Sized + 'static> Clone for TypeExclusiveToken<'_, T> {
+            fn clone(&self) -> Self {
+                if let Some(session) = self.session {
+                    let mut borrows = session.borrows();
+                    let (rc, _) = borrows.get_mut(&(TypeId::of::<T>(), None)).unwrap();
+                    *rc = rc.checked_add(1).expect(TOO_MANY_EXCLUSIVE_ERR);
+                }
+
+                Self {
+                    _no_send_or_sync: PhantomData,
+                    _ty: PhantomData,
+                    session: self.session,
+                }
+            }
+        }
+
+        impl<T: ?Sized + 'static> Drop for TypeExclusiveToken<'_, T> {
+            fn drop(&mut self) {
+                if let Some(session) = self.session {
+                    let mut borrows = session.borrows();
+                    let HashMapEntry::Occupied(mut entry) = borrows.entry((TypeId::of::<T>(), None)) else {
+                        unreachable!()
+                    };
+
+                    let (rc, _) = entry.get_mut();
+                    *rc -= 1;
+                    if *rc == 0 {
+                        entry.remove();
+                    }
+                }
             }
         }
     }
