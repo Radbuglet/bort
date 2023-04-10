@@ -1017,13 +1017,23 @@ impl<T: 'static> Obj<T> {
     }
 
     pub fn get(self) -> CompRef<T> {
-        self.try_get()
-            .expect("attempted to get the value of a dead Obj")
+        self.try_get().unwrap_or_else(|| {
+            panic!(
+                "attempted to get the value of a dead `Obj<{}>` corresponding to {:?}",
+                type_name::<T>(),
+                self.entity()
+            )
+        })
     }
 
     pub fn get_mut(self) -> CompMut<T> {
-        self.try_get_mut()
-            .expect("attempted to get the value of a dead Obj")
+        self.try_get_mut().unwrap_or_else(|| {
+            panic!(
+                "attempted to get the value of a dead `Obj<{}>` corresponding to {:?}",
+                type_name::<T>(),
+                self.entity()
+            )
+        })
     }
 
     pub fn is_alive(self) -> bool {
@@ -1335,20 +1345,20 @@ pub mod threading {
 
     pub fn parallelize<F, R>(f: F) -> R
     where
-        F: Send + FnOnce(ParallismSession<'_>) -> R,
+        F: Send + FnOnce(ParallelismSession<'_>) -> R,
         R: Send,
     {
-        MainThreadToken::acquire().parallelize(|cx| f(ParallismSession::new(cx)))
+        MainThreadToken::acquire().parallelize(|cx| f(ParallelismSession::new(cx)))
     }
 
-    // ParallismSession
+    // ParallelismSession
     #[derive(Debug, Clone)]
-    pub struct ParallismSession<'a> {
+    pub struct ParallelismSession<'a> {
         cx: &'a ParallelTokenSource,
         db_token: TypeReadToken<'a, StorageDb>,
     }
 
-    impl<'a> ParallismSession<'a> {
+    impl<'a> ParallelismSession<'a> {
         pub fn new(cx: &'a ParallelTokenSource) -> Self {
             Self {
                 cx,
@@ -1780,7 +1790,7 @@ pub mod threading {
             assert!(
                 try_become_main_thread(),
                 "{action} on non-main thread. See the \"multi-threading\" section of \
-                 the module documenation for details.",
+                 the module documentation for details.",
             );
         }
 

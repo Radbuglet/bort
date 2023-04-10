@@ -4,6 +4,7 @@ Core improvements:
 
 - [ ] Add helper methods to `CompSlot`
 - [ ] Allow users to specify destructor components that get dropped first
+- [ ] Implement `Obj`
 
 Multi-threading improvements:
 
@@ -26,6 +27,7 @@ ECS improvements:
 
 Performance improvements:
 
+- [ ] Optimize allocation
 - [ ] Investigate codegen
 - [ ] Allow blocks to be repurposed for other types
 
