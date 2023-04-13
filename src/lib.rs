@@ -1645,10 +1645,10 @@ pub mod threading {
 
             pub fn set_namespace_ref(
                 &self,
-                guard: &impl ExclusiveToken<T>,
+                token: &impl ExclusiveToken<T>,
                 namespace: Option<Namespace>,
             ) {
-                self.assert_accessible_by(guard);
+                self.assert_accessible_by(token);
 
                 // Safety: we can read and mutate the `value`'s borrow count safely because we are the
                 // only thread with "write" namespace access and we know that fact will not change during
@@ -1679,58 +1679,58 @@ pub mod threading {
 
             pub fn try_get<'a>(
                 &'a self,
-                guard: &'a impl ReadToken<T>,
+                token: &'a impl ReadToken<T>,
             ) -> Result<&'a T, BorrowError> {
-                self.assert_accessible_by(guard);
+                self.assert_accessible_by(token);
 
                 // Safety: we know we can read from the `value`'s borrow count safely because this method
-                // can only be run so long as we have `NamespaceReadGuard`s alive and we can't cause reads
-                // until we get a `NamespaceWriteGuard`s, which is only possible once `guard` is dead.
+                // can only be run so long as we have `ReadToken`s alive and we can't cause reads
+                // until we get a `ExclusiveToken`s, which is only possible once `token` is dead.
                 unsafe {
                     // Safety: additionally, we know nobody can borrow this cell mutably until all
-                    // `NamespaceReadGuard`s die out so this is safe as well.
+                    // `ReadToken`s die out so this is safe as well.
                     self.value.try_borrow_unguarded()
                 }
             }
 
-            pub fn get<'a>(&'a self, guard: &'a impl ReadToken<T>) -> &'a T {
-                unwrap_error(self.try_get(guard))
+            pub fn get<'a>(&'a self, token: &'a impl ReadToken<T>) -> &'a T {
+                unwrap_error(self.try_get(token))
             }
 
             pub fn try_borrow<'a>(
                 &'a self,
-                guard: &'a impl ExclusiveToken<T>,
+                token: &'a impl ExclusiveToken<T>,
             ) -> Result<Ref<'a, T>, BorrowError> {
-                self.assert_accessible_by(guard);
+                self.assert_accessible_by(token);
 
                 // Safety: we know we can read and write from the `value`'s borrow count safely because
-                // this method can only be run so long as we have `NamespaceWriteGuard`s alive and we
+                // this method can only be run so long as we have `ExclusiveToken`s alive and we
                 // can't...
                 //
-                // a) construct `NamespaceReadGuard`s to use on other threads until `guard` dies out
-                // b) move this `guard` to another thread because it's neither `Send` nor `Sync`
+                // a) construct `ReadToken`s to use on other threads until `token` dies out
+                // b) move this `token` to another thread because it's neither `Send` nor `Sync`
                 // c) change the owner to admit new namespaces on other threads until all the borrows
                 //    expire.
                 //
                 self.value.try_borrow()
             }
 
-            pub fn borrow<'a>(&'a self, guard: &'a impl ExclusiveToken<T>) -> Ref<'a, T> {
-                unwrap_error(self.try_borrow(guard))
+            pub fn borrow<'a>(&'a self, token: &'a impl ExclusiveToken<T>) -> Ref<'a, T> {
+                unwrap_error(self.try_borrow(token))
             }
 
             pub fn try_borrow_mut<'a>(
                 &'a self,
-                guard: &'a impl ExclusiveToken<T>,
+                token: &'a impl ExclusiveToken<T>,
             ) -> Result<RefMut<'a, T>, BorrowMutError> {
-                self.assert_accessible_by(guard);
+                self.assert_accessible_by(token);
 
                 // Safety: see `try_borrow`.
                 self.value.try_borrow_mut()
             }
 
-            pub fn borrow_mut<'a>(&'a self, guard: &'a impl ExclusiveToken<T>) -> RefMut<'a, T> {
-                unwrap_error(self.try_borrow_mut(guard))
+            pub fn borrow_mut<'a>(&'a self, token: &'a impl ExclusiveToken<T>) -> RefMut<'a, T> {
+                unwrap_error(self.try_borrow_mut(token))
             }
         }
 
@@ -2076,12 +2076,11 @@ pub mod threading {
             }
         }
 
-        // Safety: you can only get a reference to `T` on the main thread which
-        // created the object.
+        // Safety: you can only get a reference to `T` if you're the main thread.
         unsafe impl<T> Sync for MainThreadJail<T> {}
 
         impl<T> MainThreadJail<T> {
-            pub fn new(_: &MainThreadToken, value: T) -> Self {
+            pub fn new(value: T) -> Self {
                 MainThreadJail(value)
             }
 
@@ -2102,6 +2101,169 @@ pub mod threading {
 
             pub fn get_mut(&mut self) -> &mut T {
                 &mut self.0
+            }
+        }
+    }
+}
+
+// === Block === //
+
+pub mod block {
+    use std::{
+        cell::{Ref, RefMut},
+        fmt, iter,
+        ptr::NonNull,
+        sync::Arc,
+    };
+
+    use crate::threading::cell::{ExclusiveToken, MainThreadJail, NRefCell, ReadToken};
+
+    // === Core === //
+
+    #[derive(Debug, Copy, Clone)]
+    pub struct BlockSlot<T>(pub Option<T>);
+
+    pub struct Block<T> {
+        values: NonNull<[NRefCell<BlockSlot<T>>]>,
+    }
+
+    impl<T> Block<T> {
+        // === Core === //
+
+        pub fn new(len: usize) -> Self {
+            let values =
+                Box::from_iter(iter::repeat_with(|| NRefCell::new(BlockSlot(None))).take(len));
+            let values = NonNull::new(Box::into_raw(values)).unwrap();
+            Self { values }
+        }
+
+        pub fn values(&self) -> &[NRefCell<BlockSlot<T>>] {
+            unsafe {
+                // Safety: calling `Block::destroy()` requires transferring ownership of `Block` but `'_`
+                // lives for as long as our borrow to the block does, making this call sound.
+                self.values_prolonged()
+            }
+        }
+
+        pub fn immutable_values<'b>(
+            &self,
+            _: &'b impl ReadToken<BlockSlot<T>>,
+        ) -> &'b [NRefCell<BlockSlot<T>>] {
+            unsafe {
+                // Safety: destroying this block requires you to call `Block::destroy()` with an
+                // `ExclusiveToken` for `BlockSlot<T>`. Since we have a `ReadToken` to that type and
+                // we limit the returned lifetime to the token lifetime, we know this block will not
+                // be destroyed for `'b`, making this call sound.
+                self.values_prolonged()
+            }
+        }
+
+        unsafe fn values_prolonged<'b>(&self) -> &'b [NRefCell<BlockSlot<T>>] {
+            unsafe {
+                // Safety: the caller asserts that the `Block` will not be destroyed for as long as `'b`
+                // remains alive and we know that the `values` pointer is valid until that point.
+                self.values.as_ref()
+            }
+        }
+
+        pub fn len(&self) -> usize {
+            self.values().len()
+        }
+
+        pub fn has_referents(&self, token: &impl ExclusiveToken<BlockSlot<T>>) -> bool {
+            self.values()
+                .iter()
+                .any(|cell| cell.try_borrow_mut(token).is_ok())
+        }
+
+        pub fn destroy(self, token: &impl ExclusiveToken<BlockSlot<T>>) {
+            // Ensure that every `NRefCell` is no longer borrowed.
+            assert!(
+                !self.has_referents(token),
+                "Cannot destroy() a block which still has referents."
+            );
+
+            // Deallocate the block and all of its contents
+            let _ = unsafe {
+                // Safety: `NonNull<T>` from `Box<T>`, `Box<T>` from `NonNull<T>`.
+                //
+                // By structure invariants, we know that we can get exclusive access to this block if we
+                // have an exclusive token to the component type and all the cells are unborrowed. Hence,
+                // acquiring ownership is legal.
+                Box::from_raw(self.values.as_ptr())
+            };
+
+            std::mem::forget(self);
+        }
+
+        // === Borrow === //
+
+        pub fn get<'b>(
+            &self,
+            token: &'b impl ReadToken<BlockSlot<T>>,
+            index: usize,
+        ) -> &'b BlockSlot<T> {
+            self.immutable_values(token)[index].get(token)
+        }
+
+        pub fn borrow<'b>(
+            &self,
+            token: &'b impl ExclusiveToken<BlockSlot<T>>,
+            index: usize,
+        ) -> Ref<'b, BlockSlot<T>> {
+            unsafe {
+                // Safety: we know that the block cannot be deallocated until this reference expires.
+                self.values_prolonged()[index].borrow(token)
+            }
+        }
+
+        pub fn borrow_mut<'b>(
+            &self,
+            token: &'b impl ExclusiveToken<BlockSlot<T>>,
+            index: usize,
+        ) -> RefMut<'b, BlockSlot<T>> {
+            unsafe {
+                // Safety: we know that the block cannot be deallocated until this reference expires.
+                self.values_prolonged()[index].borrow_mut(token)
+            }
+        }
+    }
+
+    impl<T: fmt::Debug> fmt::Debug for Block<T> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("Block")
+                .field("values", &self.values())
+                .finish()
+        }
+    }
+
+    // Safety: this behaves like `Arc<T>` in terms of the access to the values we grant.
+    unsafe impl<T: Send + Send> Send for Block<T> {}
+    unsafe impl<T: Send + Send> Sync for Block<T> {}
+
+    impl<T> Drop for Block<T> {
+        fn drop(&mut self) {
+            panic!(
+                "Blocks must be destroyed with the `Block::destroy()` method instead of dropped."
+            );
+        }
+    }
+
+    // === Arc'ed === //
+
+    pub type ArcBlock<T> = Arc<MainThreadJail<Block<T>>>;
+
+    #[derive(Debug)]
+    pub struct ArcBlockLocation<T> {
+        pub block: ArcBlock<T>,
+        pub index: usize,
+    }
+
+    impl<T> Clone for ArcBlockLocation<T> {
+        fn clone(&self) -> Self {
+            Self {
+                block: self.block.clone(),
+                index: self.index,
             }
         }
     }
