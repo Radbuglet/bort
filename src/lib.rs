@@ -524,7 +524,7 @@ impl<T: 'static> Storage<T> {
 
         (
             slot,
-            slot.get_on_main(self.token)
+            slot.get_with_unjail(self.token)
                 .borrow_mut(self.token)
                 .replace(value),
         )
@@ -589,7 +589,7 @@ impl<T: 'static> Storage<T> {
         if let Some(mapping) = me.mappings.remove(&entity) {
             let taken = mapping
                 .slot
-                .get_on_main(self.token)
+                .get_with_unjail(self.token)
                 .borrow_mut(self.token)
                 .take();
 
@@ -622,7 +622,7 @@ impl<T: 'static> Storage<T> {
 
     pub fn try_get(&self, entity: Entity) -> Option<CompRef<T>> {
         self.try_get_slot(entity).and_then(|slot| {
-            Ref::filter_map(slot.get_on_main(self.token).borrow(self.token), |v| {
+            Ref::filter_map(slot.get_with_unjail(self.token).borrow(self.token), |v| {
                 v.as_ref()
             })
             .ok()
@@ -631,16 +631,17 @@ impl<T: 'static> Storage<T> {
 
     pub fn try_get_mut(&self, entity: Entity) -> Option<CompMut<T>> {
         self.try_get_slot(entity).map(|slot| {
-            RefMut::map(slot.get_on_main(self.token).borrow_mut(self.token), |v| {
-                v.as_mut().unwrap()
-            })
+            RefMut::map(
+                slot.get_with_unjail(self.token).borrow_mut(self.token),
+                |v| v.as_mut().unwrap(),
+            )
         })
     }
 
     pub fn get(&self, entity: Entity) -> CompRef<T> {
         Ref::map(
             self.get_slot(entity)
-                .get_on_main(self.token)
+                .get_with_unjail(self.token)
                 .borrow(self.token),
             |v| v.as_ref().unwrap(),
         )
@@ -649,7 +650,7 @@ impl<T: 'static> Storage<T> {
     pub fn get_mut(&self, entity: Entity) -> CompMut<T> {
         RefMut::map(
             self.get_slot(entity)
-                .get_on_main(self.token)
+                .get_with_unjail(self.token)
                 .borrow_mut(self.token),
             |v| v.as_mut().unwrap(),
         )
@@ -994,7 +995,7 @@ impl<T: 'static> Obj<T> {
         let token = MainThreadToken::acquire();
 
         CompRef::filter_map(
-            self.slot.get_on_main(token).borrow(token),
+            self.slot.get_with_unjail(token).borrow(token),
             |slot| match slot {
                 Some(slot) if slot.entity == self.entity => Some(&slot.value),
                 _ => None,
@@ -1007,7 +1008,7 @@ impl<T: 'static> Obj<T> {
         let token = MainThreadToken::acquire();
 
         CompMut::filter_map(
-            self.slot.get_on_main(token).borrow_mut(token),
+            self.slot.get_with_unjail(token).borrow_mut(token),
             |slot| match slot {
                 Some(slot) if slot.entity == self.entity => Some(&mut slot.value),
                 _ => None,
@@ -1064,7 +1065,7 @@ impl<T: 'static + fmt::Debug> fmt::Debug for Obj<T> {
         };
 
         // If it's already borrowed...
-        let Ok(pointee) = self.slot.get_on_main(token).try_borrow(token) else {
+        let Ok(pointee) = self.slot.get_with_unjail(token).try_borrow(token) else {
             // Ensure that it is borrowed by us and not someone else.
             return if self.is_alive() {
                 #[derive(Debug)]
@@ -2095,13 +2096,31 @@ pub mod threading {
                 &self.0
             }
 
-            pub fn get_on_main(&self, _: &MainThreadToken) -> &T {
+            pub fn get_with_unjail(&self, _: &impl MainThreadUnJailToken<T>) -> &T {
                 &self.0
             }
 
             pub fn get_mut(&mut self) -> &mut T {
                 &mut self.0
             }
+        }
+
+        pub unsafe trait MainThreadUnJailToken<T: ?Sized> {}
+
+        unsafe impl<T: ?Sized> MainThreadUnJailToken<T> for MainThreadToken {}
+
+        unsafe impl<T, U> MainThreadUnJailToken<T> for TypeExclusiveToken<'_, U>
+        where
+            T: ?Sized + Send + Sync,
+            U: ?Sized,
+        {
+        }
+
+        unsafe impl<T, U> MainThreadUnJailToken<T> for TypeReadToken<'_, U>
+        where
+            T: ?Sized + Send + Sync,
+            U: ?Sized,
+        {
         }
     }
 }
@@ -2111,44 +2130,38 @@ pub mod threading {
 pub mod block {
     use std::{
         cell::{Ref, RefMut},
-        fmt, iter,
-        ptr::NonNull,
+        iter,
+        mem::{self, ManuallyDrop},
         sync::Arc,
     };
 
-    use crate::threading::cell::{ExclusiveToken, MainThreadJail, NRefCell, ReadToken};
+    use crate::threading::cell::{
+        ExclusiveToken, MainThreadJail, MainThreadUnJailToken, NRefCell, ReadToken,
+    };
 
-    // === Core === //
+    type BlockSlice<T> = [MainThreadJail<NRefCell<BlockSlot<T>>>];
 
-    #[derive(Debug, Copy, Clone)]
+    #[derive(Debug, Clone)]
     pub struct BlockSlot<T>(pub Option<T>);
 
+    // === Block === //
+
+    #[derive(Debug)]
     pub struct Block<T> {
-        values: NonNull<[NRefCell<BlockSlot<T>>]>,
+        slots: Arc<BlockSlice<T>>,
     }
 
     impl<T> Block<T> {
         // === Core === //
 
-        pub fn new(len: usize) -> Self {
-            let values =
-                Box::from_iter(iter::repeat_with(|| NRefCell::new(BlockSlot(None))).take(len));
-            let values = NonNull::new(Box::into_raw(values)).unwrap();
-            Self { values }
-        }
-
-        pub fn values(&self) -> &[NRefCell<BlockSlot<T>>] {
-            unsafe {
-                // Safety: calling `Block::destroy()` requires transferring ownership of `Block` but `'_`
-                // lives for as long as our borrow to the block does, making this call sound.
-                self.values_prolonged()
-            }
+        pub fn values(&self) -> &BlockSlice<T> {
+            &self.slots
         }
 
         pub fn immutable_values<'b>(
             &self,
             _: &'b impl ReadToken<BlockSlot<T>>,
-        ) -> &'b [NRefCell<BlockSlot<T>>] {
+        ) -> &'b BlockSlice<T> {
             unsafe {
                 // Safety: destroying this block requires you to call `Block::destroy()` with an
                 // `ExclusiveToken` for `BlockSlot<T>`. Since we have a `ReadToken` to that type and
@@ -2158,113 +2171,131 @@ pub mod block {
             }
         }
 
-        unsafe fn values_prolonged<'b>(&self) -> &'b [NRefCell<BlockSlot<T>>] {
-            unsafe {
-                // Safety: the caller asserts that the `Block` will not be destroyed for as long as `'b`
-                // remains alive and we know that the `values` pointer is valid until that point.
-                self.values.as_ref()
-            }
+        unsafe fn values_prolonged<'b>(&self) -> &'b BlockSlice<T> {
+            unsafe { mem::transmute(self.values()) }
         }
 
         pub fn len(&self) -> usize {
             self.values().len()
         }
 
-        pub fn has_referents(&self, token: &impl ExclusiveToken<BlockSlot<T>>) -> bool {
-            self.values()
-                .iter()
-                .any(|cell| cell.try_borrow_mut(token).is_ok())
+        // === Borrow Methods === //
+
+        pub fn get<'b, U>(&self, token: &'b U, index: usize) -> &'b BlockSlot<T>
+        where
+            U: ReadToken<BlockSlot<T>> + MainThreadUnJailToken<NRefCell<BlockSlot<T>>>,
+        {
+            self.immutable_values(token)[index]
+                .get_with_unjail(token)
+                .get(token)
         }
 
-        pub fn destroy(self, token: &impl ExclusiveToken<BlockSlot<T>>) {
+        pub fn borrow<'b, U>(&self, token: &'b U, index: usize) -> Ref<'b, BlockSlot<T>>
+        where
+            U: ExclusiveToken<BlockSlot<T>> + MainThreadUnJailToken<NRefCell<BlockSlot<T>>>,
+        {
+            unsafe {
+                // Safety: our pointee cannot be invalidated until `OwnedBlock::destroy()` is called,
+                // which ensures that all our slots are unborrowed before proceeding. Hence, this
+                // prolongation is sound.
+                &self.values_prolonged()[index]
+            }
+            .get_with_unjail(token)
+            .borrow(token)
+        }
+
+        pub fn borrow_mut<'b, U>(&self, token: &'b U, index: usize) -> RefMut<'b, BlockSlot<T>>
+        where
+            U: ExclusiveToken<BlockSlot<T>> + MainThreadUnJailToken<NRefCell<BlockSlot<T>>>,
+        {
+            unsafe {
+                // Safety: our pointee cannot be invalidated until `OwnedBlock::destroy()` is called,
+                // which ensures that all our slots are unborrowed before proceeding. Hence, this
+                // prolongation is sound.
+                &self.values_prolonged()[index]
+            }
+            .get_with_unjail(token)
+            .borrow_mut(token)
+        }
+    }
+
+    impl<T> Clone for Block<T> {
+        fn clone(&self) -> Self {
+            Self {
+                slots: self.slots.clone(),
+            }
+        }
+    }
+
+    // Safety: Normally, `Arc<U>` is `Send` if `U: Send + Sync`. The `MainThreadJail`
+    // around every `T` already ensures that `U` is `Sync` but the value may not be `Send`.
+    // `Arc` only really needs `U: Send` to create a mutable reference to its pointee
+    // e.g. when using `make_unique` or `drop`. One of the major properties of our `Block`
+    // is that it won't invalidate references until the slot has been fully vacated i.e.
+    // doesn't contain an instance of `T`. Hence, this object is always `Send`.
+    unsafe impl<T> Send for Block<T> {}
+
+    // === OwnedBlock === //
+
+    #[derive(Debug)]
+    pub struct OwnedBlock<T> {
+        block: ManuallyDrop<Option<Block<T>>>,
+    }
+
+    impl<T> OwnedBlock<T> {
+        pub fn new(len: usize) -> Self {
+            let slots =
+                iter::repeat_with(|| MainThreadJail::new(NRefCell::new(BlockSlot(None)))).take(len);
+            let slots = Arc::from_iter(slots);
+            let block = ManuallyDrop::new(Some(Block { slots }));
+
+            Self { block }
+        }
+
+        pub fn block(&self) -> &Block<T> {
+            self.block.as_ref().unwrap()
+        }
+
+        pub fn has_referents<U>(&self, token: &U) -> bool
+        where
+            U: ExclusiveToken<BlockSlot<T>> + MainThreadUnJailToken<NRefCell<BlockSlot<T>>>,
+        {
+            // We must be the last remaining pointer to this `Arc`...
+            Arc::strong_count(&self.block().slots) == 0
+				// ...and every slot must be unborrowed and empty.
+                && self
+                    .block()
+                    .slots
+                    .iter()
+                    .any(|cell| match cell.get_with_unjail(token).try_borrow_mut(token) {
+                        Ok(v) => v.0.is_some(),
+                        Err(_) => true,
+                    })
+        }
+
+        pub fn destroy<U>(mut self, token: &U)
+        where
+            U: ExclusiveToken<BlockSlot<T>> + MainThreadUnJailToken<NRefCell<BlockSlot<T>>>,
+        {
             // Ensure that every `NRefCell` is no longer borrowed.
             assert!(
                 !self.has_referents(token),
                 "Cannot destroy() a block which still has referents."
             );
 
-            // Deallocate the block and all of its contents
-            let _ = unsafe {
-                // Safety: `NonNull<T>` from `Box<T>`, `Box<T>` from `NonNull<T>`.
-                //
-                // By structure invariants, we know that we can get exclusive access to this block if we
-                // have an exclusive token to the component type and all the cells are unborrowed. Hence,
-                // acquiring ownership is legal.
-                Box::from_raw(self.values.as_ptr())
-            };
+            // Drop our block, invalidating its memory.
+            drop(self.block.take().unwrap());
 
-            std::mem::forget(self);
-        }
-
-        // === Borrow === //
-
-        pub fn get<'b>(
-            &self,
-            token: &'b impl ReadToken<BlockSlot<T>>,
-            index: usize,
-        ) -> &'b BlockSlot<T> {
-            self.immutable_values(token)[index].get(token)
-        }
-
-        pub fn borrow<'b>(
-            &self,
-            token: &'b impl ExclusiveToken<BlockSlot<T>>,
-            index: usize,
-        ) -> Ref<'b, BlockSlot<T>> {
-            unsafe {
-                // Safety: we know that the block cannot be deallocated until this reference expires.
-                self.values_prolonged()[index].borrow(token)
-            }
-        }
-
-        pub fn borrow_mut<'b>(
-            &self,
-            token: &'b impl ExclusiveToken<BlockSlot<T>>,
-            index: usize,
-        ) -> RefMut<'b, BlockSlot<T>> {
-            unsafe {
-                // Safety: we know that the block cannot be deallocated until this reference expires.
-                self.values_prolonged()[index].borrow_mut(token)
-            }
+            // Defuse the panicking drop implementation.
+            mem::forget(self);
         }
     }
 
-    impl<T: fmt::Debug> fmt::Debug for Block<T> {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.debug_struct("Block")
-                .field("values", &self.values())
-                .finish()
-        }
-    }
-
-    // Safety: this behaves like `Arc<T>` in terms of the access to the values we grant.
-    unsafe impl<T: Send + Send> Send for Block<T> {}
-    unsafe impl<T: Send + Send> Sync for Block<T> {}
-
-    impl<T> Drop for Block<T> {
+    impl<T> Drop for OwnedBlock<T> {
         fn drop(&mut self) {
             panic!(
-                "Blocks must be destroyed with the `Block::destroy()` method instead of dropped."
+                "`OwnedBlock`s must be destroyed with the `OwnedBlock::destroy()` method instead of dropped."
             );
-        }
-    }
-
-    // === Arc'ed === //
-
-    pub type ArcBlock<T> = Arc<MainThreadJail<Block<T>>>;
-
-    #[derive(Debug)]
-    pub struct ArcBlockLocation<T> {
-        pub block: ArcBlock<T>,
-        pub index: usize,
-    }
-
-    impl<T> Clone for ArcBlockLocation<T> {
-        fn clone(&self) -> Self {
-            Self {
-                block: self.block.clone(),
-                index: self.index,
-            }
         }
     }
 }
