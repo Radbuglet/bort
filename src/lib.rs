@@ -661,6 +661,14 @@ impl<T: 'static> Storage<T> {
     }
 }
 
+impl<T: 'static> Copy for Storage<T> {}
+
+impl<T: 'static> Clone for Storage<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
 // === Entity === //
 
 static DEBUG_ENTITY_COUNTER: atomic::AtomicU64 = atomic::AtomicU64::new(0);
