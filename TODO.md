@@ -2,9 +2,9 @@
 
 Core improvements:
 
+- [x] Implement `Obj`
 - [ ] Add helper methods to `CompSlot`
 - [ ] Allow users to specify destructor components that get dropped first
-- [ ] Implement `Obj`
 
 Multi-threading improvements:
 
@@ -21,7 +21,7 @@ Multi-threading improvements:
 ECS improvements:
 
 - [ ] Implement `Archetype` and its associated helpers
-- [ ] Implement a paralell executor
+- [ ] Implement a parallel executor
 - [ ] Implement event queues
 - [ ] Implement command buffers
 

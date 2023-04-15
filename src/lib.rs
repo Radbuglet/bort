@@ -2077,7 +2077,7 @@ pub mod threading {
             }
         }
 
-        // Safety: you can only get a reference to `T` if you're the main thread.
+        // Safety: you can only get a reference to `T` if you're on an un-jailing thread.
         unsafe impl<T> Sync for MainThreadJail<T> {}
 
         impl<T> MainThreadJail<T> {
@@ -2096,7 +2096,7 @@ pub mod threading {
                 &self.0
             }
 
-            pub fn get_with_unjail(&self, _: &impl MainThreadUnJailToken<T>) -> &T {
+            pub fn get_with_unjail(&self, _: &impl UnJailToken<T>) -> &T {
                 &self.0
             }
 
@@ -2105,18 +2105,18 @@ pub mod threading {
             }
         }
 
-        pub unsafe trait MainThreadUnJailToken<T: ?Sized> {}
+        pub unsafe trait UnJailToken<T: ?Sized> {}
 
-        unsafe impl<T: ?Sized> MainThreadUnJailToken<T> for MainThreadToken {}
+        unsafe impl<T: ?Sized> UnJailToken<T> for MainThreadToken {}
 
-        unsafe impl<T, U> MainThreadUnJailToken<T> for TypeExclusiveToken<'_, U>
+        unsafe impl<T, U> UnJailToken<T> for TypeExclusiveToken<'_, U>
         where
             T: ?Sized + Send + Sync,
             U: ?Sized,
         {
         }
 
-        unsafe impl<T, U> MainThreadUnJailToken<T> for TypeReadToken<'_, U>
+        unsafe impl<T, U> UnJailToken<T> for TypeReadToken<'_, U>
         where
             T: ?Sized + Send + Sync,
             U: ?Sized,
@@ -2136,7 +2136,7 @@ pub mod block {
     };
 
     use crate::threading::cell::{
-        ExclusiveToken, MainThreadJail, MainThreadUnJailToken, NRefCell, ReadToken,
+        ExclusiveToken, MainThreadJail, NRefCell, ReadToken, UnJailToken,
     };
 
     type BlockSlice<T> = [MainThreadJail<NRefCell<BlockSlot<T>>>];
@@ -2175,15 +2175,23 @@ pub mod block {
             unsafe { mem::transmute(self.values()) }
         }
 
+        pub fn slice_addr(&self) -> usize {
+            self.values() as *const BlockSlice<T> as *const () as usize
+        }
+
         pub fn len(&self) -> usize {
             self.values().len()
+        }
+
+        pub fn ref_count(&self) -> usize {
+            Arc::strong_count(&self.slots) - 1
         }
 
         // === Borrow Methods === //
 
         pub fn get<'b, U>(&self, token: &'b U, index: usize) -> &'b BlockSlot<T>
         where
-            U: ReadToken<BlockSlot<T>> + MainThreadUnJailToken<NRefCell<BlockSlot<T>>>,
+            U: ReadToken<BlockSlot<T>> + UnJailToken<NRefCell<BlockSlot<T>>>,
         {
             self.immutable_values(token)[index]
                 .get_with_unjail(token)
@@ -2192,7 +2200,7 @@ pub mod block {
 
         pub fn borrow<'b, U>(&self, token: &'b U, index: usize) -> Ref<'b, BlockSlot<T>>
         where
-            U: ExclusiveToken<BlockSlot<T>> + MainThreadUnJailToken<NRefCell<BlockSlot<T>>>,
+            U: ExclusiveToken<BlockSlot<T>> + UnJailToken<NRefCell<BlockSlot<T>>>,
         {
             unsafe {
                 // Safety: our pointee cannot be invalidated until `OwnedBlock::destroy()` is called,
@@ -2206,7 +2214,7 @@ pub mod block {
 
         pub fn borrow_mut<'b, U>(&self, token: &'b U, index: usize) -> RefMut<'b, BlockSlot<T>>
         where
-            U: ExclusiveToken<BlockSlot<T>> + MainThreadUnJailToken<NRefCell<BlockSlot<T>>>,
+            U: ExclusiveToken<BlockSlot<T>> + UnJailToken<NRefCell<BlockSlot<T>>>,
         {
             unsafe {
                 // Safety: our pointee cannot be invalidated until `OwnedBlock::destroy()` is called,
@@ -2258,24 +2266,26 @@ pub mod block {
 
         pub fn has_referents<U>(&self, token: &U) -> bool
         where
-            U: ExclusiveToken<BlockSlot<T>> + MainThreadUnJailToken<NRefCell<BlockSlot<T>>>,
+            U: ExclusiveToken<BlockSlot<T>> + UnJailToken<NRefCell<BlockSlot<T>>>,
         {
-            // We must be the last remaining pointer to this `Arc`...
-            Arc::strong_count(&self.block().slots) == 0
-				// ...and every slot must be unborrowed and empty.
-                && self
+            // Return true if we're not the only referent `Block`...
+            Arc::strong_count(&self.block().slots) > 1
+				// ...or some slot is either borrowed or non-empty.
+                || self
                     .block()
                     .slots
                     .iter()
                     .any(|cell| match cell.get_with_unjail(token).try_borrow_mut(token) {
+						// If the cell is unborrowed but still has a value, we have a referent.
                         Ok(v) => v.0.is_some(),
+						// If the cell is borrowed, we have a referent.
                         Err(_) => true,
                     })
         }
 
         pub fn destroy<U>(mut self, token: &U)
         where
-            U: ExclusiveToken<BlockSlot<T>> + MainThreadUnJailToken<NRefCell<BlockSlot<T>>>,
+            U: ExclusiveToken<BlockSlot<T>> + UnJailToken<NRefCell<BlockSlot<T>>>,
         {
             // Ensure that every `NRefCell` is no longer borrowed.
             assert!(
@@ -2296,6 +2306,62 @@ pub mod block {
             panic!(
                 "`OwnedBlock`s must be destroyed with the `OwnedBlock::destroy()` method instead of dropped."
             );
+        }
+    }
+
+    // === BlockSlotRef === //
+
+    #[derive(Debug)]
+    pub struct BlockSlotRef<T> {
+        block: Block<T>,
+        index: usize,
+    }
+
+    impl<T> BlockSlotRef<T> {
+        pub fn new(block: Block<T>, index: usize) -> Self {
+            Self { block, index }
+        }
+
+        pub fn to_raw_parts(self) -> (Block<T>, usize) {
+            (self.block, self.index)
+        }
+
+        pub fn block(&self) -> &Block<T> {
+            &self.block
+        }
+
+        pub fn index(&self) -> usize {
+            self.index
+        }
+
+        pub fn get<'b, U>(&self, token: &'b U) -> &'b BlockSlot<T>
+        where
+            U: ReadToken<BlockSlot<T>> + UnJailToken<NRefCell<BlockSlot<T>>>,
+        {
+            self.block.get(token, self.index)
+        }
+
+        pub fn borrow<'b, U>(&self, token: &'b U) -> Ref<'b, BlockSlot<T>>
+        where
+            U: ExclusiveToken<BlockSlot<T>> + UnJailToken<NRefCell<BlockSlot<T>>>,
+        {
+            self.block.borrow(token, self.index)
+        }
+
+        pub fn borrow_mut<'b, U>(&self, token: &'b U) -> RefMut<'b, BlockSlot<T>>
+        where
+            U: ExclusiveToken<BlockSlot<T>> + UnJailToken<NRefCell<BlockSlot<T>>>,
+        {
+            self.block.borrow_mut(token, self.index)
+        }
+    }
+
+    impl<T> Clone for BlockSlotRef<T> {
+        fn clone(&self) -> Self {
+            Self {
+                block: self.block.clone(),
+                index: self.index,
+            }
         }
     }
 }
