@@ -2,6 +2,7 @@ use std::{
     any::{type_name, Any, TypeId},
     borrow::{Borrow, Cow},
     cell::{Cell, Ref, RefCell, RefMut},
+    error::Error,
     fmt, hash, iter,
     marker::PhantomData,
     mem,
@@ -146,6 +147,13 @@ impl fmt::Debug for RawFmt<'_> {
         f.write_str(self.0)
     }
 }
+
+fn unwrap_error<T, E: Error>(result: Result<T, E>) -> T {
+    result.unwrap_or_else(|e| panic!("{e}"))
+}
+
+// Error messages
+const NOT_ON_MAIN_THREAD_MSG: RawFmt = RawFmt("<not on main thread>");
 
 // === ComponentList === //
 
@@ -411,7 +419,7 @@ struct StorageInner<T: 'static> {
 
 #[derive(Debug)]
 struct EntityStorageMapping<T: 'static> {
-    value: Orc<T>,
+    slot: Orc<T>,
     is_external: bool,
 }
 
@@ -440,7 +448,17 @@ impl<T: 'static> Storage<T> {
         slot: Option<Orc<T>>,
     ) -> Result<Orc<T>, Orc<T>> {
         let me = &mut *self.inner.borrow_mut(self.token);
-        todo!();
+
+        match me.mappings.entry(entity) {
+            hashbrown::hash_map::Entry::Occupied(entry) => Err(entry.get().slot),
+            hashbrown::hash_map::Entry::Vacant(entry) => {
+                let (slot, is_external) =
+                    Self::allocate_slot_if_needed(&mut me.non_full_blocks, slot, None);
+
+                entry.insert(EntityStorageMapping { slot, is_external });
+                Ok(slot)
+            }
+        }
     }
 
     pub fn insert_in_slot(
@@ -470,17 +488,22 @@ impl<T: 'static> Storage<T> {
 
         match me.mappings.entry(entity) {
             hashbrown::hash_map::Entry::Occupied(entry) => {
-                todo!();
+                let slot = entry.get().slot;
+                (slot, slot.init(self.token, value))
             }
             hashbrown::hash_map::Entry::Vacant(entry) => {
-                todo!();
+                let (slot, is_external) =
+                    Self::allocate_slot_if_needed(&mut me.non_full_blocks, slot, Some(value));
+                entry.insert(EntityStorageMapping { slot, is_external });
+                (slot, None)
             }
         }
     }
 
     fn allocate_slot_if_needed(
-        free_slots: &mut Vec<Orc<T>>,
+        non_full_blocks: &mut Vec<StorageBlock<T>>,
         slot: Option<Orc<T>>,
+        value: Option<T>,
     ) -> (Orc<T>, bool) {
         todo!();
     }
@@ -526,7 +549,7 @@ impl<T: 'static> Storage<T> {
         let mut me = self.inner.borrow_mut(self.token);
 
         if let Some(mapping) = me.mappings.remove(&entity) {
-            let taken = mapping.value.destroy(self.token);
+            let taken = mapping.slot.destroy(self.token);
             todo!();
             taken
         } else {
@@ -541,7 +564,7 @@ impl<T: 'static> Storage<T> {
             .borrow(self.token)
             .mappings
             .get(&entity)
-            .map(|mapping| mapping.value)
+            .map(|mapping| mapping.slot)
     }
 
     pub fn get_slot(&self, entity: Entity) -> Orc<T> {
@@ -904,7 +927,7 @@ impl<T: 'static> Obj<T> {
         let token = MainThreadToken::acquire();
 
         self.value
-            .is_alive_and_init(token)
+            .is_alive_and_init()
             .then(|| self.value.borrow(token))
     }
 
@@ -912,7 +935,7 @@ impl<T: 'static> Obj<T> {
         let token = MainThreadToken::acquire();
 
         self.value
-            .is_alive_and_init(token)
+            .is_alive_and_init()
             .then(|| self.value.borrow_mut(token))
     }
 
@@ -947,7 +970,10 @@ impl<T: 'static> Obj<T> {
 
 impl<T: 'static + fmt::Debug> fmt::Debug for Obj<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!();
+        f.debug_struct("Obj")
+            .field("entity", &self.entity)
+            .field("value", &self.value)
+            .finish()
     }
 }
 
@@ -1299,7 +1325,7 @@ pub mod threading {
                 .get(&inner.storage_token)
                 .mappings
                 .get(&entity)
-                .map(|mapping| mapping.value)
+                .map(|mapping| mapping.slot)
         }
 
         pub fn get_slot(&self, entity: Entity) -> Orc<T> {
@@ -1361,7 +1387,7 @@ pub mod threading {
                 .get(&inner.storage_token)
                 .mappings
                 .get(&entity)
-                .map(|mapping| mapping.value)
+                .map(|mapping| mapping.slot)
         }
 
         pub fn get_slot(&self, entity: Entity) -> Orc<T> {
@@ -1392,7 +1418,6 @@ pub mod threading {
         use std::{
             any::{type_name, TypeId},
             cell::{BorrowError, BorrowMutError, Cell, Ref, RefCell, RefMut},
-            error::Error,
             fmt,
             marker::PhantomData,
             num::NonZeroU64,
@@ -1403,15 +1428,7 @@ pub mod threading {
             thread::{self, current, Thread},
         };
 
-        use crate::{FxHashMap, RawFmt};
-
-        // === Helpers === //
-
-        const NOT_ON_MAIN_THREAD: RawFmt = RawFmt("<not on main thread>");
-
-        fn unwrap_error<T, E: Error>(result: Result<T, E>) -> T {
-            result.unwrap_or_else(|e| panic!("{e}"))
-        }
+        use crate::{unwrap_error, FxHashMap, NOT_ON_MAIN_THREAD_MSG};
 
         // === NRefCell === //
 
@@ -1590,7 +1607,7 @@ pub mod threading {
                 } else {
                     f.debug_struct("NRefCell")
                         .field("namespace", &self.namespace())
-                        .field("value", &NOT_ON_MAIN_THREAD)
+                        .field("value", &NOT_ON_MAIN_THREAD_MSG)
                         .finish()
                 }
             }
@@ -1916,7 +1933,7 @@ pub mod threading {
                     f.debug_tuple("MainThreadJail").field(&&self.0).finish()
                 } else {
                     f.debug_tuple("MainThreadJail")
-                        .field(&NOT_ON_MAIN_THREAD)
+                        .field(&NOT_ON_MAIN_THREAD_MSG)
                         .finish()
                 }
             }
@@ -1974,7 +1991,7 @@ pub mod threading {
 
 pub mod block {
     use std::{
-        cell::{Ref, RefMut},
+        cell::{BorrowError, BorrowMutError, Ref, RefMut},
         fmt,
         hint::unreachable_unchecked,
         iter,
@@ -1988,8 +2005,12 @@ pub mod block {
         },
     };
 
-    use crate::threading::cell::{
-        ExclusiveToken, MainThreadJail, NRefCell, ReadToken, Token, UnJailToken,
+    use crate::{
+        threading::cell::{
+            ExclusiveToken, MainThreadJail, MainThreadToken, NRefCell, ReadToken, Token,
+            UnJailToken,
+        },
+        unwrap_error, RawFmt, NOT_ON_MAIN_THREAD_MSG,
     };
 
     // === BlockSlot === //
@@ -2017,6 +2038,14 @@ pub mod block {
                 BlockValue::Init(v) => v,
                 // Safety: provided by caller
                 _ => unreachable_unchecked(),
+            }
+        }
+
+        fn unwrap_reserved(self) -> Option<T> {
+            match self {
+                BlockValue::Unreserved => unreachable!(),
+                BlockValue::Uninit => None,
+                BlockValue::Init(value) => Some(value),
             }
         }
     }
@@ -2157,15 +2186,15 @@ pub mod block {
         _ty: PhantomData<Arc<T>>,
         // Invariants:
         //
-        // - From the time `self.gen == slot.gen` to the time `destroy()` completes successfully,
-        //   `slot.ptr` points to a valid `BlockSlot<T>` of the form `BlockValue::Init`.
-        // - From the time `(self.gen | 1) == slot.gen` to the time `destroy()` completes successfully,
-        //   `slot.ptr` points to a valid `BlockSlot<T>` of the form `BlockValue::Uninit`.
+        // - From the time we're either init alive or uninit alive to the time `destroy()` completes,
+        //   slot.ptr` points to a valid `BlockSlot<T>` which is either `Uninit` or `Init`.
+        // - From the time `self.gen == slot.gen` to the time `destroy()` or `uninit()` completes
+        //   successfully, `slot.ptr` points to a valid `BlockSlot<T>` of the form `BlockValue::Init`.
         //
         // Implied invariants:
         //
-        // - We cannot give `BlockSlot<T>` access to untrusted code, which could change
-        //   `BlockValue` dangerously.
+        // - We cannot give `BlockSlot<T>` access to untrusted code, which could change `BlockValue`
+        //   dangerously.
         // - We cannot have multiple `Orc`s managing the same slot.
         //
         // Format:
@@ -2185,12 +2214,17 @@ pub mod block {
 
     impl<T: 'static> Orc<T> {
         #[must_use]
-        pub fn is_alive_and_init(self, _: &impl Token<BlockValue<T>>) -> bool {
+        pub fn is_alive(self) -> bool {
+            self.gen.get() == (self.slot.gen.load(Ordering::Relaxed) & !1)
+        }
+
+        #[must_use]
+        pub fn is_alive_and_init(self) -> bool {
             self.gen.get() == self.slot.gen.load(Ordering::Relaxed)
         }
 
         #[must_use]
-        pub fn is_alive_and_uninit(self, _: &impl Token<BlockValue<T>>) -> bool {
+        pub fn is_alive_and_uninit(self) -> bool {
             (self.gen.get() | 1) == self.slot.gen.load(Ordering::Relaxed)
         }
 
@@ -2199,37 +2233,71 @@ pub mod block {
             self.slot.ptr.cast::<BlockSlot<T>>().as_ref()
         }
 
-        pub fn init<U>(self, token: &U, value: T)
+        pub fn init<U>(self, token: &U, value: T) -> Option<T>
         where
             U: ExclusiveToken<BlockValue<T>> + UnJailToken<NRefCell<BlockValue<T>>>,
         {
-            assert!(self.is_alive_and_uninit(token));
+            assert!(self.is_alive());
 
             let slot = unsafe {
-                // Safety: we just checked that `is_alive_and_init`, which tells us that we contain
-                // a valid instance of `BlockValue::<T>::Init`, and we know that this fact will only
-                // change with a successful call to `destroy()`.
+                // Safety: we just checked that `is_alive`, which tells us that we contain a valid
+                // instance of `BlockValue::<T>`, and we know that this fact will only change with a
+                // successful call to `destroy()`.
                 //
-                // Because our reference only exists until this function is finished and this function
-                // never calls out to anything that could run `destroy()`.
+                // The following code section is atomic (i.e. it won't call out to external code) so
+                // `slot` is valid until the function ends.
                 self.slot()
             };
 
-            // N.B. no destructor could be called here because we're replacing a `BlockValue::Uninit`.
-            // We `mem::forget` anyways since the compiler doesn't know this fact.
-            mem::forget(mem::replace(
+            // Replace the value first. This happens atomically, i.e. the `BlockValue` is either now
+            // `Init` and we proceed or it's `Uninit` and we panicked out of the function.
+            let value = mem::replace(
                 &mut *slot.get_with_unjail(token).borrow_mut(token),
                 BlockValue::Init(value),
-            ));
+            )
+            .unwrap_reserved();
+
+            // Then, replace the slot state.
+            self.slot.gen.store(self.gen.get(), Ordering::Relaxed);
+
+            value
         }
 
-        // TODO: Fallible variants.
+        pub fn uninit<U>(self, token: &U) -> Option<T>
+        where
+            U: ExclusiveToken<BlockValue<T>> + UnJailToken<NRefCell<BlockValue<T>>>,
+        {
+            assert!(self.is_alive());
+
+            let slot = unsafe {
+                // Safety: we just checked that `is_alive`, which tells us that we contain a valid
+                // instance of `BlockValue::<T>`, and we know that this fact will only change with a
+                // successful call to `destroy()`.
+                //
+                // The following code section is atomic (i.e. it won't call out to external code) so
+                // `slot` is valid until the function ends.
+                self.slot()
+            };
+
+            // Replace the value first. This happens atomically, i.e. the `BlockValue` is either now
+            // `Uninit` and we proceed or it's `Init` and we panicked out of the function.
+            let value = mem::replace(
+                &mut *slot.get_with_unjail(token).borrow_mut(token),
+                BlockValue::Uninit,
+            )
+            .unwrap_reserved();
+
+            // Then, replace the slot state.
+            self.slot.gen.store(self.gen.get() | 1, Ordering::Relaxed);
+
+            value
+        }
 
         pub fn get<U>(self, token: &U) -> &T
         where
             U: ReadToken<BlockValue<T>> + UnJailToken<NRefCell<BlockValue<T>>>,
         {
-            assert!(self.is_alive_and_init(token));
+            assert!(self.is_alive_and_init());
 
             unsafe {
                 // Safety: we just checked that `is_alive_and_init`, which tells us that we contain
@@ -2245,11 +2313,11 @@ pub mod block {
             }
         }
 
-        pub fn borrow<U>(self, token: &U) -> Ref<T>
+        pub fn try_borrow<U>(self, token: &U) -> Result<Ref<T>, BorrowError>
         where
             U: ExclusiveToken<BlockValue<T>> + UnJailToken<NRefCell<BlockValue<T>>>,
         {
-            assert!(self.is_alive_and_init(token));
+            assert!(self.is_alive_and_init());
 
             unsafe {
                 // Safety: we just checked that `is_alive_and_init`, which tells us that we contain
@@ -2257,9 +2325,36 @@ pub mod block {
                 // change with a successful call to `destroy()`.
                 //
                 // `destroy()` requires the `NRefCell` to be unborrowed in order to complete successfully.
-                Ref::map(self.slot().get_with_unjail(token).borrow(token), |v| {
-                    v.unwrap_unchecked()
-                })
+                self.slot()
+                    .get_with_unjail(token)
+                    .try_borrow(token)
+                    .map(|v| Ref::map(v, |v| v.unwrap_unchecked()))
+            }
+        }
+
+        pub fn borrow<U>(self, token: &U) -> Ref<T>
+        where
+            U: ExclusiveToken<BlockValue<T>> + UnJailToken<NRefCell<BlockValue<T>>>,
+        {
+            unwrap_error(self.try_borrow(token))
+        }
+
+        pub fn try_borrow_mut<U>(self, token: &U) -> Result<RefMut<T>, BorrowMutError>
+        where
+            U: ExclusiveToken<BlockValue<T>> + UnJailToken<NRefCell<BlockValue<T>>>,
+        {
+            assert!(self.is_alive_and_init());
+
+            unsafe {
+                // Safety: we just checked that `is_alive_and_init`, which tells us that we contain
+                // a valid instance of `BlockValue::<T>::Init`, and we know that this fact will only
+                // change with a successful call to `destroy()`.
+                //
+                // `destroy()` requires the `NRefCell` to be unborrowed in order to complete successfully.
+                self.slot()
+                    .get_with_unjail(token)
+                    .try_borrow_mut(token)
+                    .map(|v| RefMut::map(v, |v| v.unwrap_unchecked_mut()))
             }
         }
 
@@ -2267,18 +2362,7 @@ pub mod block {
         where
             U: ExclusiveToken<BlockValue<T>> + UnJailToken<NRefCell<BlockValue<T>>>,
         {
-            assert!(self.is_alive_and_init(token));
-
-            unsafe {
-                // Safety: we just checked that `is_alive_and_init`, which tells us that we contain
-                // a valid instance of `BlockValue::<T>::Init`, and we know that this fact will only
-                // change with a successful call to `destroy()`.
-                //
-                // `destroy()` requires the `NRefCell` to be unborrowed in order to complete successfully.
-                RefMut::map(self.slot().get_with_unjail(token).borrow_mut(token), |v| {
-                    v.unwrap_unchecked_mut()
-                })
-            }
+            unwrap_error(self.try_borrow_mut(token))
         }
 
         pub fn destroy<U>(self, token: &U) -> Option<T>
@@ -2319,11 +2403,23 @@ pub mod block {
 
     impl<T: 'static + fmt::Debug> fmt::Debug for Orc<T> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            // TODO: Try to print out the actual value, if available.
-            f.debug_struct("Orc")
-                .field("slot", &self.slot)
-                .field("gen", &self.gen)
-                .finish()
+            let mut builder = f.debug_struct("Orc");
+
+            // Format common header
+            builder.field("slot", &self.slot).field("gen", &self.gen);
+
+            // Ensure we're alive.
+            if !self.is_alive() {
+                return builder.field("value", &RawFmt("<slot dead>")).finish();
+            }
+
+            // Ensure we're on the main thread.
+            let Some(token) = MainThreadToken::try_acquire() else {
+				return builder.field("value", &NOT_ON_MAIN_THREAD_MSG).finish();
+			};
+
+            // Print out the value
+            builder.field("value", &self.try_borrow(token)).finish()
         }
     }
 }
