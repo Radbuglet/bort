@@ -7,7 +7,7 @@ use std::{
     marker::PhantomData,
     mem,
     num::NonZeroU64,
-    sync::atomic,
+    sync::{atomic, MutexGuard, PoisonError},
 };
 
 use crate::{
@@ -145,6 +145,22 @@ struct RawFmt<'a>(&'a str);
 impl fmt::Debug for RawFmt<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.0)
+    }
+}
+
+const fn const_new_nz_u64(v: u64) -> NonZeroU64 {
+    match NonZeroU64::new(v) {
+        Some(v) => v,
+        None => unreachable!(),
+    }
+}
+
+fn unpoison<'a, T: ?Sized>(
+    guard: Result<MutexGuard<'a, T>, PoisonError<MutexGuard<'a, T>>>,
+) -> MutexGuard<'a, T> {
+    match guard {
+        Ok(guard) => guard,
+        Err(err) => err.into_inner(),
     }
 }
 
@@ -358,10 +374,7 @@ fn random_uid() -> NonZeroU64 {
     thread_local! {
         // This doesn't directly leak anything so we're fine with not checking the blessed status
         // of this value.
-        static ID_GEN: Cell<NonZeroU64> = const { Cell::new(match NonZeroU64::new(1) {
-            Some(v) => v,
-            None => unreachable!(),
-        }) };
+        static ID_GEN: Cell<NonZeroU64> = const { Cell::new(const_new_nz_u64(1)) };
     }
 
     ID_GEN.with(|v| {
@@ -1428,7 +1441,7 @@ pub mod threading {
             thread::{self, current, Thread},
         };
 
-        use crate::{unwrap_error, FxHashMap, NOT_ON_MAIN_THREAD_MSG};
+        use crate::{unpoison, unwrap_error, FxHashMap, NOT_ON_MAIN_THREAD_MSG};
 
         // === NRefCell === //
 
@@ -1745,10 +1758,7 @@ pub mod threading {
 
         impl ParallelTokenSource {
             fn borrows(&self) -> MutexGuard<BorrowMap> {
-                match self.borrows.lock() {
-                    Ok(guard) => guard,
-                    Err(err) => err.into_inner(),
-                }
+                unpoison(self.borrows.lock())
             }
 
             pub fn exclusive_token<T: ?Sized + 'static>(&self) -> TypeExclusiveToken<'_, T> {
@@ -2000,17 +2010,17 @@ pub mod block {
         num::NonZeroU64,
         ptr::NonNull,
         sync::{
-            atomic::{AtomicU64, Ordering},
-            Arc,
+            atomic::{AtomicPtr, AtomicU64, Ordering},
+            Arc, Mutex, MutexGuard,
         },
     };
 
     use crate::{
+        const_new_nz_u64,
         threading::cell::{
-            ExclusiveToken, MainThreadJail, MainThreadToken, NRefCell, ReadToken, Token,
-            UnJailToken,
+            ExclusiveToken, MainThreadJail, MainThreadToken, NRefCell, ReadToken, UnJailToken,
         },
-        unwrap_error, RawFmt, NOT_ON_MAIN_THREAD_MSG,
+        unpoison, unwrap_error, RawFmt, NOT_ON_MAIN_THREAD_MSG,
     };
 
     // === BlockSlot === //
@@ -2166,24 +2176,62 @@ pub mod block {
 
     // === Slot === //
 
-    #[derive(Debug)]
+    #[derive(Debug, Default)]
     struct Slot {
         gen: AtomicU64,
-        ptr: NonNull<()>,
+        ptr: AtomicPtr<()>,
+    }
+
+    fn free_slots() -> MutexGuard<'static, (NonZeroU64, Vec<&'static Slot>)> {
+        // TODO: Stop using a mutex for this.
+        static FREE_SLOTS: Mutex<(NonZeroU64, Vec<&'static Slot>)> =
+            Mutex::new((const_new_nz_u64(0b10), Vec::new()));
+
+        unpoison(FREE_SLOTS.lock())
     }
 
     fn alloc_slot(ptr: NonNull<()>, is_uninit: bool) -> (&'static Slot, NonZeroU64) {
-        todo!()
+        // Allocate a slot and a generation
+        let (base_gen, slot) = {
+            // Acquire DB
+            let (gen_alloc, slots) = &mut *free_slots();
+
+            // Allocate a generation
+            let base_gen = *gen_alloc;
+            *gen_alloc = gen_alloc.checked_add(2).expect("too many Orcs!");
+
+            // Allocate a slot
+            let slot = if let Some(slot) = slots.pop() {
+                slot
+            } else {
+                let block = iter::repeat_with(Slot::default).take(64);
+                let block = Box::leak(Box::from_iter(block));
+                slots.extend(block.iter());
+
+                slots.pop().unwrap()
+            };
+
+            (base_gen, slot)
+        };
+
+        // Setup slot
+        let slot_gen = base_gen.get() + (is_uninit as u64);
+        slot.gen.store(slot_gen, Ordering::Relaxed);
+        slot.ptr.store(ptr.as_ptr(), Ordering::Relaxed);
+
+        (slot, base_gen)
     }
 
     fn release_slot(slot: &'static Slot) {
-        todo!()
+        slot.gen.store(0, Ordering::Relaxed);
+        free_slots().1.push(slot);
     }
 
     // === Orc === //
 
     pub struct Orc<T: 'static> {
         _ty: PhantomData<Arc<T>>,
+
         // Invariants:
         //
         // - From the time we're either init alive or uninit alive to the time `destroy()` completes,
@@ -2230,7 +2278,7 @@ pub mod block {
 
         unsafe fn slot<'r>(self) -> &'r BlockSlot<T> {
             // Safety: provided by caller.
-            self.slot.ptr.cast::<BlockSlot<T>>().as_ref()
+            &*self.slot.ptr.load(Ordering::Relaxed).cast::<BlockSlot<T>>()
         }
 
         pub fn init<U>(self, token: &U, value: T) -> Option<T>
