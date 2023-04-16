@@ -1470,7 +1470,8 @@ pub mod threading {
             value: RefCell<T>,
         }
 
-        unsafe impl<T: ?Sized + Send + Sync> Sync for NRefCell<T> {}
+        // Safety: every getter is guarded by a `UnJailToken`.
+        unsafe impl<T: ?Sized> Sync for NRefCell<T> {}
 
         impl<T> NRefCell<T> {
             pub const fn new(value: T) -> Self {
@@ -1553,10 +1554,10 @@ pub mod threading {
 
             // === Borrow methods === //
 
-            pub fn try_get<'a>(
-                &'a self,
-                token: &'a impl ReadToken<T>,
-            ) -> Result<&'a T, BorrowError> {
+            pub fn try_get<'a, U>(&'a self, token: &'a U) -> Result<&'a T, BorrowError>
+            where
+                U: ReadToken<T> + UnJailRefToken<T>,
+            {
                 self.assert_accessible_by(token);
 
                 // Safety: we know we can read from the `value`'s borrow count safely because this method
@@ -1569,14 +1570,17 @@ pub mod threading {
                 }
             }
 
-            pub fn get<'a>(&'a self, token: &'a impl ReadToken<T>) -> &'a T {
+            pub fn get<'a, U>(&'a self, token: &'a U) -> &'a T
+            where
+                U: ReadToken<T> + UnJailRefToken<T>,
+            {
                 unwrap_error(self.try_get(token))
             }
 
-            pub fn try_borrow<'a>(
-                &'a self,
-                token: &'a impl ExclusiveToken<T>,
-            ) -> Result<Ref<'a, T>, BorrowError> {
+            pub fn try_borrow<'a, U>(&'a self, token: &'a U) -> Result<Ref<'a, T>, BorrowError>
+            where
+                U: ExclusiveToken<T> + UnJailRefToken<T>,
+            {
                 self.assert_accessible_by(token);
 
                 // Safety: we know we can read and write from the `value`'s borrow count safely because
@@ -1591,21 +1595,30 @@ pub mod threading {
                 self.value.try_borrow()
             }
 
-            pub fn borrow<'a>(&'a self, token: &'a impl ExclusiveToken<T>) -> Ref<'a, T> {
+            pub fn borrow<'a, U>(&'a self, token: &'a U) -> Ref<'a, T>
+            where
+                U: ExclusiveToken<T> + UnJailRefToken<T>,
+            {
                 unwrap_error(self.try_borrow(token))
             }
 
-            pub fn try_borrow_mut<'a>(
+            pub fn try_borrow_mut<'a, U>(
                 &'a self,
-                token: &'a impl ExclusiveToken<T>,
-            ) -> Result<RefMut<'a, T>, BorrowMutError> {
+                token: &'a U,
+            ) -> Result<RefMut<'a, T>, BorrowMutError>
+            where
+                U: ExclusiveToken<T> + UnJailMutToken<T>,
+            {
                 self.assert_accessible_by(token);
 
                 // Safety: see `try_borrow`.
                 self.value.try_borrow_mut()
             }
 
-            pub fn borrow_mut<'a>(&'a self, token: &'a impl ExclusiveToken<T>) -> RefMut<'a, T> {
+            pub fn borrow_mut<'a, U>(&'a self, token: &'a U) -> RefMut<'a, T>
+            where
+                U: ExclusiveToken<T> + UnJailMutToken<T>,
+            {
                 unwrap_error(self.try_borrow_mut(token))
             }
         }
@@ -1968,7 +1981,7 @@ pub mod threading {
                 &self.0
             }
 
-            pub fn get_with_unjail(&self, _: &impl UnJailToken<T>) -> &T {
+            pub fn get_with_unjail(&self, _: &impl UnJailRefToken<T>) -> &T {
                 &self.0
             }
 
@@ -1977,20 +1990,50 @@ pub mod threading {
             }
         }
 
-        pub unsafe trait UnJailToken<T: ?Sized> {}
+        // UnJailRefToken
+        pub unsafe trait UnJailRefToken<T: ?Sized> {}
 
-        unsafe impl<T: ?Sized> UnJailToken<T> for MainThreadToken {}
+        unsafe impl<T: ?Sized> UnJailRefToken<T> for MainThreadToken {}
 
-        unsafe impl<T, U> UnJailToken<T> for TypeExclusiveToken<'_, U>
+        unsafe impl<T, U> UnJailRefToken<T> for TypeExclusiveToken<'_, U>
         where
-            T: ?Sized + Send + Sync,
+            T: ?Sized + Sync,
             U: ?Sized,
         {
         }
 
-        unsafe impl<T, U> UnJailToken<T> for TypeReadToken<'_, U>
+        unsafe impl<T, U> UnJailRefToken<T> for TypeReadToken<'_, U>
         where
-            T: ?Sized + Send + Sync,
+            T: ?Sized + Sync,
+            U: ?Sized,
+        {
+        }
+
+        // UnJailTokenMut
+        pub unsafe trait UnJailMutToken<T: ?Sized> {}
+
+        unsafe impl<T: ?Sized> UnJailMutToken<T> for MainThreadToken {}
+
+        unsafe impl<T, U> UnJailMutToken<T> for TypeExclusiveToken<'_, U>
+        where
+            T: ?Sized + Send,
+            U: ?Sized,
+        {
+        }
+
+        unsafe impl<T, U> UnJailMutToken<T> for TypeReadToken<'_, U>
+        where
+            T: ?Sized + Send,
+            U: ?Sized,
+        {
+        }
+
+        // UnJailToken
+        pub unsafe trait UnJailToken<T: ?Sized> {}
+
+        unsafe impl<T, U> UnJailToken<U> for T
+        where
+            T: ?Sized + UnJailRefToken<U> + UnJailMutToken<U>,
             U: ?Sized,
         {
         }
@@ -2018,14 +2061,14 @@ pub mod block {
     use crate::{
         const_new_nz_u64,
         threading::cell::{
-            ExclusiveToken, MainThreadJail, MainThreadToken, NRefCell, ReadToken, UnJailToken,
+            ExclusiveToken, MainThreadToken, NRefCell, ReadToken, UnJailMutToken, UnJailRefToken,
         },
         unpoison, unwrap_error, RawFmt, NOT_ON_MAIN_THREAD_MSG,
     };
 
     // === BlockSlot === //
 
-    type BlockSlot<T> = MainThreadJail<NRefCell<BlockValue<T>>>;
+    type BlockSlot<T> = NRefCell<BlockValue<T>>;
 
     #[derive(Debug, Clone)]
     pub enum BlockValue<T: 'static> {
@@ -2079,6 +2122,14 @@ pub mod block {
     unsafe impl<T> Send for Heap<T> {}
     unsafe impl<T> Sync for Heap<T> {}
 
+    impl<T: 'static + fmt::Debug> fmt::Debug for Heap<T> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("Heap")
+                .field("slots", &self.slots())
+                .finish()
+        }
+    }
+
     impl<T> Heap<T> {
         pub fn new(len: usize) -> Self {
             let slots = iter::repeat_with(Default::default).take(len);
@@ -2102,7 +2153,7 @@ pub mod block {
 
         pub fn alloc<U>(&self, token: &U, index: usize, value: Option<T>) -> Orc<T>
         where
-            U: ExclusiveToken<BlockValue<T>> + UnJailToken<NRefCell<BlockValue<T>>>,
+            U: ExclusiveToken<BlockValue<T>> + UnJailMutToken<BlockValue<T>>,
         {
             // Acquire the slot
             let slot = &self.slots()[index];
@@ -2110,7 +2161,7 @@ pub mod block {
             // Fill it if it doesn't yet contain anything.
             let is_uninit = value.is_none();
             {
-                let mut slot_ref = slot.get_with_unjail(token).borrow_mut(token);
+                let mut slot_ref = slot.borrow_mut(token);
                 assert!(matches!(&*slot_ref, BlockValue::Unreserved));
                 *slot_ref = match value {
                     Some(value) => BlockValue::Init(value),
@@ -2135,23 +2186,24 @@ pub mod block {
 
         pub fn is_unborrowed<U>(&self, token: &U) -> bool
         where
-            U: ExclusiveToken<BlockValue<T>> + UnJailToken<NRefCell<BlockValue<T>>>,
+            U: ExclusiveToken<BlockValue<T>> + UnJailMutToken<BlockValue<T>>,
         {
-            self.slots()
-                .iter()
-                .all(|v| match v.get_with_unjail(token).try_borrow_mut(token) {
-                    Ok(slot) => matches!(&*slot, BlockValue::Unreserved),
-                    Err(_) => false,
-                })
+            self.slots().iter().all(|v| match v.try_borrow_mut(token) {
+                Ok(slot) => matches!(&*slot, BlockValue::Unreserved),
+                Err(_) => false,
+            })
         }
 
         pub fn destroy<U>(self, token: &U)
         where
-            U: ExclusiveToken<BlockValue<T>> + UnJailToken<NRefCell<BlockValue<T>>>,
+            U: ExclusiveToken<BlockValue<T>> + UnJailMutToken<BlockValue<T>>,
         {
-            assert!(self.is_unborrowed(token));
+            let slots = self.slots;
+            let is_unborrowed = self.is_unborrowed(token);
+            mem::forget(self);
 
-            let values = unsafe {
+            assert!(is_unborrowed);
+            drop(unsafe {
                 // Safety: We only give out heap references to `Orc` instances, whose invariants
                 // ensure that they will preserve `BlockSlot<T>` as filled until they, and all their
                 // references, expire. Because all our slots are empty, we know that we can acquire
@@ -2159,18 +2211,15 @@ pub mod block {
                 //
                 // Additionally, we know that we won't drop any potentially dangerous `T` instances
                 // because the slots are empty.
-                Box::from_raw(self.slots.as_ptr())
-            };
-            mem::forget(self);
-            drop(values);
+                Box::from_raw(slots.as_ptr())
+            });
         }
     }
 
-    impl<T: 'static + fmt::Debug> fmt::Debug for Heap<T> {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.debug_struct("Heap")
-                .field("slots", &self.slots())
-                .finish()
+    impl<T: 'static> Drop for Heap<T> {
+        fn drop(&mut self) {
+            // TODO: Maybe defer deletion until we return to the main thread?
+            panic!("Heap must be destroyed via `Heap::destroy()` rather than dropped to avoid memory leaks.");
         }
     }
 
@@ -2283,7 +2332,7 @@ pub mod block {
 
         pub fn init<U>(self, token: &U, value: T) -> Option<T>
         where
-            U: ExclusiveToken<BlockValue<T>> + UnJailToken<NRefCell<BlockValue<T>>>,
+            U: ExclusiveToken<BlockValue<T>> + UnJailMutToken<BlockValue<T>>,
         {
             assert!(self.is_alive());
 
@@ -2299,11 +2348,8 @@ pub mod block {
 
             // Replace the value first. This happens atomically, i.e. the `BlockValue` is either now
             // `Init` and we proceed or it's `Uninit` and we panicked out of the function.
-            let value = mem::replace(
-                &mut *slot.get_with_unjail(token).borrow_mut(token),
-                BlockValue::Init(value),
-            )
-            .unwrap_reserved();
+            let value = mem::replace(&mut *slot.borrow_mut(token), BlockValue::Init(value))
+                .unwrap_reserved();
 
             // Then, replace the slot state.
             self.slot.gen.store(self.gen.get(), Ordering::Relaxed);
@@ -2313,7 +2359,7 @@ pub mod block {
 
         pub fn uninit<U>(self, token: &U) -> Option<T>
         where
-            U: ExclusiveToken<BlockValue<T>> + UnJailToken<NRefCell<BlockValue<T>>>,
+            U: ExclusiveToken<BlockValue<T>> + UnJailMutToken<BlockValue<T>>,
         {
             assert!(self.is_alive());
 
@@ -2329,11 +2375,8 @@ pub mod block {
 
             // Replace the value first. This happens atomically, i.e. the `BlockValue` is either now
             // `Uninit` and we proceed or it's `Init` and we panicked out of the function.
-            let value = mem::replace(
-                &mut *slot.get_with_unjail(token).borrow_mut(token),
-                BlockValue::Uninit,
-            )
-            .unwrap_reserved();
+            let value =
+                mem::replace(&mut *slot.borrow_mut(token), BlockValue::Uninit).unwrap_reserved();
 
             // Then, replace the slot state.
             self.slot.gen.store(self.gen.get() | 1, Ordering::Relaxed);
@@ -2343,7 +2386,7 @@ pub mod block {
 
         pub fn get<U>(self, token: &U) -> &T
         where
-            U: ReadToken<BlockValue<T>> + UnJailToken<NRefCell<BlockValue<T>>>,
+            U: ReadToken<BlockValue<T>> + UnJailRefToken<BlockValue<T>>,
         {
             assert!(self.is_alive_and_init());
 
@@ -2354,16 +2397,13 @@ pub mod block {
                 //
                 // `destroy()` requires an `ExclusiveToken<BlockValue<T>>` to complete successfully,
                 // which cannot coexist with our `ReadToken<BlockValue<T>>`.
-                self.slot()
-                    .get_with_unjail(token)
-                    .get(token)
-                    .unwrap_unchecked()
+                self.slot().get(token).unwrap_unchecked()
             }
         }
 
         pub fn try_borrow<U>(self, token: &U) -> Result<Ref<T>, BorrowError>
         where
-            U: ExclusiveToken<BlockValue<T>> + UnJailToken<NRefCell<BlockValue<T>>>,
+            U: ExclusiveToken<BlockValue<T>> + UnJailRefToken<BlockValue<T>>,
         {
             assert!(self.is_alive_and_init());
 
@@ -2374,7 +2414,6 @@ pub mod block {
                 //
                 // `destroy()` requires the `NRefCell` to be unborrowed in order to complete successfully.
                 self.slot()
-                    .get_with_unjail(token)
                     .try_borrow(token)
                     .map(|v| Ref::map(v, |v| v.unwrap_unchecked()))
             }
@@ -2382,14 +2421,14 @@ pub mod block {
 
         pub fn borrow<U>(self, token: &U) -> Ref<T>
         where
-            U: ExclusiveToken<BlockValue<T>> + UnJailToken<NRefCell<BlockValue<T>>>,
+            U: ExclusiveToken<BlockValue<T>> + UnJailRefToken<BlockValue<T>>,
         {
             unwrap_error(self.try_borrow(token))
         }
 
         pub fn try_borrow_mut<U>(self, token: &U) -> Result<RefMut<T>, BorrowMutError>
         where
-            U: ExclusiveToken<BlockValue<T>> + UnJailToken<NRefCell<BlockValue<T>>>,
+            U: ExclusiveToken<BlockValue<T>> + UnJailMutToken<BlockValue<T>>,
         {
             assert!(self.is_alive_and_init());
 
@@ -2400,7 +2439,6 @@ pub mod block {
                 //
                 // `destroy()` requires the `NRefCell` to be unborrowed in order to complete successfully.
                 self.slot()
-                    .get_with_unjail(token)
                     .try_borrow_mut(token)
                     .map(|v| RefMut::map(v, |v| v.unwrap_unchecked_mut()))
             }
@@ -2408,14 +2446,14 @@ pub mod block {
 
         pub fn borrow_mut<U>(self, token: &U) -> RefMut<T>
         where
-            U: ExclusiveToken<BlockValue<T>> + UnJailToken<NRefCell<BlockValue<T>>>,
+            U: ExclusiveToken<BlockValue<T>> + UnJailMutToken<BlockValue<T>>,
         {
             unwrap_error(self.try_borrow_mut(token))
         }
 
         pub fn destroy<U>(self, token: &U) -> Option<T>
         where
-            U: ExclusiveToken<BlockValue<T>> + UnJailToken<NRefCell<BlockValue<T>>>,
+            U: ExclusiveToken<BlockValue<T>> + UnJailMutToken<BlockValue<T>>,
         {
             let slot = unsafe {
                 // Safety: the heap cannot perform the invalidation until the temporary `RefMut` is
@@ -2424,10 +2462,7 @@ pub mod block {
             };
 
             // Take the value from the storage.
-            let value = match mem::replace(
-                &mut *slot.get_with_unjail(token).borrow_mut(token),
-                BlockValue::Unreserved,
-            ) {
+            let value = match mem::replace(&mut *slot.borrow_mut(token), BlockValue::Unreserved) {
                 BlockValue::Unreserved => unreachable!(),
                 BlockValue::Uninit => None,
                 BlockValue::Init(value) => Some(value),
