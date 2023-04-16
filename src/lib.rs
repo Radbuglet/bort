@@ -10,8 +10,9 @@ use std::{
 };
 
 use crate::{
+    block::{Heap, Orc},
     debug::{AsDebugLabel, DebugLabel},
-    threading::cell::{ensure_main_thread, MainThreadJail, MainThreadToken, NRefCell},
+    threading::cell::{ensure_main_thread, MainThreadToken, NRefCell},
 };
 
 // === Helpers === //
@@ -365,77 +366,16 @@ fn random_uid() -> NonZeroU64 {
     })
 }
 
-// === Block allocator === //
-
-// TODO: Consider making this adaptive.
-pub const COMP_BLOCK_SIZE: usize = 128;
-
-pub type CompBlock<T> = &'static CompBlockPointee<T>;
-
-pub type CompBlockPointee<T> = [CompSlotPointee<T>; COMP_BLOCK_SIZE];
-
-fn use_pool<R>(id: TypeId, f: impl FnOnce(&mut Vec<&'static dyn Any>) -> R) -> R {
-    thread_local! {
-        static POOLS: RefCell<FxHashMap<TypeId, Vec<&'static dyn Any>>> = {
-            ensure_main_thread("Accessed object pools");
-            Default::default()
-        };
-    }
-
-    POOLS.with(|pools| {
-        let mut pools = pools.borrow_mut();
-        let pool = pools.entry(id).or_insert_with(Vec::new);
-        f(pool)
-    })
-}
-
-pub fn alloc_block<T: 'static>() -> CompBlock<T> {
-    use_pool(TypeId::of::<T>(), |pool| {
-        if let Some(block) = pool.pop() {
-            block.downcast_ref::<CompBlockPointee<T>>().unwrap()
-        } else {
-            // TODO: Ensure that this doesn't cause stack overflows
-            leak(std::array::from_fn(|_| Default::default()))
-        }
-    })
-}
-
-pub fn release_blocks<T: 'static>(blocks: impl IntoIterator<Item = CompBlock<T>>) {
-    release_blocks_untyped(TypeId::of::<T>(), blocks.into_iter().map(|b| b as &dyn Any))
-}
-
-pub fn release_blocks_untyped(id: TypeId, blocks: impl IntoIterator<Item = &'static dyn Any>) {
-    use_pool(id, |pool| {
-        pool.extend(blocks);
-    });
-}
-
 // === Storage === //
 
-pub type CompSlotPointee<T> = MainThreadJail<NRefCell<Option<T>>>;
-
-pub type CompSlot<T> = &'static CompSlotPointee<T>;
-
+// Aliases
 pub type CompRef<T> = Ref<'static, T>;
 
 pub type CompMut<T> = RefMut<'static, T>;
 
+// Database
 struct StorageDb {
     storages: FxHashMap<TypeId, &'static (dyn Any + Sync)>,
-}
-
-type StorageData<T> = NRefCell<StorageInner<T>>;
-
-#[derive(Debug)]
-struct StorageInner<T: 'static> {
-    free_slots: Vec<CompSlot<T>>,
-    mappings: NopHashMap<Entity, EntityStorageMapping<T>>,
-}
-
-#[derive(Debug)]
-struct EntityStorageMapping<T: 'static> {
-    slot: &'static CompSlotPointee<T>,
-    is_external: bool,
 }
 
 static STORAGES: NRefCell<StorageDb> = NRefCell::new(StorageDb {
@@ -450,8 +390,8 @@ pub fn storage<T: 'static>() -> Storage<T> {
         .entry(TypeId::of::<T>())
         .or_insert_with(|| {
             leak::<StorageData<T>>(NRefCell::new(StorageInner {
-                free_slots: Vec::new(),
                 mappings: NopHashMap::default(),
+                non_full_blocks: Vec::new(),
             }))
         })
         .downcast_ref::<StorageData<T>>()
@@ -460,6 +400,27 @@ pub fn storage<T: 'static>() -> Storage<T> {
     Storage { inner, token }
 }
 
+// Structures
+type StorageData<T> = NRefCell<StorageInner<T>>;
+
+#[derive(Debug)]
+struct StorageInner<T: 'static> {
+    mappings: NopHashMap<Entity, EntityStorageMapping<T>>,
+    non_full_blocks: Vec<StorageBlock<T>>,
+}
+
+#[derive(Debug)]
+struct EntityStorageMapping<T: 'static> {
+    value: Orc<T>,
+    is_external: bool,
+}
+
+#[derive(Debug)]
+struct StorageBlock<T: 'static> {
+    heap: Heap<T>,
+}
+
+// Storage API
 #[derive(Debug)]
 pub struct Storage<T: 'static> {
     inner: &'static StorageData<T>,
@@ -471,29 +432,23 @@ impl<T: 'static> Storage<T> {
         storage()
     }
 
+    // === Insertion === //
+
     pub fn try_preallocate_slot(
         &self,
         entity: Entity,
-        slot: Option<CompSlot<T>>,
-    ) -> Result<CompSlot<T>, CompSlot<T>> {
+        slot: Option<Orc<T>>,
+    ) -> Result<Orc<T>, Orc<T>> {
         let me = &mut *self.inner.borrow_mut(self.token);
-
-        match me.mappings.entry(entity) {
-            hashbrown::hash_map::Entry::Occupied(entry) => Err(entry.get().slot),
-            hashbrown::hash_map::Entry::Vacant(entry) => {
-                let (slot, is_external) = Self::allocate_slot_if_needed(&mut me.free_slots, slot);
-                entry.insert(EntityStorageMapping { slot, is_external });
-                Ok(slot)
-            }
-        }
+        todo!();
     }
 
     pub fn insert_in_slot(
         &self,
         entity: Entity,
         value: T,
-        slot: Option<CompSlot<T>>,
-    ) -> (CompSlot<T>, Option<T>) {
+        slot: Option<Orc<T>>,
+    ) -> (Orc<T>, Option<T>) {
         // Ensure that the entity is alive and extend the component list.
         ALIVE.with(|slots| {
             let mut slots = slots.borrow_mut();
@@ -513,48 +468,32 @@ impl<T: 'static> Storage<T> {
         // Update the storage
         let me = &mut *self.inner.borrow_mut(self.token);
 
-        let slot = match me.mappings.entry(entity) {
-            hashbrown::hash_map::Entry::Occupied(entry) => entry.get().slot,
-            hashbrown::hash_map::Entry::Vacant(entry) => {
-                let (slot, is_external) = Self::allocate_slot_if_needed(&mut me.free_slots, slot);
-                entry.insert(EntityStorageMapping { slot, is_external });
-                slot
+        match me.mappings.entry(entity) {
+            hashbrown::hash_map::Entry::Occupied(entry) => {
+                todo!();
             }
-        };
-
-        (
-            slot,
-            slot.get_with_unjail(self.token)
-                .borrow_mut(self.token)
-                .replace(value),
-        )
-    }
-
-    fn allocate_slot_if_needed(
-        free_slots: &mut Vec<CompSlot<T>>,
-        slot: Option<CompSlot<T>>,
-    ) -> (CompSlot<T>, bool) {
-        match slot {
-            Some(external_slot) => (external_slot, true),
-            None => {
-                if free_slots.is_empty() {
-                    free_slots.extend(alloc_block::<T>().iter());
-                }
-
-                let slot = free_slots.pop().unwrap();
-
-                (slot, false)
+            hashbrown::hash_map::Entry::Vacant(entry) => {
+                todo!();
             }
         }
     }
 
-    pub fn insert_and_return_slot(&self, entity: Entity, value: T) -> (CompSlot<T>, Option<T>) {
+    fn allocate_slot_if_needed(
+        free_slots: &mut Vec<Orc<T>>,
+        slot: Option<Orc<T>>,
+    ) -> (Orc<T>, bool) {
+        todo!();
+    }
+
+    pub fn insert_and_return_slot(&self, entity: Entity, value: T) -> (Orc<T>, Option<T>) {
         self.insert_in_slot(entity, value, None)
     }
 
     pub fn insert(&self, entity: Entity, value: T) -> Option<T> {
         self.insert_and_return_slot(entity, value).1
     }
+
+    // === Removal === //
 
     pub fn remove(&self, entity: Entity) -> Option<T> {
         if let Some(removed) = self.try_remove_untracked(entity) {
@@ -587,30 +526,25 @@ impl<T: 'static> Storage<T> {
         let mut me = self.inner.borrow_mut(self.token);
 
         if let Some(mapping) = me.mappings.remove(&entity) {
-            let taken = mapping
-                .slot
-                .get_with_unjail(self.token)
-                .borrow_mut(self.token)
-                .take();
-
-            if !mapping.is_external {
-                me.free_slots.push(mapping.slot);
-            }
+            let taken = mapping.value.destroy(self.token);
+            todo!();
             taken
         } else {
             None
         }
     }
 
-    pub fn try_get_slot(&self, entity: Entity) -> Option<CompSlot<T>> {
+    // === Getters === //
+
+    pub fn try_get_slot(&self, entity: Entity) -> Option<Orc<T>> {
         self.inner
             .borrow(self.token)
             .mappings
             .get(&entity)
-            .map(|mapping| mapping.slot)
+            .map(|mapping| mapping.value)
     }
 
-    pub fn get_slot(&self, entity: Entity) -> CompSlot<T> {
+    pub fn get_slot(&self, entity: Entity) -> Orc<T> {
         self.try_get_slot(entity).unwrap_or_else(|| {
             panic!(
                 "failed to find component of type {} for {:?}",
@@ -621,39 +555,21 @@ impl<T: 'static> Storage<T> {
     }
 
     pub fn try_get(&self, entity: Entity) -> Option<CompRef<T>> {
-        self.try_get_slot(entity).and_then(|slot| {
-            Ref::filter_map(slot.get_with_unjail(self.token).borrow(self.token), |v| {
-                v.as_ref()
-            })
-            .ok()
-        })
+        self.try_get_slot(entity)
+            .map(|slot| slot.borrow(self.token))
     }
 
     pub fn try_get_mut(&self, entity: Entity) -> Option<CompMut<T>> {
-        self.try_get_slot(entity).map(|slot| {
-            RefMut::map(
-                slot.get_with_unjail(self.token).borrow_mut(self.token),
-                |v| v.as_mut().unwrap(),
-            )
-        })
+        self.try_get_slot(entity)
+            .map(|slot| slot.borrow_mut(self.token))
     }
 
     pub fn get(&self, entity: Entity) -> CompRef<T> {
-        Ref::map(
-            self.get_slot(entity)
-                .get_with_unjail(self.token)
-                .borrow(self.token),
-            |v| v.as_ref().unwrap(),
-        )
+        self.get_slot(entity).borrow(self.token)
     }
 
     pub fn get_mut(&self, entity: Entity) -> CompMut<T> {
-        RefMut::map(
-            self.get_slot(entity)
-                .get_with_unjail(self.token)
-                .borrow_mut(self.token),
-            |v| v.as_mut().unwrap(),
-        )
+        self.get_slot(entity).borrow_mut(self.token)
     }
 
     pub fn has(&self, entity: Entity) -> bool {
@@ -719,22 +635,15 @@ impl Entity {
         self
     }
 
-    pub fn try_preallocate_slot<T: 'static>(
-        self,
-        slot: Option<CompSlot<T>>,
-    ) -> Result<CompSlot<T>, CompSlot<T>> {
+    pub fn try_preallocate_slot<T: 'static>(self, slot: Option<Orc<T>>) -> Result<Orc<T>, Orc<T>> {
         storage::<T>().try_preallocate_slot(self, slot)
     }
 
-    pub fn insert_in_slot<T: 'static>(
-        self,
-        comp: T,
-        slot: Option<CompSlot<T>>,
-    ) -> (CompSlot<T>, Option<T>) {
+    pub fn insert_in_slot<T: 'static>(self, comp: T, slot: Option<Orc<T>>) -> (Orc<T>, Option<T>) {
         storage::<T>().insert_in_slot(self, comp, slot)
     }
 
-    pub fn insert_and_return_slot<T: 'static>(self, comp: T) -> (CompSlot<T>, Option<T>) {
+    pub fn insert_and_return_slot<T: 'static>(self, comp: T) -> (Orc<T>, Option<T>) {
         storage::<T>().insert_and_return_slot(self, comp)
     }
 
@@ -746,7 +655,7 @@ impl Entity {
         storage::<T>().remove(self)
     }
 
-    pub fn try_get_slot<T: 'static>(self) -> Option<CompSlot<T>> {
+    pub fn try_get_slot<T: 'static>(self) -> Option<Orc<T>> {
         storage::<T>().try_get_slot(self)
     }
 
@@ -758,7 +667,7 @@ impl Entity {
         storage::<T>().try_get_mut(self)
     }
 
-    pub fn get_slot<T: 'static>(self) -> CompSlot<T> {
+    pub fn get_slot<T: 'static>(self) -> Orc<T> {
         storage::<T>().get_slot(self)
     }
 
@@ -885,22 +794,15 @@ impl OwnedEntity {
         self
     }
 
-    pub fn try_preallocate_slot<T: 'static>(
-        &self,
-        slot: Option<CompSlot<T>>,
-    ) -> Result<CompSlot<T>, CompSlot<T>> {
+    pub fn try_preallocate_slot<T: 'static>(&self, slot: Option<Orc<T>>) -> Result<Orc<T>, Orc<T>> {
         self.entity.try_preallocate_slot(slot)
     }
 
-    pub fn insert_in_slot<T: 'static>(
-        &self,
-        comp: T,
-        slot: Option<CompSlot<T>>,
-    ) -> (CompSlot<T>, Option<T>) {
+    pub fn insert_in_slot<T: 'static>(&self, comp: T, slot: Option<Orc<T>>) -> (Orc<T>, Option<T>) {
         self.entity.insert_in_slot(comp, slot)
     }
 
-    pub fn insert_and_return_slot<T: 'static>(&self, comp: T) -> (CompSlot<T>, Option<T>) {
+    pub fn insert_and_return_slot<T: 'static>(&self, comp: T) -> (Orc<T>, Option<T>) {
         self.entity.insert_and_return_slot(comp)
     }
 
@@ -912,7 +814,7 @@ impl OwnedEntity {
         self.entity.remove()
     }
 
-    pub fn try_get_slot<T: 'static>(&self) -> Option<CompSlot<T>> {
+    pub fn try_get_slot<T: 'static>(&self) -> Option<Orc<T>> {
         self.entity.try_get_slot()
     }
 
@@ -924,7 +826,7 @@ impl OwnedEntity {
         self.entity.try_get_mut()
     }
 
-    pub fn get_slot<T: 'static>(&self) -> CompSlot<T> {
+    pub fn get_slot<T: 'static>(&self) -> Orc<T> {
         self.entity.get_slot()
     }
 
@@ -965,25 +867,24 @@ impl Drop for OwnedEntity {
 
 pub struct Obj<T: 'static> {
     entity: Entity,
-    slot: ObjPointeeSlot<T>,
-}
-
-pub type ObjPointeeSlot<T> = CompSlot<ObjPointee<T>>;
-
-#[derive(Debug, Copy, Clone)]
-pub struct ObjPointee<T> {
-    pub entity: Entity,
-    pub value: T,
+    value: Orc<T>,
 }
 
 impl<T: 'static> Obj<T> {
     pub fn new_unmanaged(value: T) -> Self {
-        Self::wrap(Entity::new_unmanaged(), value)
+        Self::insert(Entity::new_unmanaged(), value)
     }
 
-    pub fn wrap(entity: Entity, value: T) -> Self {
-        let (slot, _) = entity.insert_and_return_slot(ObjPointee { entity, value });
-        Self { entity, slot }
+    pub fn insert(entity: Entity, value: T) -> Self {
+        let (value, _) = entity.insert_and_return_slot(value);
+        Self { entity, value }
+    }
+
+    pub fn wrap(entity: Entity) -> Self {
+        Self {
+            entity,
+            value: entity.get_slot(),
+        }
     }
 
     pub fn entity(self) -> Entity {
@@ -995,34 +896,24 @@ impl<T: 'static> Obj<T> {
         self
     }
 
-    pub fn slot(self) -> ObjPointeeSlot<T> {
-        self.entity.get_slot()
+    pub fn value(self) -> Orc<T> {
+        self.value
     }
 
     pub fn try_get(self) -> Option<CompRef<T>> {
         let token = MainThreadToken::acquire();
 
-        CompRef::filter_map(
-            self.slot.get_with_unjail(token).borrow(token),
-            |slot| match slot {
-                Some(slot) if slot.entity == self.entity => Some(&slot.value),
-                _ => None,
-            },
-        )
-        .ok()
+        self.value
+            .is_alive_and_init(token)
+            .then(|| self.value.borrow(token))
     }
 
     pub fn try_get_mut(self) -> Option<CompMut<T>> {
         let token = MainThreadToken::acquire();
 
-        CompMut::filter_map(
-            self.slot.get_with_unjail(token).borrow_mut(token),
-            |slot| match slot {
-                Some(slot) if slot.entity == self.entity => Some(&mut slot.value),
-                _ => None,
-            },
-        )
-        .ok()
+        self.value
+            .is_alive_and_init(token)
+            .then(|| self.value.borrow_mut(token))
     }
 
     pub fn get(self) -> CompRef<T> {
@@ -1056,47 +947,7 @@ impl<T: 'static> Obj<T> {
 
 impl<T: 'static + fmt::Debug> fmt::Debug for Obj<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut builder = f.debug_struct("Obj");
-        builder.field("entity", &self.entity);
-
-        // If we're not the main thread...
-        let Some(token) = MainThreadToken::try_acquire() else {
-            // Ensure that it is borrowed by us and not someone else.
-            return if self.is_alive() {
-                #[derive(Debug)]
-                struct NonMainThread;
-
-                builder.field("value", &NonMainThread).finish()
-            } else {
-                builder.finish_non_exhaustive()
-            };
-        };
-
-        // If it's already borrowed...
-        let Ok(pointee) = self.slot.get_with_unjail(token).try_borrow(token) else {
-            // Ensure that it is borrowed by us and not someone else.
-            return if self.is_alive() {
-                #[derive(Debug)]
-                struct AlreadyBorrowed;
-
-                builder.field("value", &AlreadyBorrowed).finish()
-            } else {
-                builder.finish_non_exhaustive()
-            };
-        };
-
-        // If the slot is inappropriate for our value, we are dead.
-        let Some(pointee) = &*pointee else {
-            return builder.finish_non_exhaustive();
-        };
-
-        if pointee.entity != self.entity {
-            return builder.finish_non_exhaustive();
-        }
-
-        // Otherwise, display the value
-        builder.field("value", &pointee.value);
-        builder.finish()
+        todo!();
     }
 }
 
@@ -1153,8 +1004,15 @@ impl<T: 'static> OwnedObj<T> {
         Self::from_raw_obj(Obj::new_unmanaged(value))
     }
 
-    pub fn wrap(entity: OwnedEntity, value: T) -> Self {
-        let obj = Self::from_raw_obj(Obj::wrap(entity.entity(), value));
+    pub fn insert(entity: OwnedEntity, value: T) -> Self {
+        let obj = Self::from_raw_obj(Obj::insert(entity.entity(), value));
+        // N.B. we unmanage the entity here to ensure that it gets dropped if the above call panics.
+        entity.unmanage();
+        obj
+    }
+
+    pub fn wrap(entity: OwnedEntity) -> Self {
+        let obj = Self::from_raw_obj(Obj::wrap(entity.entity()));
         // N.B. we unmanage the entity here to ensure that it gets dropped if the above call panics.
         entity.unmanage();
         obj
@@ -1194,8 +1052,8 @@ impl<T: 'static> OwnedObj<T> {
         self
     }
 
-    pub fn slot(&self) -> ObjPointeeSlot<T> {
-        self.obj.slot()
+    pub fn value(&self) -> Orc<T> {
+        self.obj.value()
     }
 
     pub fn try_get(self) -> Option<CompRef<T>> {
@@ -1341,7 +1199,10 @@ pub mod threading {
         cell::{Ref, RefMut},
     };
 
-    use crate::{AnyDowncastExt, CompSlot, Entity, StorageData, StorageDb, StorageInner, STORAGES};
+    use crate::{
+        block::{BlockValue, Orc},
+        AnyDowncastExt, Entity, StorageData, StorageDb, StorageInner, STORAGES,
+    };
 
     use self::cell::{MainThreadToken, ParallelTokenSource, TypeExclusiveToken, TypeReadToken};
 
@@ -1422,7 +1283,7 @@ pub mod threading {
     struct MutStorageViewInner<'a, T: 'static> {
         storage: &'a StorageData<T>,
         storage_token: TypeReadToken<'a, StorageInner<T>>,
-        value_token: TypeExclusiveToken<'a, Option<T>>,
+        value_token: TypeExclusiveToken<'a, BlockValue<T>>,
     }
 
     impl<T: 'static + Send + Sync> MutStorageView<'_, T> {
@@ -1430,7 +1291,7 @@ pub mod threading {
             self.inner.as_ref().unwrap()
         }
 
-        pub fn try_get_slot(&self, entity: Entity) -> Option<CompSlot<T>> {
+        pub fn try_get_slot(&self, entity: Entity) -> Option<Orc<T>> {
             let inner = self.inner.as_ref()?;
 
             inner
@@ -1438,10 +1299,10 @@ pub mod threading {
                 .get(&inner.storage_token)
                 .mappings
                 .get(&entity)
-                .map(|mapping| mapping.slot)
+                .map(|mapping| mapping.value)
         }
 
-        pub fn get_slot(&self, entity: Entity) -> CompSlot<T> {
+        pub fn get_slot(&self, entity: Entity) -> Orc<T> {
             self.try_get_slot(entity).unwrap_or_else(|| {
                 panic!(
                     "failed to find component of type {} for {:?}",
@@ -1452,35 +1313,21 @@ pub mod threading {
         }
 
         pub fn try_get(&self, entity: Entity) -> Option<Ref<T>> {
-            self.try_get_slot(entity).and_then(|slot| {
-                Ref::filter_map(slot.get().borrow(&self.inner().value_token), |v| v.as_ref()).ok()
-            })
+            self.try_get_slot(entity)
+                .map(|slot| slot.borrow(&self.inner().value_token))
         }
 
         pub fn try_get_mut(&self, entity: Entity) -> Option<RefMut<T>> {
-            self.try_get_slot(entity).map(|slot| {
-                RefMut::map(slot.get().borrow_mut(&self.inner().value_token), |v| {
-                    v.as_mut().unwrap()
-                })
-            })
+            self.try_get_slot(entity)
+                .map(|slot| slot.borrow_mut(&self.inner().value_token))
         }
 
         pub fn get(&self, entity: Entity) -> Ref<T> {
-            Ref::map(
-                self.get_slot(entity)
-                    .get()
-                    .borrow(&self.inner().value_token),
-                |v| v.as_ref().unwrap(),
-            )
+            self.get_slot(entity).borrow(&self.inner().value_token)
         }
 
         pub fn get_mut(&self, entity: Entity) -> RefMut<T> {
-            RefMut::map(
-                self.get_slot(entity)
-                    .get()
-                    .borrow_mut(&self.inner().value_token),
-                |v| v.as_mut().unwrap(),
-            )
+            self.get_slot(entity).borrow_mut(&self.inner().value_token)
         }
 
         pub fn has(&self, entity: Entity) -> bool {
@@ -1498,7 +1345,7 @@ pub mod threading {
     struct ReadStorageViewInner<'a, T: 'static> {
         storage: &'a StorageData<T>,
         storage_token: TypeReadToken<'a, StorageInner<T>>,
-        value_token: TypeReadToken<'a, Option<T>>,
+        value_token: TypeReadToken<'a, BlockValue<T>>,
     }
 
     impl<T: 'static + Send + Sync> ReadStorageView<'_, T> {
@@ -1506,7 +1353,7 @@ pub mod threading {
             self.inner.as_ref().unwrap()
         }
 
-        pub fn try_get_slot(&self, entity: Entity) -> Option<CompSlot<T>> {
+        pub fn try_get_slot(&self, entity: Entity) -> Option<Orc<T>> {
             let inner = self.inner.as_ref()?;
 
             inner
@@ -1514,10 +1361,10 @@ pub mod threading {
                 .get(&inner.storage_token)
                 .mappings
                 .get(&entity)
-                .map(|mapping| mapping.slot)
+                .map(|mapping| mapping.value)
         }
 
-        pub fn get_slot(&self, entity: Entity) -> CompSlot<T> {
+        pub fn get_slot(&self, entity: Entity) -> Orc<T> {
             self.try_get_slot(entity).unwrap_or_else(|| {
                 panic!(
                     "failed to find component of type {} for {:?}",
@@ -1528,21 +1375,11 @@ pub mod threading {
         }
 
         pub fn try_get(&self, entity: Entity) -> Option<&T> {
-            Some(
-                self.try_get_slot(entity)?
-                    .get()
-                    .get(&self.inner().value_token)
-                    .as_ref()
-                    .unwrap(),
-            )
+            Some(self.try_get_slot(entity)?.get(&self.inner().value_token))
         }
 
         pub fn get(&self, entity: Entity) -> &T {
-            self.get_slot(entity)
-                .get()
-                .get(&self.inner().value_token)
-                .as_ref()
-                .unwrap()
+            self.get_slot(entity).get(&self.inner().value_token)
         }
 
         pub fn has(&self, entity: Entity) -> bool {
