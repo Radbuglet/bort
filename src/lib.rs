@@ -497,7 +497,7 @@ impl<T: 'static> Storage<T> {
         entity: Entity,
         value: T,
         slot: Option<Orc<T>>,
-    ) -> (Orc<T>, Option<T>) {
+    ) -> (Obj<T>, Option<T>) {
         // Ensure that the entity is alive and extend the component list.
         ALIVE.with(|slots| {
             let mut slots = slots.borrow_mut();
@@ -517,7 +517,7 @@ impl<T: 'static> Storage<T> {
         // Update the storage
         let me = &mut *self.inner.borrow_mut(self.token);
 
-        match me.mappings.entry(entity) {
+        let (slot, replaced) = match me.mappings.entry(entity) {
             hashbrown::hash_map::Entry::Occupied(entry) => {
                 let slot = entry.get().slot;
                 (slot, slot.init(self.token, value))
@@ -532,7 +532,9 @@ impl<T: 'static> Storage<T> {
                 });
                 (slot, None)
             }
-        }
+        };
+
+        (Obj::from_raw_parts(entity, slot), replaced)
     }
 
     fn allocate_slot_if_needed(
@@ -599,7 +601,7 @@ impl<T: 'static> Storage<T> {
         (slot, Some((block_clone, slot_idx as usize)))
     }
 
-    pub fn insert_and_return_slot(&self, entity: Entity, value: T) -> (Orc<T>, Option<T>) {
+    pub fn insert_and_return_slot(&self, entity: Entity, value: T) -> (Obj<T>, Option<T>) {
         self.insert_in_slot(entity, value, None)
     }
 
@@ -807,11 +809,11 @@ impl Entity {
         storage::<T>().try_preallocate_slot(self, slot)
     }
 
-    pub fn insert_in_slot<T: 'static>(self, comp: T, slot: Option<Orc<T>>) -> (Orc<T>, Option<T>) {
+    pub fn insert_in_slot<T: 'static>(self, comp: T, slot: Option<Orc<T>>) -> (Obj<T>, Option<T>) {
         storage::<T>().insert_in_slot(self, comp, slot)
     }
 
-    pub fn insert_and_return_slot<T: 'static>(self, comp: T) -> (Orc<T>, Option<T>) {
+    pub fn insert_and_return_slot<T: 'static>(self, comp: T) -> (Obj<T>, Option<T>) {
         storage::<T>().insert_and_return_slot(self, comp)
     }
 
@@ -849,6 +851,10 @@ impl Entity {
 
     pub fn has<T: 'static>(self) -> bool {
         storage::<T>().has(self)
+    }
+
+    pub fn obj<T: 'static>(self) -> Obj<T> {
+        Obj::wrap(self)
     }
 
     pub fn is_alive(self) -> bool {
@@ -966,11 +972,11 @@ impl OwnedEntity {
         self.entity.try_preallocate_slot(slot)
     }
 
-    pub fn insert_in_slot<T: 'static>(&self, comp: T, slot: Option<Orc<T>>) -> (Orc<T>, Option<T>) {
+    pub fn insert_in_slot<T: 'static>(&self, comp: T, slot: Option<Orc<T>>) -> (Obj<T>, Option<T>) {
         self.entity.insert_in_slot(comp, slot)
     }
 
-    pub fn insert_and_return_slot<T: 'static>(&self, comp: T) -> (Orc<T>, Option<T>) {
+    pub fn insert_and_return_slot<T: 'static>(&self, comp: T) -> (Obj<T>, Option<T>) {
         self.entity.insert_and_return_slot(comp)
     }
 
@@ -1010,6 +1016,14 @@ impl OwnedEntity {
         self.entity.has::<T>()
     }
 
+    pub fn obj<T: 'static>(&self) -> Obj<T> {
+        self.entity.obj()
+    }
+
+    pub fn into_obj<T: 'static>(self) -> OwnedObj<T> {
+        OwnedObj::wrap(self)
+    }
+
     pub fn is_alive(&self) -> bool {
         self.entity.is_alive()
     }
@@ -1045,13 +1059,12 @@ pub struct Obj<T: 'static> {
 }
 
 impl<T: 'static> Obj<T> {
-    pub fn new_unmanaged(value: T) -> Self {
-        Self::insert(Entity::new_unmanaged(), value)
+    pub fn from_raw_parts(entity: Entity, value: Orc<T>) -> Self {
+        Self { entity, value }
     }
 
     pub fn insert(entity: Entity, value: T) -> Self {
-        let (value, _) = entity.insert_and_return_slot(value);
-        Self { entity, value }
+        entity.insert_and_return_slot(value).0
     }
 
     pub fn wrap(entity: Entity) -> Self {
@@ -1059,6 +1072,10 @@ impl<T: 'static> Obj<T> {
             entity,
             value: entity.get_slot(),
         }
+    }
+
+    pub fn new_unmanaged(value: T) -> Self {
+        Self::insert(Entity::new_unmanaged(), value)
     }
 
     pub fn entity(self) -> Entity {
@@ -1177,8 +1194,10 @@ pub struct OwnedObj<T: 'static> {
 impl<T: 'static> OwnedObj<T> {
     // === Lifecycle === //
 
-    pub fn new(value: T) -> Self {
-        Self::from_raw_obj(Obj::new_unmanaged(value))
+    pub fn from_raw_parts(entity: OwnedEntity, value: Orc<T>) -> Self {
+        Self {
+            obj: Obj::from_raw_parts(entity.unmanage(), value),
+        }
     }
 
     pub fn insert(entity: OwnedEntity, value: T) -> Self {
@@ -1193,6 +1212,10 @@ impl<T: 'static> OwnedObj<T> {
         // N.B. we unmanage the entity here to ensure that it gets dropped if the above call panics.
         entity.unmanage();
         obj
+    }
+
+    pub fn new(value: T) -> Self {
+        Self::from_raw_obj(Obj::new_unmanaged(value))
     }
 
     pub fn from_raw_obj(obj: Obj<T>) -> Self {
