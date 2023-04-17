@@ -1233,19 +1233,19 @@ impl<T: 'static> OwnedObj<T> {
         self.obj.value()
     }
 
-    pub fn try_get(self) -> Option<CompRef<T>> {
+    pub fn try_get(&self) -> Option<CompRef<T>> {
         self.obj.try_get()
     }
 
-    pub fn try_get_mut(self) -> Option<CompMut<T>> {
+    pub fn try_get_mut(&self) -> Option<CompMut<T>> {
         self.obj.try_get_mut()
     }
 
-    pub fn get(self) -> CompRef<T> {
+    pub fn get(&self) -> CompRef<T> {
         self.obj.get()
     }
 
-    pub fn get_mut(self) -> CompMut<T> {
+    pub fn get_mut(&self) -> CompMut<T> {
         self.obj.get_mut()
     }
 
