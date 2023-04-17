@@ -171,7 +171,6 @@ fn unwrap_error<T, E: Error>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|e| panic!("{e}"))
 }
 
-// Error messages
 const NOT_ON_MAIN_THREAD_MSG: RawFmt = RawFmt("<not on main thread>");
 
 // === ComponentList === //
@@ -439,7 +438,7 @@ struct StorageInner<T: 'static> {
 #[derive(Debug)]
 struct EntityStorageMapping<T: 'static> {
     slot: Orc<T>,
-    internal_meta: Option<(StorageBlockMeta, usize)>,
+    internal_meta: Option<(StorageBlock<T>, usize)>,
 }
 
 #[derive(Debug)]
@@ -448,19 +447,16 @@ struct StorageInnerAllocator<T: 'static> {
     non_full_blocks: Vec<StorageBlock<T>>,
 }
 
-#[derive(Debug)]
-struct StorageBlock<T: 'static> {
-    heap: Heap<T>,
-    meta: StorageBlockMeta,
-}
-
-type StorageBlockMeta = MainThreadJail<Rc<StorageBlockMetaInner>>;
+type StorageBlock<T> = MainThreadJail<Rc<StorageBlockInner<T>>>;
 
 #[derive(Debug)]
-struct StorageBlockMetaInner {
+struct StorageBlockInner<T: 'static> {
+    heap: RefCell<Option<Heap<T>>>,
     slot: Cell<usize>,
     free_mask: Cell<u128>,
 }
+
+const HAMMERED_OR_FULL_BLOCK_SLOT: usize = usize::MAX;
 
 // Storage API
 #[derive(Debug)]
@@ -546,54 +542,64 @@ impl<T: 'static> Storage<T> {
         allocator: &mut StorageInnerAllocator<T>,
         slot: Option<Orc<T>>,
         value: Option<T>,
-    ) -> (Orc<T>, Option<(StorageBlockMeta, usize)>) {
+    ) -> (Orc<T>, Option<(StorageBlock<T>, usize)>) {
+        // If the user specified a slot of their own, use it.
         if let Some(slot) = slot {
             if let Some(value) = value {
                 slot.init(token, value);
             }
-            (slot, None)
-        } else {
-            // Acquire a block
-            let block = allocator.target_block.get_or_insert_with(|| {
-                match allocator.non_full_blocks.pop() {
-                    Some(block) => {
-                        // Set our slot to a sentinel value so people don't try to remove us.
-                        block.meta.get_with_unjail(token).slot.set(usize::MAX);
-                        block
-                    }
-                    None => {
-                        StorageBlock {
-                            // TODO: Make this dynamic
-                            heap: Heap::new(128),
-                            meta: MainThreadJail::new(Rc::new(StorageBlockMetaInner {
-                                slot: Cell::new(usize::MAX),
-                                free_mask: Cell::new(0),
-                            })),
-                        }
-                    }
-                }
-            });
-            let meta = block.meta.get_with_unjail(token);
-
-            // Find the first open slot
-            let mut free_mask = meta.free_mask.get();
-            let slot_idx = free_mask.trailing_zeros();
-
-            // Allocate a slot
-            let slot = block.heap.alloc(token, slot_idx as usize, value);
-            let meta_clone = MainThreadJail::new(meta.clone());
-
-            // Mark the slot as occupied
-            free_mask |= 1 << slot_idx;
-            meta.free_mask.set(free_mask);
-
-            // If our mask if full, remove the block
-            if free_mask == u128::MAX {
-                allocator.target_block = None;
-            }
-
-            (slot, Some((meta_clone, slot_idx as usize)))
+            return (slot, None);
         }
+
+        // Otherwise, acquire a block...
+        let block = allocator.target_block.get_or_insert_with(|| {
+            match allocator.non_full_blocks.pop() {
+                Some(block) => {
+                    // Set our slot to a sentinel value so people don't try to remove us on empty.
+                    block
+                        .get_with_unjail(token)
+                        .slot
+                        .set(HAMMERED_OR_FULL_BLOCK_SLOT);
+                    block
+                }
+                None => {
+                    MainThreadJail::new(Rc::new(StorageBlockInner {
+                        // TODO: Make this dynamic
+                        heap: RefCell::new(Some(Heap::new(128))),
+                        slot: Cell::new(HAMMERED_OR_FULL_BLOCK_SLOT),
+                        free_mask: Cell::new(0),
+                    }))
+                }
+            }
+        });
+
+        let block_inner = block.get_mut();
+
+        // Find the first open slot
+        let mut free_mask = block_inner.free_mask.get();
+        let slot_idx = free_mask.trailing_ones();
+
+        // Allocate a slot
+        let slot =
+            block_inner
+                .heap
+                .borrow_mut()
+                .as_mut()
+                .unwrap()
+                .alloc(token, slot_idx as usize, value);
+
+        // Mark the slot as occupied
+        free_mask |= 1 << slot_idx;
+        block_inner.free_mask.set(free_mask);
+
+        // If our mask if full, remove the block
+        let block_clone = MainThreadJail::new(block_inner.clone());
+        if free_mask == u128::MAX {
+            // N.B. `block` is already located in the `HAMMERED_OR_FULL_BLOCK_SLOT`.
+            allocator.target_block = None;
+        }
+
+        (slot, Some((block_clone, slot_idx as usize)))
     }
 
     pub fn insert_and_return_slot(&self, entity: Entity, value: T) -> (Orc<T>, Option<T>) {
@@ -641,32 +647,47 @@ impl<T: 'static> Storage<T> {
             let taken = mapping.slot.destroy(self.token);
 
             // If the slot is internal, deallocate from the block.
-            if let Some((meta, slot)) = mapping.internal_meta {
-                let meta = meta.get_with_unjail(self.token);
+            if let Some((block, slot)) = mapping.internal_meta {
+                let block = block.into_inner();
 
                 // Update the free mask
-                let mut free_mask = meta.free_mask.get();
+                let old_free_mask = block.free_mask.get();
+                let mut free_mask = old_free_mask;
                 free_mask ^= 1 << slot;
-                meta.free_mask.set(free_mask);
+                block.free_mask.set(free_mask);
 
-                // If the mask is now empty and the slot is our "hammered" block, delete it!
-                let block_index = meta.slot.get();
+                // If the block was full but no longer is, add it to the `non_full_blocks` list.
+                if old_free_mask == u128::MAX {
+                    // In this case, the block is just full and non-hammered.
+                    debug_assert_eq!(block.slot.get(), HAMMERED_OR_FULL_BLOCK_SLOT);
 
-                if free_mask == 0 && block_index != usize::MAX {
+                    // Set the block's location
+                    block.slot.set(me.alloc.non_full_blocks.len());
+
+                    // Push the block
+                    me.alloc
+                        .non_full_blocks
+                        .push(MainThreadJail::new(block.clone()));
+                }
+
+                // If the mask is now empty and the block is not our "hammered" block, delete it!
+                let block_index = block.slot.get();
+
+                if free_mask == 0 && block_index != HAMMERED_OR_FULL_BLOCK_SLOT {
                     // Swap-remove the block
-                    let block = me.alloc.non_full_blocks.swap_remove(block_index);
+                    let block = me
+                        .alloc
+                        .non_full_blocks
+                        .swap_remove(block_index)
+                        .into_inner();
 
                     // Update the perturbed index
                     if let Some(perturbed) = me.alloc.non_full_blocks.get_mut(block_index) {
-                        perturbed
-                            .meta
-                            .get_with_unjail(self.token)
-                            .slot
-                            .set(block_index);
+                        perturbed.get_with_unjail(self.token).slot.set(block_index);
                     }
 
                     // Deallocate the block
-                    block.heap.destroy(self.token);
+                    block.heap.borrow_mut().take().unwrap().destroy(self.token);
                 }
             }
 

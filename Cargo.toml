@@ -8,8 +8,9 @@ hashbrown = { version = "0.13.2", default-features = false }
 rustc-hash = "1.1.0"
 
 [dev-dependencies]
-glam = "0.23.0"  # For doc-test
 criterion = "0.4.0"
+fastrand = "1.9.0"  # For "fuzzing"
+glam = "0.23.0"  # For doc-test
 
 [[bench]]
 name = "access"
