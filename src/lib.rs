@@ -451,7 +451,7 @@ type StorageBlock<T> = MainThreadJail<Rc<StorageBlockInner<T>>>;
 
 #[derive(Debug)]
 struct StorageBlockInner<T: 'static> {
-    heap: RefCell<Option<Heap<T>>>,
+    heap: RefCell<Heap<T>>,
     slot: Cell<usize>,
     free_mask: Cell<u128>,
 }
@@ -555,17 +555,19 @@ impl<T: 'static> Storage<T> {
         let block = allocator.target_block.get_or_insert_with(|| {
             match allocator.non_full_blocks.pop() {
                 Some(block) => {
-                    // Set our slot to a sentinel value so people don't try to remove us on empty.
+                    // Set our slot to a sentinel value so people don't try to remove us when we
+                    // become empty.
                     block
                         .get_with_unjail(token)
                         .slot
                         .set(HAMMERED_OR_FULL_BLOCK_SLOT);
+
                     block
                 }
                 None => {
                     MainThreadJail::new(Rc::new(StorageBlockInner {
                         // TODO: Make this dynamic
-                        heap: RefCell::new(Some(Heap::new(128))),
+                        heap: RefCell::new(Heap::new(128)),
                         slot: Cell::new(HAMMERED_OR_FULL_BLOCK_SLOT),
                         free_mask: Cell::new(0),
                     }))
@@ -580,13 +582,10 @@ impl<T: 'static> Storage<T> {
         let slot_idx = free_mask.trailing_ones();
 
         // Allocate a slot
-        let slot =
-            block_inner
-                .heap
-                .borrow_mut()
-                .as_mut()
-                .unwrap()
-                .alloc(token, slot_idx as usize, value);
+        let slot = block_inner
+            .heap
+            .borrow_mut()
+            .alloc(token, slot_idx as usize, value);
 
         // Mark the slot as occupied
         free_mask |= 1 << slot_idx;
@@ -642,8 +641,9 @@ impl<T: 'static> Storage<T> {
     fn try_remove_untracked(&self, entity: Entity) -> Option<T> {
         let mut me = self.inner.borrow_mut(self.token);
 
+        // Remove the mapping
         if let Some(mapping) = me.mappings.remove(&entity) {
-            // Remove the value from the slot
+            // Destroy the Orc
             let taken = mapping.slot.destroy(self.token);
 
             // If the slot is internal, deallocate from the block.
@@ -653,6 +653,7 @@ impl<T: 'static> Storage<T> {
                 // Update the free mask
                 let old_free_mask = block.free_mask.get();
                 let mut free_mask = old_free_mask;
+                debug_assert_ne!(free_mask & (1 << slot), 0);
                 free_mask ^= 1 << slot;
                 block.free_mask.set(free_mask);
 
@@ -664,7 +665,7 @@ impl<T: 'static> Storage<T> {
                     // Set the block's location
                     block.slot.set(me.alloc.non_full_blocks.len());
 
-                    // Push the block
+                    // Push the block back into the `non_free_blocks` set
                     me.alloc
                         .non_full_blocks
                         .push(MainThreadJail::new(block.clone()));
@@ -672,22 +673,28 @@ impl<T: 'static> Storage<T> {
 
                 // If the mask is now empty and the block is not our "hammered" block, delete it!
                 let block_index = block.slot.get();
-
                 if free_mask == 0 && block_index != HAMMERED_OR_FULL_BLOCK_SLOT {
-                    // Swap-remove the block
-                    let block = me
-                        .alloc
-                        .non_full_blocks
-                        .swap_remove(block_index)
-                        .into_inner();
+                    // Destroy our block reference.
+                    drop(block);
+
+                    // Swap-remove the block from the `non_full_blocks` list and take ownership of
+                    // its contents.
+                    let block = Rc::try_unwrap(
+                        me.alloc
+                            .non_full_blocks
+                            .swap_remove(block_index)
+                            .into_inner(),
+                    )
+                    .ok()
+                    .unwrap();
 
                     // Update the perturbed index
                     if let Some(perturbed) = me.alloc.non_full_blocks.get_mut(block_index) {
-                        perturbed.get_with_unjail(self.token).slot.set(block_index);
+                        perturbed.get_mut().slot.set(block_index);
                     }
 
                     // Deallocate the block
-                    block.heap.borrow_mut().take().unwrap().destroy(self.token);
+                    block.heap.into_inner().destroy(self.token);
                 }
             }
 
@@ -1300,7 +1307,6 @@ impl<T: 'static> Borrow<Entity> for OwnedObj<T> {
 // === Debug utilities === //
 
 pub mod debug {
-
     use super::*;
 
     pub fn alive_entity_count() -> usize {
@@ -1313,6 +1319,14 @@ pub mod debug {
 
     pub fn spawned_entity_count() -> u64 {
         DEBUG_ENTITY_COUNTER.load(atomic::Ordering::Relaxed)
+    }
+
+    pub fn heap_count() -> u64 {
+        block::DEBUG_HEAP_COUNTER.load(atomic::Ordering::Relaxed)
+    }
+
+    pub fn orc_count() -> u64 {
+        block::DEBUG_ORC_COUNTER.load(atomic::Ordering::Relaxed)
     }
 
     #[derive(Debug, Clone)]
@@ -2193,6 +2207,11 @@ pub mod block {
         unpoison, unwrap_error, RawFmt, NOT_ON_MAIN_THREAD_MSG,
     };
 
+    // === Debug counters === //
+
+    pub(crate) static DEBUG_HEAP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    pub(crate) static DEBUG_ORC_COUNTER: AtomicU64 = AtomicU64::new(0);
+
     // === BlockSlot === //
 
     type BlockSlot<T> = NRefCell<BlockValue<T>>;
@@ -2261,6 +2280,7 @@ pub mod block {
         pub fn new(len: usize) -> Self {
             let slots = iter::repeat_with(Default::default).take(len);
             let slots = Box::from_iter(slots);
+            DEBUG_HEAP_COUNTER.fetch_add(1, Ordering::Relaxed);
 
             Self {
                 slots: NonNull::new(Box::into_raw(slots)).unwrap(),
@@ -2340,6 +2360,8 @@ pub mod block {
                 // because the slots are empty.
                 Box::from_raw(slots.as_ptr())
             });
+
+            DEBUG_HEAP_COUNTER.fetch_sub(1, Ordering::Relaxed);
         }
     }
 
@@ -2367,6 +2389,8 @@ pub mod block {
     }
 
     fn alloc_slot(ptr: NonNull<()>, is_uninit: bool) -> (&'static Slot, NonZeroU64) {
+        DEBUG_ORC_COUNTER.fetch_add(1, Ordering::Relaxed);
+
         // Allocate a slot and a generation
         let (base_gen, slot) = {
             // Acquire DB
@@ -2399,6 +2423,7 @@ pub mod block {
     }
 
     fn release_slot(slot: &'static Slot) {
+        DEBUG_ORC_COUNTER.fetch_sub(1, Ordering::Relaxed);
         slot.gen.store(0, Ordering::Relaxed);
         free_slots().1.push(slot);
     }
