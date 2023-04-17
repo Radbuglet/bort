@@ -7,8 +7,11 @@ use std::{
     marker::PhantomData,
     mem,
     num::NonZeroU64,
+    rc::Rc,
     sync::{atomic, MutexGuard, PoisonError},
 };
+
+use threading::cell::MainThreadJail;
 
 use crate::{
     block::{Heap, Orc},
@@ -412,7 +415,10 @@ pub fn storage<T: 'static>() -> Storage<T> {
         .or_insert_with(|| {
             leak::<StorageData<T>>(NRefCell::new(StorageInner {
                 mappings: NopHashMap::default(),
-                non_full_blocks: Vec::new(),
+                alloc: StorageInnerAllocator {
+                    target_block: None,
+                    non_full_blocks: Vec::new(),
+                },
             }))
         })
         .downcast_ref::<StorageData<T>>()
@@ -427,18 +433,33 @@ type StorageData<T> = NRefCell<StorageInner<T>>;
 #[derive(Debug)]
 struct StorageInner<T: 'static> {
     mappings: NopHashMap<Entity, EntityStorageMapping<T>>,
-    non_full_blocks: Vec<StorageBlock<T>>,
+    alloc: StorageInnerAllocator<T>,
 }
 
 #[derive(Debug)]
 struct EntityStorageMapping<T: 'static> {
     slot: Orc<T>,
-    is_external: bool,
+    internal_meta: Option<(StorageBlockMeta, usize)>,
+}
+
+#[derive(Debug)]
+struct StorageInnerAllocator<T: 'static> {
+    target_block: Option<StorageBlock<T>>,
+    non_full_blocks: Vec<StorageBlock<T>>,
 }
 
 #[derive(Debug)]
 struct StorageBlock<T: 'static> {
     heap: Heap<T>,
+    meta: StorageBlockMeta,
+}
+
+type StorageBlockMeta = MainThreadJail<Rc<StorageBlockMetaInner>>;
+
+#[derive(Debug)]
+struct StorageBlockMetaInner {
+    slot: Cell<usize>,
+    free_mask: Cell<u128>,
 }
 
 // Storage API
@@ -465,10 +486,13 @@ impl<T: 'static> Storage<T> {
         match me.mappings.entry(entity) {
             hashbrown::hash_map::Entry::Occupied(entry) => Err(entry.get().slot),
             hashbrown::hash_map::Entry::Vacant(entry) => {
-                let (slot, is_external) =
-                    Self::allocate_slot_if_needed(&mut me.non_full_blocks, slot, None);
+                let (slot, internal_meta) =
+                    Self::allocate_slot_if_needed(self.token, &mut me.alloc, slot, None);
 
-                entry.insert(EntityStorageMapping { slot, is_external });
+                entry.insert(EntityStorageMapping {
+                    slot,
+                    internal_meta,
+                });
                 Ok(slot)
             }
         }
@@ -505,20 +529,71 @@ impl<T: 'static> Storage<T> {
                 (slot, slot.init(self.token, value))
             }
             hashbrown::hash_map::Entry::Vacant(entry) => {
-                let (slot, is_external) =
-                    Self::allocate_slot_if_needed(&mut me.non_full_blocks, slot, Some(value));
-                entry.insert(EntityStorageMapping { slot, is_external });
+                let (slot, internal_meta) =
+                    Self::allocate_slot_if_needed(self.token, &mut me.alloc, slot, Some(value));
+
+                entry.insert(EntityStorageMapping {
+                    slot,
+                    internal_meta,
+                });
                 (slot, None)
             }
         }
     }
 
     fn allocate_slot_if_needed(
-        non_full_blocks: &mut Vec<StorageBlock<T>>,
+        token: &'static MainThreadToken,
+        allocator: &mut StorageInnerAllocator<T>,
         slot: Option<Orc<T>>,
         value: Option<T>,
-    ) -> (Orc<T>, bool) {
-        todo!();
+    ) -> (Orc<T>, Option<(StorageBlockMeta, usize)>) {
+        if let Some(slot) = slot {
+            if let Some(value) = value {
+                slot.init(token, value);
+            }
+            (slot, None)
+        } else {
+            // Acquire a block
+            let block = allocator.target_block.get_or_insert_with(|| {
+                match allocator.non_full_blocks.pop() {
+                    Some(block) => {
+                        // Set our slot to a sentinel value so people don't try to remove us.
+                        block.meta.get_with_unjail(token).slot.set(usize::MAX);
+                        block
+                    }
+                    None => {
+                        StorageBlock {
+                            // TODO: Make this dynamic
+                            heap: Heap::new(128),
+                            meta: MainThreadJail::new(Rc::new(StorageBlockMetaInner {
+                                slot: Cell::new(usize::MAX),
+                                free_mask: Cell::new(0),
+                            })),
+                        }
+                    }
+                }
+            });
+            let meta = block.meta.get_with_unjail(token);
+
+            // Find the first open slot
+            let mut free_mask = meta.free_mask.get();
+            let slot_idx = free_mask.trailing_zeros();
+
+            // Allocate a slot
+            let slot = block.heap.alloc(token, slot_idx as usize, value);
+            let meta_clone = MainThreadJail::new(meta.clone());
+
+            // Mark the slot as occupied
+            free_mask |= 1 << slot_idx;
+            meta.free_mask.set(free_mask);
+
+            // If our mask if full, remove the block
+            if free_mask == u128::MAX {
+                allocator.target_block = None;
+            }
+
+            (slot, Some((meta_clone, slot_idx as usize)))
+        }
     }
 
     pub fn insert_and_return_slot(&self, entity: Entity, value: T) -> (Orc<T>, Option<T>) {
@@ -562,8 +637,39 @@ impl<T: 'static> Storage<T> {
         let mut me = self.inner.borrow_mut(self.token);
 
         if let Some(mapping) = me.mappings.remove(&entity) {
+            // Remove the value from the slot
             let taken = mapping.slot.destroy(self.token);
-            todo!();
+
+            // If the slot is internal, deallocate from the block.
+            if let Some((meta, slot)) = mapping.internal_meta {
+                let meta = meta.get_with_unjail(self.token);
+
+                // Update the free mask
+                let mut free_mask = meta.free_mask.get();
+                free_mask ^= 1 << slot;
+                meta.free_mask.set(free_mask);
+
+                // If the mask is now empty and the slot is our "hammered" block, delete it!
+                let block_index = meta.slot.get();
+
+                if free_mask == 0 && block_index != usize::MAX {
+                    // Swap-remove the block
+                    let block = me.alloc.non_full_blocks.swap_remove(block_index);
+
+                    // Update the perturbed index
+                    if let Some(perturbed) = me.alloc.non_full_blocks.get_mut(block_index) {
+                        perturbed
+                            .meta
+                            .get_with_unjail(self.token)
+                            .slot
+                            .set(block_index);
+                    }
+
+                    // Deallocate the block
+                    block.heap.destroy(self.token);
+                }
+            }
+
             taken
         } else {
             None
