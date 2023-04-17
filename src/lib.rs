@@ -11,12 +11,10 @@ use std::{
     sync::{atomic, MutexGuard, PoisonError},
 };
 
-use threading::cell::MainThreadJail;
-
 use crate::{
     block::{Heap, Orc},
     debug::{AsDebugLabel, DebugLabel},
-    threading::cell::{ensure_main_thread, MainThreadToken, NRefCell},
+    threading::cell::{ensure_main_thread, MainThreadJail, MainThreadToken, NRefCell},
 };
 
 // === Helpers === //
@@ -1021,6 +1019,12 @@ impl OwnedEntity {
     }
 }
 
+impl Default for OwnedEntity {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Borrow<Entity> for OwnedEntity {
     fn borrow(&self) -> &Entity {
         &self.entity
@@ -1594,6 +1598,12 @@ pub mod threading {
                 static ALLOC: AtomicU64 = AtomicU64::new(1);
 
                 Self(NonZeroU64::new(ALLOC.fetch_add(1, Ordering::Relaxed)).unwrap())
+            }
+        }
+
+        impl Default for Namespace {
+            fn default() -> Self {
+                Self::new()
             }
         }
 
@@ -2650,8 +2660,8 @@ pub mod block {
 
             // Ensure we're on the main thread.
             let Some(token) = MainThreadToken::try_acquire() else {
-				return builder.field("value", &NOT_ON_MAIN_THREAD_MSG).finish();
-			};
+                return builder.field("value", &NOT_ON_MAIN_THREAD_MSG).finish();
+            };
 
             // Print out the value
             builder.field("value", &self.try_borrow(token)).finish()
