@@ -1293,6 +1293,12 @@ impl<T: 'static + fmt::Debug> fmt::Debug for OwnedObj<T> {
     }
 }
 
+impl<T: 'static + Default> Default for OwnedObj<T> {
+    fn default() -> Self {
+        Self::new(T::default())
+    }
+}
+
 impl<T: 'static> hash::Hash for OwnedObj<T> {
     fn hash<H: hash::Hasher>(&self, state: &mut H) {
         self.obj.hash(state);
