@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+cfgenius = "0.1.0"
 hashbrown = { version = "0.13.2", default-features = false }
 rustc-hash = "1.1.0"
 

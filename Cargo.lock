@@ -30,6 +30,7 @@ checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
 name = "bort"
 version = "0.1.0"
 dependencies = [
+ "cfgenius",
  "criterion",
  "fastrand",
  "glam",
@@ -60,6 +61,12 @@ name = "cfg-if"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
+
+[[package]]
+name = "cfgenius"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e4e14dc222697b7baf25030985dc061fd360b805ec69a8cec135bb01e77cc09"
 
 [[package]]
 name = "ciborium"

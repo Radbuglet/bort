@@ -2697,3 +2697,415 @@ pub mod block {
         }
     }
 }
+
+pub mod cell {
+    use std::{
+        cell::{Cell, UnsafeCell},
+        error::Error,
+        fmt,
+        mem::{self, MaybeUninit},
+        ops::{Deref, DerefMut},
+    };
+
+    use crate::unwrap_error;
+
+    // === Borrow state === ///
+
+    const EMPTY: usize = 0;
+    const NEUTRAL: usize = usize::MAX / 2;
+
+    // === Borrow location tracking === //
+
+    cfgenius::define!(pub print_borrow_location = cfg(debug_assertions));
+
+    cfgenius::cond! {
+        if macro(print_borrow_location) {
+            use std::panic::Location;
+
+            #[derive(Debug, Clone)]
+            struct BorrowTracker(Cell<Option<&'static Location<'static>>>);
+
+            impl BorrowTracker {
+                pub const fn new() -> Self {
+                    Self(Cell::new(None))
+                }
+
+                #[inline(always)]
+                pub fn set(&self) {
+                    self.0.set(Some(Location::caller()));
+                }
+            }
+        } else {
+            #[derive(Debug, Clone)]
+            struct BorrowTracker(());
+
+            impl BorrowTracker {
+                pub const fn new() -> Self {
+                    Self(())
+                }
+
+                #[inline(always)]
+                pub fn set(&self) {}
+            }
+        }
+    }
+
+    // === Borrow error === //
+
+    // Public
+    #[derive(Debug, Clone)]
+    pub struct BorrowError(CommonBorrowError<false>);
+
+    impl Error for BorrowError {}
+
+    impl fmt::Display for BorrowError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            self.0.fmt(f)
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct BorrowMutError(CommonBorrowError<true>);
+
+    impl Error for BorrowMutError {}
+
+    impl fmt::Display for BorrowMutError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            self.0.fmt(f)
+        }
+    }
+
+    // Internal
+    fn fmt_borrow_error_prefix(f: &mut fmt::Formatter, state: usize, mutably: bool) -> fmt::Result {
+        let adverb = if mutably { "mutably" } else { "immutably" };
+        let blocker_name = if mutably { "reader" } else { "writer" };
+
+        if state == EMPTY {
+            write!(f, "failed to borrow cell {adverb}: cell is empty")
+        } else {
+            let blockers = if mutably {
+                NEUTRAL - state
+            } else {
+                state - NEUTRAL
+            };
+
+            write!(
+                f,
+                "failed to borrow cell {adverb}: cell is borrowed by {blockers} {blocker_name}{}",
+                if blockers == 1 { "" } else { "s" },
+            )
+        }
+    }
+
+    cfgenius::cond! {
+        if macro(print_borrow_location) {
+            #[derive(Clone)]
+            struct CommonBorrowError<const MUTABLY: bool> {
+                state: usize,
+                location: Option<&'static Location<'static>>,
+            }
+
+            impl<const MUTABLY: bool> CommonBorrowError<MUTABLY> {
+                pub fn new<T>(cell: &OptRefCell<T>) -> Self {
+                    Self {
+                        state: cell.state.get(),
+                        location: cell.borrowed_at.0.get(),
+                    }
+                }
+            }
+
+            impl<const MUTABLY: bool> fmt::Debug for CommonBorrowError<MUTABLY> {
+                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    f.debug_struct("CommonBorrowError")
+                        .field("mutably", &MUTABLY)
+                        .field("state", &self.state)
+                        .field("location", &self.location)
+                        .finish()
+                }
+            }
+
+            impl<const MUTABLY: bool> Error for CommonBorrowError<MUTABLY> {}
+
+            impl<const MUTABLY: bool> fmt::Display for CommonBorrowError<MUTABLY> {
+                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    fmt_borrow_error_prefix(f, self.state, MUTABLY)?;
+
+                    if let Some(location) = self.location {
+                        write!(
+                            f,
+                            " (first borrow location: {} at {}:{})",
+                            location.file(),
+                            location.line(),
+                            location.column(),
+                        )?;
+                    }
+
+                    Ok(())
+                }
+            }
+        } else {
+            #[derive(Clone)]
+            struct CommonBorrowError<const MUTABLY: bool> {
+                state: usize,
+            }
+
+            impl<const MUTABLY: bool> CommonBorrowError<MUTABLY> {
+                pub fn new<T>(cell: &OptRefCell<T>) -> Self {
+                    Self { state: cell.state.get() }
+                }
+            }
+
+            impl<const MUTABLY: bool> fmt::Debug for CommonBorrowError<MUTABLY> {
+                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    f.debug_struct("CommonBorrowError")
+                        .field("mutably", &MUTABLY)
+                        .field("state", &self.state)
+                        .finish()
+                }
+            }
+
+            impl<const MUTABLY: bool> Error for CommonBorrowError<MUTABLY> {}
+
+            impl<const MUTABLY: bool> fmt::Display for CommonBorrowError<MUTABLY> {
+                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    fmt_borrow_error_prefix(f, self.state, MUTABLY)
+                }
+            }
+        }
+    }
+
+    // === OptRefCell === //
+
+    pub struct OptRefCell<T> {
+        /// ## Format
+        ///
+        /// - A value of `0` means that the value is empty.
+        /// - A value less than `NEUTRAL` means that the value is mutably borrowed.
+        /// - A value equal to `NEUTRAL` means that the value is present and unborrowed.
+        /// - A value greater than `NEUTRAL` means that the value is immutably borrowed.
+        ///
+        state: Cell<usize>,
+        borrowed_at: BorrowTracker,
+        value: UnsafeCell<MaybeUninit<T>>,
+    }
+
+    impl<T> OptRefCell<T> {
+        pub fn new(value: Option<T>) -> Self {
+            match value {
+                Some(value) => Self::new_full(value),
+                None => Self::new_empty(),
+            }
+        }
+
+        pub const fn new_full(value: T) -> Self {
+            Self {
+                state: Cell::new(NEUTRAL),
+                borrowed_at: BorrowTracker::new(),
+                value: UnsafeCell::new(MaybeUninit::new(value)),
+            }
+        }
+
+        pub const fn new_empty() -> Self {
+            Self {
+                state: Cell::new(EMPTY),
+                borrowed_at: BorrowTracker::new(),
+                value: UnsafeCell::new(MaybeUninit::uninit()),
+            }
+        }
+
+        pub fn into_inner(self) -> Option<T> {
+            if self.is_empty() {
+                None
+            } else {
+                Some(unsafe { self.value.into_inner().assume_init() })
+            }
+        }
+
+        pub fn get_mut(&mut self) -> Option<&mut T> {
+            if self.is_empty() {
+                None
+            } else {
+                Some(unsafe { self.value.get_mut().assume_init_mut() })
+            }
+        }
+
+        pub fn as_ptr(&self) -> *mut T {
+            // Safety: `MaybeUninit<T>` is `repr(transparent)` w.r.t `T`.
+            self.value.get().cast()
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.state.get() == 0
+        }
+
+        pub fn set(&mut self, value: Option<T>) -> Option<T> {
+            // TODO: This should probably just avoid any and all borrow checks to be more internally
+            //  consistent.
+            self.replace(value)
+        }
+
+        // === Fallible borrowing === //
+
+        #[track_caller]
+        #[inline(always)]
+        pub fn try_borrow(&self) -> Result<OptRef<T>, BorrowError> {
+            let state = self.state.get();
+            if state >= NEUTRAL {
+                if state == NEUTRAL {
+                    self.borrowed_at.set();
+                }
+
+                self.state.set(state + 1);
+
+                Ok(OptRef {
+                    state: &self.state,
+                    value: unsafe { (*self.value.get()).assume_init_ref() },
+                })
+            } else {
+                Err(BorrowError(CommonBorrowError::new(self)))
+            }
+        }
+
+        #[track_caller]
+        #[inline(always)]
+        pub fn try_borrow_mut(&self) -> Result<OptMut<T>, BorrowMutError> {
+            let state = self.state.get();
+            if state == NEUTRAL {
+                self.borrowed_at.set();
+                self.state.set(NEUTRAL - 1);
+
+                Ok(OptMut {
+                    state: &self.state,
+                    value: unsafe { (*self.value.get()).assume_init_mut() },
+                })
+            } else {
+                Err(BorrowMutError(CommonBorrowError::new(self)))
+            }
+        }
+
+        // === Infallible borrowing === //
+
+        #[cold]
+        #[inline(never)]
+        fn failed_to_borrow<const MUTABLY: bool>(&self) -> ! {
+            panic!("{}", CommonBorrowError::<MUTABLY>::new(self));
+        }
+
+        #[track_caller]
+        #[inline(always)]
+        pub fn borrow(&self) -> OptRef<T> {
+            let state = self.state.get();
+            if state >= NEUTRAL {
+                if state == NEUTRAL {
+                    self.borrowed_at.set();
+                }
+
+                self.state.set(state + 1);
+
+                OptRef {
+                    state: &self.state,
+                    value: unsafe { (*self.value.get()).assume_init_ref() },
+                }
+            } else {
+                self.failed_to_borrow::<false>();
+            }
+        }
+
+        #[track_caller]
+        #[inline(always)]
+        pub fn borrow_mut(&self) -> OptMut<T> {
+            let state = self.state.get();
+            if state == NEUTRAL {
+                self.borrowed_at.set();
+                self.state.set(NEUTRAL - 1);
+
+                OptMut {
+                    state: &self.state,
+                    value: unsafe { (*self.value.get()).assume_init_mut() },
+                }
+            } else {
+                self.failed_to_borrow::<true>();
+            }
+        }
+
+        // === Replace === //
+
+        pub fn try_replace_with<F>(&self, f: F) -> Result<Option<T>, BorrowMutError>
+        where
+            F: FnOnce(Option<&mut T>) -> Option<T>,
+        {
+            let state = self.state.get();
+            if state == NEUTRAL {
+                let value_container = unsafe { &mut *self.value.get() };
+                let curr_value = unsafe { value_container.assume_init_mut() };
+
+                if let Some(value) = f(Some(curr_value)) {
+                    Ok(Some(mem::replace(curr_value, value)))
+                } else {
+                    self.state.set(EMPTY);
+                    drop(curr_value);
+                    Ok(Some(unsafe { value_container.assume_init_read() }))
+                }
+            } else if state == EMPTY {
+                if let Some(value) = f(None) {
+                    self.state.set(NEUTRAL);
+                    unsafe { *self.value.get() = MaybeUninit::new(value) };
+                }
+                Ok(None)
+            } else {
+                Err(BorrowMutError(CommonBorrowError::new(self)))
+            }
+        }
+
+        pub fn replace_with<F>(&self, f: F) -> Option<T>
+        where
+            F: FnOnce(Option<&mut T>) -> Option<T>,
+        {
+            unwrap_error(self.try_replace_with(f))
+        }
+
+        pub fn try_replace(&self, t: Option<T>) -> Result<Option<T>, BorrowMutError> {
+            self.try_replace_with(|_| t)
+        }
+
+        pub fn replace(&self, t: Option<T>) -> Option<T> {
+            self.replace_with(|_| t)
+        }
+
+        // TODO: try_borrow_unguarded, swap, replace_with, undo_leak?
+    }
+
+	// TODO: Implement these.
+
+    pub struct OptRef<'a, T: ?Sized> {
+        state: &'a Cell<usize>,
+        value: &'a T,
+    }
+
+    impl<T: ?Sized> Deref for OptRef<'_, T> {
+        type Target = T;
+
+        fn deref(&self) -> &Self::Target {
+            self.value
+        }
+    }
+
+    pub struct OptMut<'a, T: ?Sized> {
+        state: &'a Cell<usize>,
+        value: &'a mut T,
+    }
+
+    impl<T: ?Sized> Deref for OptMut<'_, T> {
+        type Target = T;
+
+        fn deref(&self) -> &Self::Target {
+            self.value
+        }
+    }
+
+    impl<T: ?Sized> DerefMut for OptMut<'_, T> {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            self.value
+        }
+    }
+}
