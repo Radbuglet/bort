@@ -300,6 +300,8 @@ pub struct OptRefCell<T> {
 }
 
 impl<T> OptRefCell<T> {
+    // === Constructors === //
+
     pub fn new(value: Option<T>) -> Self {
         match value {
             Some(value) => Self::new_full(value),
@@ -322,6 +324,8 @@ impl<T> OptRefCell<T> {
             value: UnsafeCell::new(MaybeUninit::uninit()),
         }
     }
+
+    // === Zero-cost queries === //
 
     pub fn into_inner(mut self) -> Option<T> {
         if self.is_empty() {
