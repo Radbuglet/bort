@@ -2698,13 +2698,17 @@ pub mod block {
     }
 }
 
+// This code was largely copied from the Rust Standard Library's implementation of `RefCell`.
 pub mod cell {
     use std::{
         cell::{Cell, UnsafeCell},
+        cmp::Ordering,
         error::Error,
         fmt,
+        marker::PhantomData,
         mem::{self, MaybeUninit},
         ops::{Deref, DerefMut},
+        ptr::NonNull,
     };
 
     use crate::unwrap_error;
@@ -2714,7 +2718,83 @@ pub mod cell {
     const EMPTY: usize = 0;
     const NEUTRAL: usize = usize::MAX / 2;
 
-    // === Borrow location tracking === //
+    type CellBorrowRef<'b> = CellBorrow<'b, false>;
+    type CellBorrowMut<'a> = CellBorrow<'a, true>;
+
+    #[derive(Debug)]
+    struct CellBorrow<'b, const MUTABLY: bool> {
+        state: &'b Cell<usize>,
+    }
+
+    impl<'b> CellBorrowRef<'b> {
+        #[inline(always)]
+        fn acquire(state_cell: &'b Cell<usize>, location: &BorrowTracker) -> Option<Self> {
+            let state = state_cell.get();
+
+            // Increment the state unconditionally
+            let state = state.wrapping_add(1);
+
+            // If the state ended up being greater than neutral, this implies that we were `>= NEUTRAL`
+            // before the increment, which is the more traditional way of checking this. Additionally,
+            // because we know that we're in reading mode *after* we did the increment, we know that
+            // we couldn't have possibly overflowed the reader counter, avoiding that nasty source of
+            // UB.
+            if state > NEUTRAL {
+                if state == NEUTRAL + 1 {
+                    location.set();
+                }
+
+                state_cell.set(state);
+
+                Some(Self { state: state_cell })
+            } else {
+                None
+            }
+        }
+    }
+
+    impl<'b> CellBorrowMut<'b> {
+        #[inline(always)]
+        fn acquire(state_cell: &'b Cell<usize>, location: &BorrowTracker) -> Option<Self> {
+            let state = state_cell.get();
+            if state == NEUTRAL {
+                location.set();
+                state_cell.set(NEUTRAL - 1);
+
+                Some(Self { state: state_cell })
+            } else {
+                None
+            }
+        }
+    }
+
+    impl<const MUTABLY: bool> Clone for CellBorrow<'_, MUTABLY> {
+        fn clone(&self) -> Self {
+            let state = self.state.get();
+            let state = if MUTABLY {
+                assert_ne!(state, NEUTRAL + 1, "too many mutable borrows");
+                state - 1
+            } else {
+                assert_ne!(state, usize::MAX, "too many immutable borrows");
+                state + 1
+            };
+            self.state.set(state);
+
+            Self { state: self.state }
+        }
+    }
+
+    impl<const MUTABLY: bool> Drop for CellBorrow<'_, MUTABLY> {
+        fn drop(&mut self) {
+            self.state.set(if MUTABLY {
+                self.state.get() + 1
+            } else {
+                self.state.get() - 1
+            });
+        }
+    }
+
+    // === Borrow tracker === //
 
     cfgenius::define!(pub tracks_borrow_location = cfg(debug_assertions));
 
@@ -2948,7 +3028,7 @@ pub mod cell {
         }
 
         pub fn is_empty(&self) -> bool {
-            self.state.get() == 0
+            self.state.get() == EMPTY
         }
 
         pub fn set(&mut self, value: Option<T>) -> Option<T> {
@@ -2961,28 +3041,12 @@ pub mod cell {
         #[track_caller]
         #[inline(always)]
         pub fn try_borrow(&self) -> Result<Option<OptRef<T>>, BorrowError> {
-            let state = self.state.get();
-
-            // Increment the state unconditionally
-            let state = state.wrapping_add(1);
-
-            // If the state ended up being greater than neutral, this implies that we were `>= NEUTRAL`
-            // before the increment, which is the more traditional way of checking this. Additionally,
-            // because we know that we're in reading mode *after* we did the increment, we know that
-            // we couldn't have possibly overflowed the reader counter, avoiding that nasty source of
-            // UB.
-            if state > NEUTRAL {
-                if state == NEUTRAL + 1 {
-                    self.borrowed_at.set();
-                }
-
-                self.state.set(state);
-
+            if let Some(borrow) = CellBorrowRef::acquire(&self.state, &self.borrowed_at) {
                 Ok(Some(OptRef {
-                    state: &self.state,
-                    value: unsafe { (*self.value.get()).assume_init_ref() },
+                    value: NonNull::from(unsafe { (*self.value.get()).assume_init_ref() }),
+                    borrow,
                 }))
-            } else if state == EMPTY + 1 {
+            } else if self.is_empty() {
                 Ok(None)
             } else {
                 Err(BorrowError(CommonBorrowError::new(self)))
@@ -2992,16 +3056,13 @@ pub mod cell {
         #[track_caller]
         #[inline(always)]
         pub fn try_borrow_mut(&self) -> Result<Option<OptMut<T>>, BorrowMutError> {
-            let state = self.state.get();
-            if state == NEUTRAL {
-                self.borrowed_at.set();
-                self.state.set(NEUTRAL - 1);
-
+            if let Some(borrow) = CellBorrowMut::acquire(&self.state, &self.borrowed_at) {
                 Ok(Some(OptMut {
-                    state: &self.state,
-                    value: unsafe { (*self.value.get()).assume_init_mut() },
+                    value: NonNull::from(unsafe { (*self.value.get()).assume_init_mut() }),
+                    borrow,
+                    marker: PhantomData,
                 }))
-            } else if state == EMPTY {
+            } else if self.is_empty() {
                 Ok(None)
             } else {
                 Err(BorrowMutError(CommonBorrowError::new(self)))
@@ -3019,22 +3080,12 @@ pub mod cell {
         #[track_caller]
         #[inline(always)]
         pub fn borrow_or_none(&self) -> Option<OptRef<T>> {
-            let state = self.state.get();
-            let state = state.wrapping_add(1);
-
-            // See `try_borrow` for details
-            if state > NEUTRAL {
-                if state == NEUTRAL + 1 {
-                    self.borrowed_at.set();
-                }
-
-                self.state.set(state);
-
+            if let Some(borrow) = CellBorrowRef::acquire(&self.state, &self.borrowed_at) {
                 Some(OptRef {
-                    state: &self.state,
-                    value: unsafe { (*self.value.get()).assume_init_ref() },
+                    value: NonNull::from(unsafe { (*self.value.get()).assume_init_ref() }),
+                    borrow,
                 })
-            } else if state == EMPTY + 1 {
+            } else if self.is_empty() {
                 None
             } else {
                 self.failed_to_borrow::<false>();
@@ -3044,20 +3095,10 @@ pub mod cell {
         #[track_caller]
         #[inline(always)]
         pub fn borrow(&self) -> OptRef<T> {
-            let state = self.state.get();
-            let state = state.wrapping_add(1);
-
-            // See `try_borrow` for details
-            if state > NEUTRAL {
-                if state == NEUTRAL + 1 {
-                    self.borrowed_at.set();
-                }
-
-                self.state.set(state);
-
+            if let Some(borrow) = CellBorrowRef::acquire(&self.state, &self.borrowed_at) {
                 OptRef {
-                    state: &self.state,
-                    value: unsafe { (*self.value.get()).assume_init_ref() },
+                    value: NonNull::from(unsafe { (*self.value.get()).assume_init_ref() }),
+                    borrow,
                 }
             } else {
                 self.failed_to_borrow::<false>();
@@ -3067,16 +3108,13 @@ pub mod cell {
         #[track_caller]
         #[inline(always)]
         pub fn borrow_mut_or_none(&self) -> Option<OptMut<T>> {
-            let state = self.state.get();
-            if state == NEUTRAL {
-                self.borrowed_at.set();
-                self.state.set(NEUTRAL - 1);
-
+            if let Some(borrow) = CellBorrowMut::acquire(&self.state, &self.borrowed_at) {
                 Some(OptMut {
-                    state: &self.state,
-                    value: unsafe { (*self.value.get()).assume_init_mut() },
+                    value: NonNull::from(unsafe { (*self.value.get()).assume_init_mut() }),
+                    borrow,
+                    marker: PhantomData,
                 })
-            } else if state == EMPTY {
+            } else if self.is_empty() {
                 None
             } else {
                 self.failed_to_borrow::<true>();
@@ -3086,14 +3124,11 @@ pub mod cell {
         #[track_caller]
         #[inline(always)]
         pub fn borrow_mut(&self) -> OptMut<T> {
-            let state = self.state.get();
-            if state == NEUTRAL {
-                self.borrowed_at.set();
-                self.state.set(NEUTRAL - 1);
-
+            if let Some(borrow) = CellBorrowMut::acquire(&self.state, &self.borrowed_at) {
                 OptMut {
-                    state: &self.state,
-                    value: unsafe { (*self.value.get()).assume_init_mut() },
+                    value: NonNull::from(unsafe { (*self.value.get()).assume_init_mut() }),
+                    borrow,
+                    marker: PhantomData,
                 }
             } else {
                 self.failed_to_borrow::<true>();
@@ -3164,7 +3199,51 @@ pub mod cell {
         // TODO: try_borrow_unguarded
     }
 
-    // TODO: `OptRefCell` impls
+    impl<T: Clone> Clone for OptRefCell<T> {
+        #[inline]
+        #[track_caller]
+        fn clone(&self) -> Self {
+            Self::new(self.borrow_or_none().map(|v| v.clone()))
+        }
+    }
+
+    impl<T> Default for OptRefCell<T> {
+        fn default() -> Self {
+            OptRefCell::new_empty()
+        }
+    }
+
+    impl<T: PartialEq> PartialEq for OptRefCell<T> {
+        fn eq(&self, other: &Self) -> bool {
+            self.borrow_or_none().as_deref() == other.borrow_or_none().as_deref()
+        }
+    }
+
+    impl<T: Eq> Eq for OptRefCell<T> {}
+
+    impl<T: PartialOrd> PartialOrd for OptRefCell<T> {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            self.borrow_or_none()
+                .as_deref()
+                .partial_cmp(&other.borrow_or_none().as_deref())
+        }
+    }
+
+    impl<T: Ord> Ord for OptRefCell<T> {
+        fn cmp(&self, other: &Self) -> Ordering {
+            self.borrow_or_none()
+                .as_deref()
+                .cmp(&other.borrow_or_none().as_deref())
+        }
+    }
+
+    impl<T> From<Option<T>> for OptRefCell<T> {
+        fn from(value: Option<T>) -> Self {
+            Self::new(value)
+        }
+    }
+
+    unsafe impl<T: Send> Send for OptRefCell<T> {}
 
     impl<T> Drop for OptRefCell<T> {
         fn drop(&mut self) {
@@ -3174,49 +3253,184 @@ pub mod cell {
         }
     }
 
-    // TODO: Implement these.
+    // === OptRef === //
 
-    pub struct OptRef<'a, T: ?Sized> {
-        state: &'a Cell<usize>,
-        value: &'a T,
+    pub struct OptRef<'b, T: ?Sized> {
+        value: NonNull<T>,
+        borrow: CellBorrowRef<'b>,
+    }
+
+    impl<'b, T: ?Sized> OptRef<'b, T> {
+        pub fn clone(orig: &Self) -> Self {
+            Self {
+                value: orig.value,
+                borrow: orig.borrow.clone(),
+            }
+        }
+
+        pub fn map<U: ?Sized, F>(orig: OptRef<'b, T>, f: F) -> OptRef<'b, U>
+        where
+            F: FnOnce(&T) -> &U,
+        {
+            OptRef {
+                value: NonNull::from(f(&*orig)),
+                borrow: orig.borrow,
+            }
+        }
+
+        pub fn filter_map<U: ?Sized, F>(orig: OptRef<'b, T>, f: F) -> Result<OptRef<'b, U>, Self>
+        where
+            F: FnOnce(&T) -> Option<&U>,
+        {
+            match f(&*orig) {
+                Some(value) => Ok(OptRef {
+                    value: NonNull::from(value),
+                    borrow: orig.borrow,
+                }),
+                None => Err(orig),
+            }
+        }
+
+        pub fn map_split<U: ?Sized, V: ?Sized, F>(
+            orig: OptRef<'b, T>,
+            f: F,
+        ) -> (OptRef<'b, U>, OptRef<'b, V>)
+        where
+            F: FnOnce(&T) -> (&U, &V),
+        {
+            let (a, b) = f(&*orig);
+            let borrow = orig.borrow.clone();
+            (
+                OptRef {
+                    value: NonNull::from(a),
+                    borrow,
+                },
+                OptRef {
+                    value: NonNull::from(b),
+                    borrow: orig.borrow,
+                },
+            )
+        }
+
+        pub fn leak(orig: OptRef<'b, T>) -> &'b T {
+            mem::forget(orig.borrow);
+            unsafe { orig.value.as_ref() }
+        }
     }
 
     impl<T: ?Sized> Deref for OptRef<'_, T> {
         type Target = T;
 
         fn deref(&self) -> &Self::Target {
-            self.value
+            unsafe { self.value.as_ref() }
         }
     }
 
-    impl<T: ?Sized> Drop for OptRef<'_, T> {
-        fn drop(&mut self) {
-            self.state.set(self.state.get() - 1);
+    impl<T: ?Sized + fmt::Debug> fmt::Debug for OptRef<'_, T> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            fmt::Debug::fmt(&**self, f)
         }
     }
 
-    pub struct OptMut<'a, T: ?Sized> {
-        state: &'a Cell<usize>,
-        value: &'a mut T,
+    impl<T: ?Sized + fmt::Display> fmt::Display for OptRef<'_, T> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            fmt::Display::fmt(&**self, f)
+        }
+    }
+
+    // === OptMut === //
+
+    pub struct OptMut<'b, T: ?Sized> {
+        // NB: we use a pointer instead of `&'b mut T` to avoid `noalias` violations, because a
+        // `RefMut` argument doesn't hold exclusivity for its whole scope, only until it drops.
+        value: NonNull<T>,
+        borrow: CellBorrowMut<'b>,
+        // `NonNull` is covariant over `T`, so we need to reintroduce invariance.
+        marker: PhantomData<&'b mut T>,
+    }
+
+    impl<'b, T: ?Sized> OptMut<'b, T> {
+        pub fn map<U: ?Sized, F>(mut orig: OptMut<'b, T>, f: F) -> OptMut<'b, U>
+        where
+            F: FnOnce(&mut T) -> &mut U,
+        {
+            let value = NonNull::from(f(&mut *orig));
+            OptMut {
+                value,
+                borrow: orig.borrow,
+                marker: PhantomData,
+            }
+        }
+
+        pub fn filter_map<U: ?Sized, F>(
+            mut orig: OptMut<'b, T>,
+            f: F,
+        ) -> Result<OptMut<'b, U>, Self>
+        where
+            F: FnOnce(&mut T) -> Option<&mut U>,
+        {
+            match f(&mut *orig) {
+                Some(value) => Ok(OptMut {
+                    value: NonNull::from(value),
+                    borrow: orig.borrow,
+                    marker: PhantomData,
+                }),
+                None => Err(orig),
+            }
+        }
+
+        pub fn map_split<U: ?Sized, V: ?Sized, F>(
+            mut orig: OptMut<'b, T>,
+            f: F,
+        ) -> (OptMut<'b, U>, OptMut<'b, V>)
+        where
+            F: FnOnce(&mut T) -> (&mut U, &mut V),
+        {
+            let borrow = orig.borrow.clone();
+            let (a, b) = f(&mut *orig);
+            (
+                OptMut {
+                    value: NonNull::from(a),
+                    borrow,
+                    marker: PhantomData,
+                },
+                OptMut {
+                    value: NonNull::from(b),
+                    borrow: orig.borrow,
+                    marker: PhantomData,
+                },
+            )
+        }
+
+        pub fn leak(mut orig: OptMut<'b, T>) -> &'b mut T {
+            mem::forget(orig.borrow);
+            unsafe { orig.value.as_mut() }
+        }
     }
 
     impl<T: ?Sized> Deref for OptMut<'_, T> {
         type Target = T;
 
         fn deref(&self) -> &Self::Target {
-            self.value
+            unsafe { self.value.as_ref() }
         }
     }
 
     impl<T: ?Sized> DerefMut for OptMut<'_, T> {
         fn deref_mut(&mut self) -> &mut Self::Target {
-            self.value
+            unsafe { self.value.as_mut() }
         }
     }
 
-    impl<T: ?Sized> Drop for OptMut<'_, T> {
-        fn drop(&mut self) {
-            self.state.set(self.state.get() + 1);
+    impl<T: ?Sized + fmt::Debug> fmt::Debug for OptMut<'_, T> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            fmt::Debug::fmt(&**self, f)
+        }
+    }
+
+    impl<T: ?Sized + fmt::Display> fmt::Display for OptMut<'_, T> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            fmt::Display::fmt(&**self, f)
         }
     }
 }
