@@ -1,5 +1,22 @@
-// This code was largely copied from the Rust Standard Library's implementation of `RefCell`.
-// Thanks, Rust standard library team!
+//! An implementation of the Rust standard library's [`RefCell`](std::cell::RefCell) that is specialized
+//! to hold an `Option<T>` instead of a plain `T` instance.
+//!
+//! [`OptRefCell`] provides several performance benefits over `RefCell<Option<T>>`:
+//!
+//! 1. The size of the structure is guaranteed to be equal to `RefCell<T>`, unlike `RefCell<Option<T>>`,
+//!    which may be made larger to accommodate the discriminator.
+//!
+//! 2. Borrowing an `OptRefCell` and unwrapping its `Option` can be done in a single comparison instead
+//!    of two, shrinking the assembly output and micro-optimizing this exceedingly common operation.
+//!    (remember: every single component access has to go through this process so even small
+//!    optimizations here are worthwhile!)
+//!
+//! 3. Mapping an `OptRefCell` to a readonly zeroed page will still let it be safely borrowable as an
+//!    empty cell. This aspect is critical to implementing indirection-less [`Slot`](super::heap::Slot)s
+//!    on platforms supporting manual memory mapping management.
+//!
+//! This code was largely copied from the Rust standard library's implementation of `RefCell` with
+//! some very minor tweaks. Thanks, Rust standard library team!
 
 use std::{
     cell::{Cell, UnsafeCell},
@@ -16,6 +33,13 @@ use crate::util::{unwrap_error, RawFmt};
 
 // === Borrow state === ///
 
+// Format:
+//
+// - A value of `EMPTY` means that the value is empty.
+// - A value less than `NEUTRAL` means that the value is mutably borrowed.
+// - A value equal to `NEUTRAL` means that the value is present and unborrowed.
+// - A value greater than `NEUTRAL` means that the value is immutably borrowed.
+//
 const EMPTY: usize = 0;
 const NEUTRAL: usize = usize::MAX / 2;
 
@@ -35,12 +59,13 @@ impl<'b> CellBorrowRef<'b> {
         // Increment the state unconditionally
         let state = state.wrapping_add(1);
 
-        // If the state ended up being greater than neutral, this implies that we were `>= NEUTRAL`
+        // If the state ended up being greater than `NEUTRAL`, this implies that we were `>= NEUTRAL`
         // before the increment, which is the more traditional way of checking this. Additionally,
         // because we know that we're in reading mode *after* we did the increment, we know that
         // we couldn't have possibly overflowed the reader counter, avoiding that nasty source of
-        // UB.
+        // UB without an additional branch.
         if state > NEUTRAL {
+            // If we're the first reader, mark our location.
             if state == NEUTRAL + 1 {
                 location.set();
             }
@@ -73,7 +98,7 @@ impl<const MUTABLE: bool> Clone for CellBorrow<'_, MUTABLE> {
     fn clone(&self) -> Self {
         let state = self.state.get();
         let state = if MUTABLE {
-            assert_ne!(state, NEUTRAL + 1, "too many mutable borrows");
+            assert_ne!(state, EMPTY + 1, "too many mutable borrows");
             state - 1
         } else {
             assert_ne!(state, usize::MAX, "too many immutable borrows");
@@ -269,13 +294,6 @@ cfgenius::cond! {
 // === OptRefCell === //
 
 pub struct OptRefCell<T> {
-    /// ## Format
-    ///
-    /// - A value of `0` means that the value is empty.
-    /// - A value less than `NEUTRAL` means that the value is mutably borrowed.
-    /// - A value equal to `NEUTRAL` means that the value is present and unborrowed.
-    /// - A value greater than `NEUTRAL` means that the value is immutably borrowed.
-    ///
     state: Cell<usize>,
     borrowed_at: BorrowTracker,
     value: UnsafeCell<MaybeUninit<T>>,
@@ -337,7 +355,13 @@ impl<T> OptRefCell<T> {
         self.replace(value)
     }
 
-    // === Fallible borrowing === //
+    // === Borrowing === //
+
+    #[cold]
+    #[inline(never)]
+    fn failed_to_borrow<const MUTABLY: bool>(&self) -> ! {
+        panic!("{}", CommonBorrowError::<MUTABLY>::new(self));
+    }
 
     #[track_caller]
     #[inline(always)]
@@ -352,30 +376,6 @@ impl<T> OptRefCell<T> {
         } else {
             Err(BorrowError(CommonBorrowError::new(self)))
         }
-    }
-
-    #[track_caller]
-    #[inline(always)]
-    pub fn try_borrow_mut(&self) -> Result<Option<OptRefMut<T>>, BorrowMutError> {
-        if let Some(borrow) = CellBorrowMut::acquire(&self.state, &self.borrowed_at) {
-            Ok(Some(OptRefMut {
-                value: NonNull::from(unsafe { (*self.value.get()).assume_init_mut() }),
-                borrow,
-                marker: PhantomData,
-            }))
-        } else if self.is_empty() {
-            Ok(None)
-        } else {
-            Err(BorrowMutError(CommonBorrowError::new(self)))
-        }
-    }
-
-    // === Fallible borrowing === //
-
-    #[cold]
-    #[inline(never)]
-    fn failed_to_borrow<const MUTABLY: bool>(&self) -> ! {
-        panic!("{}", CommonBorrowError::<MUTABLY>::new(self));
     }
 
     #[track_caller]
@@ -403,6 +403,22 @@ impl<T> OptRefCell<T> {
             }
         } else {
             self.failed_to_borrow::<false>();
+        }
+    }
+
+    #[track_caller]
+    #[inline(always)]
+    pub fn try_borrow_mut(&self) -> Result<Option<OptRefMut<T>>, BorrowMutError> {
+        if let Some(borrow) = CellBorrowMut::acquire(&self.state, &self.borrowed_at) {
+            Ok(Some(OptRefMut {
+                value: NonNull::from(unsafe { (*self.value.get()).assume_init_mut() }),
+                borrow,
+                marker: PhantomData,
+            }))
+        } else if self.is_empty() {
+            Ok(None)
+        } else {
+            Err(BorrowMutError(CommonBorrowError::new(self)))
         }
     }
 
