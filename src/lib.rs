@@ -53,6 +53,7 @@ struct NoOpHasher(u64);
 
 impl hash::Hasher for NoOpHasher {
     fn write_u64(&mut self, i: u64) {
+        debug_assert_eq!(self.0, 0);
         self.0 = i;
     }
 
@@ -2406,7 +2407,6 @@ pub mod block {
 
     impl<T: 'static> Drop for Heap<T> {
         fn drop(&mut self) {
-            // TODO: Maybe defer deletion until we return to the main thread?
             panic!("Heap must be destroyed via `Heap::destroy()` rather than dropped to avoid memory leaks.");
         }
     }

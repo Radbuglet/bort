@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use bort::{storage, OwnedEntity};
+use bort::{storage, threading::cell::MainThreadToken, OwnedEntity, OwnedObj};
 use criterion::{criterion_main, Criterion};
 
 fn access_tests() {
@@ -48,6 +48,13 @@ fn access_tests() {
         c.iter(|| {
             storage.has(entity.entity());
         });
+    });
+
+    c.bench_function("obj.get", |c| {
+        let token = MainThreadToken::acquire();
+        let foo = OwnedObj::new(());
+
+        c.iter(|| foo.value().try_borrow(token));
     });
 }
 
