@@ -54,6 +54,7 @@ pub trait ReadTokenHint<T: ?Sized>: Token<T> {}
 pub trait ExclusiveTokenHint<T: ?Sized>: Token<T> {}
 
 // Unjailing Tokens
+// FIXME: These are likely not handled correctly right now.
 pub unsafe trait UnJailRefToken<T: ?Sized> {}
 
 pub unsafe trait UnJailMutToken<T: ?Sized> {}
@@ -527,6 +528,12 @@ impl<T> NOptRefCell<T> {
         self.value.set(value)
     }
 
+    pub fn undo_leak(&mut self) {
+        // Safety: this is a method that takes exclusive ownership of the object. Hence, it is
+        // not impacted by our potentially dangerous `Sync` impl.
+        self.value.undo_leak()
+    }
+
     // === Namespace management === //
 
     pub fn namespace(&self) -> Option<Namespace> {
@@ -582,7 +589,7 @@ impl<T> NOptRefCell<T> {
         );
     }
 
-    // === Borrow methods === //
+    // === Borrowing === //
 
     pub fn try_get<'a, U>(&'a self, token: &'a U) -> Result<Option<&'a T>, BorrowError>
     where
@@ -606,12 +613,8 @@ impl<T> NOptRefCell<T> {
     {
         self.assert_accessible_by(token, Some(ThreadAccess::Shared));
 
-        // Safety: we know we can read from the `value`'s borrow count safely because this method
-        // can only be run so long as we have `ReadToken`s alive and we can't cause reads
-        // until we get a `ExclusiveToken`s, which is only possible once `token` is dead.
         unsafe {
-            // Safety: additionally, we know nobody can borrow this cell mutably until all
-            // `ReadToken`s die out so this is safe as well.
+            // Safety: see `try_get`
             self.value.borrow_unguarded_or_none()
         }
     }
@@ -622,12 +625,8 @@ impl<T> NOptRefCell<T> {
     {
         self.assert_accessible_by(token, Some(ThreadAccess::Shared));
 
-        // Safety: we know we can read from the `value`'s borrow count safely because this method
-        // can only be run so long as we have `ReadToken`s alive and we can't cause reads
-        // until we get a `ExclusiveToken`s, which is only possible once `token` is dead.
         unsafe {
-            // Safety: additionally, we know nobody can borrow this cell mutably until all
-            // `ReadToken`s die out so this is safe as well.
+            // Safety: see `try_get`
             self.value.borrow_unguarded()
         }
     }
@@ -701,6 +700,71 @@ impl<T> NOptRefCell<T> {
 
         // Safety: see `try_borrow`.
         self.value.borrow_mut()
+    }
+
+    // === Replace === //
+
+    pub fn try_replace_with<U, F>(&self, token: &U, f: F) -> Result<Option<T>, BorrowMutError>
+    where
+        U: ExclusiveTokenHint<T> + UnJailMutToken<T>,
+        F: FnOnce(Option<&mut T>) -> Option<T>,
+    {
+        self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
+
+        // Safety: see `try_borrow`.
+        self.value.try_replace_with(f)
+    }
+
+    pub fn replace_with<U, F>(&self, token: &U, f: F) -> Option<T>
+    where
+        U: ExclusiveTokenHint<T> + UnJailMutToken<T>,
+        F: FnOnce(Option<&mut T>) -> Option<T>,
+    {
+        self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
+
+        // Safety: see `try_borrow`.
+        self.value.replace_with(f)
+    }
+
+    pub fn try_replace<U>(&self, token: &U, t: Option<T>) -> Result<Option<T>, BorrowMutError>
+    where
+        U: ExclusiveTokenHint<T> + UnJailMutToken<T>,
+    {
+        self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
+
+        // Safety: see `try_borrow`.
+        self.value.try_replace(t)
+    }
+
+    pub fn replace<U>(&self, token: &U, t: Option<T>) -> Option<T>
+    where
+        U: ExclusiveTokenHint<T> + UnJailMutToken<T>,
+    {
+        self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
+
+        // Safety: see `try_borrow`.
+        self.value.replace(t)
+    }
+
+    pub fn take<U>(&self, token: &U) -> Option<T>
+    where
+        U: ExclusiveTokenHint<T> + UnJailMutToken<T>,
+    {
+        self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
+
+        // Safety: see `try_borrow`.
+        self.value.take()
+    }
+
+    pub fn swap_multi_token<U1, U2>(&self, my_token: &U1, other_token: &U2, other: &NOptRefCell<T>)
+    where
+        U1: ExclusiveTokenHint<T> + UnJailMutToken<T>,
+        U2: ExclusiveTokenHint<T> + UnJailMutToken<T>,
+    {
+        self.assert_accessible_by(my_token, Some(ThreadAccess::Exclusive));
+        other.assert_accessible_by(other_token, Some(ThreadAccess::Exclusive));
+
+        self.value.swap(&other.value)
     }
 }
 

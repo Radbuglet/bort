@@ -359,6 +359,12 @@ impl<T> OptRefCell<T> {
         self.replace(value)
     }
 
+    pub fn undo_leak(&mut self) {
+        if self.state.get() != EMPTY {
+            self.state.set(NEUTRAL);
+        }
+    }
+
     // === Borrowing === //
 
     #[cold]
@@ -536,8 +542,6 @@ impl<T> OptRefCell<T> {
         self.replace_with(|_| t)
     }
 
-    // === Extra utilities === //
-
     pub fn take(&self) -> Option<T> {
         self.replace(None)
     }
@@ -545,12 +549,6 @@ impl<T> OptRefCell<T> {
     pub fn swap(&self, other: &OptRefCell<T>) {
         let value = self.take();
         self.replace(other.replace(value));
-    }
-
-    pub fn undo_leak(&mut self) {
-        if self.state.get() != EMPTY {
-            self.state.set(NEUTRAL);
-        }
     }
 }
 
