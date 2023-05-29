@@ -51,11 +51,11 @@ pub struct MainThreadTokenKind {
 
 impl TokenKindMarker for MainThreadTokenKind {}
 
-pub struct WorkerThreadTokenKind {
+pub struct WorkerOrMainThreadTokenKind {
     _private: (),
 }
 
-impl TokenKindMarker for WorkerThreadTokenKind {}
+impl TokenKindMarker for WorkerOrMainThreadTokenKind {}
 
 // Access Tokens
 #[derive(Debug, Copy, Clone, Hash, Eq, PartialEq)]
@@ -64,7 +64,7 @@ pub enum ThreadAccess {
     Shared,
 }
 
-pub unsafe trait Token {
+pub unsafe trait Token: Sized {
     type Kind: TokenKindMarker;
 }
 
@@ -113,13 +113,13 @@ mod unjail_impl {
     {
     }
 
-    unsafe impl<T: Token<Kind = WorkerThreadTokenKind>, V: ?Sized + Sync>
-        UnJailRefTokenDisamb<V, WorkerThreadTokenKind> for T
+    unsafe impl<T: Token<Kind = WorkerOrMainThreadTokenKind>, V: ?Sized + Sync>
+        UnJailRefTokenDisamb<V, WorkerOrMainThreadTokenKind> for T
     {
     }
 
-    unsafe impl<T: Token<Kind = WorkerThreadTokenKind>, V: ?Sized + Send>
-        UnJailMutTokenDisamb<V, WorkerThreadTokenKind> for T
+    unsafe impl<T: Token<Kind = WorkerOrMainThreadTokenKind>, V: ?Sized + Send>
+        UnJailMutTokenDisamb<V, WorkerOrMainThreadTokenKind> for T
     {
     }
 
@@ -127,6 +127,20 @@ mod unjail_impl {
 
     unsafe impl<T: Token + UnJailMutTokenDisamb<V, T::Kind>, V: ?Sized> UnJailMutToken<V> for T {}
 }
+
+// === Token Trait Aliases === //
+
+pub trait BorrowToken<T: ?Sized>: ExclusiveTokenHint<T> + UnJailRefToken<T> {}
+
+impl<T: ?Sized + ExclusiveTokenHint<V> + UnJailRefToken<V>, V: ?Sized> BorrowToken<V> for T {}
+
+pub trait BorrowMutToken<T: ?Sized>: ExclusiveTokenHint<T> + UnJailMutToken<T> {}
+
+impl<T: ?Sized + ExclusiveTokenHint<V> + UnJailMutToken<V>, V: ?Sized> BorrowMutToken<V> for T {}
+
+pub trait GetToken<T: ?Sized>: ReadTokenHint<T> + UnJailRefToken<T> {}
+
+impl<T: ?Sized + ReadTokenHint<V> + UnJailRefToken<V>, V: ?Sized> GetToken<V> for T {}
 
 // === Blessing === //
 
@@ -369,7 +383,7 @@ impl<T: ?Sized + 'static> Drop for TypeExclusiveToken<'_, T> {
 }
 
 unsafe impl<T: ?Sized + 'static> Token for TypeExclusiveToken<'_, T> {
-    type Kind = WorkerThreadTokenKind;
+    type Kind = WorkerOrMainThreadTokenKind;
 }
 
 unsafe impl<T: ?Sized + 'static> TokenFor<T> for TypeExclusiveToken<'_, T> {
@@ -424,7 +438,7 @@ impl<T: ?Sized + 'static> Drop for TypeReadToken<'_, T> {
 }
 
 unsafe impl<T: ?Sized + 'static> Token for TypeReadToken<'_, T> {
-    type Kind = WorkerThreadTokenKind;
+    type Kind = WorkerOrMainThreadTokenKind;
 }
 
 unsafe impl<T: ?Sized + 'static> TokenFor<T> for TypeReadToken<'_, T> {
@@ -626,10 +640,10 @@ impl<T> NOptRefCell<T> {
 
     // === Borrowing === //
 
-    pub fn try_get<'a, U>(&'a self, token: &'a U) -> Result<Option<&'a T>, BorrowError>
-    where
-        U: ReadTokenHint<T> + UnJailRefToken<T>,
-    {
+    pub fn try_get<'a>(
+        &'a self,
+        token: &'a impl GetToken<T>,
+    ) -> Result<Option<&'a T>, BorrowError> {
         self.assert_accessible_by(token, Some(ThreadAccess::Shared));
 
         // Safety: we know we can read from the `value`'s borrow count safely because this method
@@ -645,10 +659,7 @@ impl<T> NOptRefCell<T> {
         }
     }
 
-    pub fn get_or_none<'a, U>(&'a self, token: &'a U) -> Option<&'a T>
-    where
-        U: ReadTokenHint<T> + UnJailRefToken<T>,
-    {
+    pub fn get_or_none<'a>(&'a self, token: &'a impl GetToken<T>) -> Option<&'a T> {
         self.assert_accessible_by(token, Some(ThreadAccess::Shared));
 
         unsafe {
@@ -657,10 +668,7 @@ impl<T> NOptRefCell<T> {
         }
     }
 
-    pub fn get<'a, U>(&'a self, token: &'a U) -> &'a T
-    where
-        U: ReadTokenHint<T> + UnJailRefToken<T>,
-    {
+    pub fn get<'a>(&'a self, token: &'a impl GetToken<T>) -> &'a T {
         self.assert_accessible_by(token, Some(ThreadAccess::Shared));
 
         unsafe {
@@ -669,10 +677,10 @@ impl<T> NOptRefCell<T> {
         }
     }
 
-    pub fn try_borrow<'a, U>(&'a self, token: &'a U) -> Result<Option<OptRef<'a, T>>, BorrowError>
-    where
-        U: ExclusiveTokenHint<T> + UnJailRefToken<T>,
-    {
+    pub fn try_borrow<'a>(
+        &'a self,
+        token: &'a impl BorrowToken<T>,
+    ) -> Result<Option<OptRef<'a, T>>, BorrowError> {
         self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
 
         // Safety: we know we can read and write from the `value`'s borrow count safely because
@@ -689,53 +697,41 @@ impl<T> NOptRefCell<T> {
         self.value.try_borrow()
     }
 
-    pub fn borrow_or_none<'a, U>(&'a self, token: &'a U) -> Option<OptRef<'a, T>>
-    where
-        U: ExclusiveTokenHint<T> + UnJailRefToken<T>,
-    {
+    pub fn borrow_or_none<'a>(&'a self, token: &'a impl BorrowToken<T>) -> Option<OptRef<'a, T>> {
         self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
 
         // Safety: see `try_borrow`.
         self.value.borrow_or_none()
     }
 
-    pub fn borrow<'a, U>(&'a self, token: &'a U) -> OptRef<'a, T>
-    where
-        U: ExclusiveTokenHint<T> + UnJailRefToken<T>,
-    {
+    pub fn borrow<'a>(&'a self, token: &'a impl BorrowToken<T>) -> OptRef<'a, T> {
         self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
 
         // Safety: see `try_borrow`.
         self.value.borrow()
     }
 
-    pub fn try_borrow_mut<'a, U>(
+    pub fn try_borrow_mut<'a>(
         &'a self,
-        token: &'a U,
-    ) -> Result<Option<OptRefMut<'a, T>>, BorrowMutError>
-    where
-        U: ExclusiveTokenHint<T> + UnJailMutToken<T>,
-    {
+        token: &'a impl BorrowMutToken<T>,
+    ) -> Result<Option<OptRefMut<'a, T>>, BorrowMutError> {
         self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
 
         // Safety: see `try_borrow`.
         self.value.try_borrow_mut()
     }
 
-    pub fn borrow_mut_or_none<'a, U>(&'a self, token: &'a U) -> Option<OptRefMut<'a, T>>
-    where
-        U: ExclusiveTokenHint<T> + UnJailMutToken<T>,
-    {
+    pub fn borrow_mut_or_none<'a>(
+        &'a self,
+        token: &'a impl BorrowMutToken<T>,
+    ) -> Option<OptRefMut<'a, T>> {
         self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
 
         // Safety: see `try_borrow`.
         self.value.borrow_mut_or_none()
     }
 
-    pub fn borrow_mut<'a, U>(&'a self, token: &'a U) -> OptRefMut<'a, T>
-    where
-        U: ExclusiveTokenHint<T> + UnJailMutToken<T>,
-    {
+    pub fn borrow_mut<'a>(&'a self, token: &'a impl BorrowMutToken<T>) -> OptRefMut<'a, T> {
         self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
 
         // Safety: see `try_borrow`.
@@ -744,9 +740,12 @@ impl<T> NOptRefCell<T> {
 
     // === Replace === //
 
-    pub fn try_replace_with<U, F>(&self, token: &U, f: F) -> Result<Option<T>, BorrowMutError>
+    pub fn try_replace_with<F>(
+        &self,
+        token: &impl BorrowMutToken<T>,
+        f: F,
+    ) -> Result<Option<T>, BorrowMutError>
     where
-        U: ExclusiveTokenHint<T> + UnJailMutToken<T>,
         F: FnOnce(Option<&mut T>) -> Option<T>,
     {
         self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
@@ -755,9 +754,8 @@ impl<T> NOptRefCell<T> {
         self.value.try_replace_with(f)
     }
 
-    pub fn replace_with<U, F>(&self, token: &U, f: F) -> Option<T>
+    pub fn replace_with<F>(&self, token: &impl BorrowMutToken<T>, f: F) -> Option<T>
     where
-        U: ExclusiveTokenHint<T> + UnJailMutToken<T>,
         F: FnOnce(Option<&mut T>) -> Option<T>,
     {
         self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
@@ -766,45 +764,45 @@ impl<T> NOptRefCell<T> {
         self.value.replace_with(f)
     }
 
-    pub fn try_replace<U>(&self, token: &U, t: Option<T>) -> Result<Option<T>, BorrowMutError>
-    where
-        U: ExclusiveTokenHint<T> + UnJailMutToken<T>,
-    {
+    pub fn try_replace(
+        &self,
+        token: &impl BorrowMutToken<T>,
+        t: Option<T>,
+    ) -> Result<Option<T>, BorrowMutError> {
         self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
 
         // Safety: see `try_borrow`.
         self.value.try_replace(t)
     }
 
-    pub fn replace<U>(&self, token: &U, t: Option<T>) -> Option<T>
-    where
-        U: ExclusiveTokenHint<T> + UnJailMutToken<T>,
-    {
+    pub fn replace(&self, token: &impl BorrowMutToken<T>, t: Option<T>) -> Option<T> {
         self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
 
         // Safety: see `try_borrow`.
         self.value.replace(t)
     }
 
-    pub fn take<U>(&self, token: &U) -> Option<T>
-    where
-        U: ExclusiveTokenHint<T> + UnJailMutToken<T>,
-    {
+    pub fn take(&self, token: &impl BorrowMutToken<T>) -> Option<T> {
         self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
 
         // Safety: see `try_borrow`.
         self.value.take()
     }
 
-    pub fn swap_multi_token<U1, U2>(&self, my_token: &U1, other_token: &U2, other: &NOptRefCell<T>)
-    where
-        U1: ExclusiveTokenHint<T> + UnJailMutToken<T>,
-        U2: ExclusiveTokenHint<T> + UnJailMutToken<T>,
-    {
+    pub fn swap_multi_token(
+        &self,
+        my_token: &impl BorrowMutToken<T>,
+        other_token: &impl BorrowMutToken<T>,
+        other: &NOptRefCell<T>,
+    ) {
         self.assert_accessible_by(my_token, Some(ThreadAccess::Exclusive));
         other.assert_accessible_by(other_token, Some(ThreadAccess::Exclusive));
 
         self.value.swap(&other.value)
+    }
+
+    pub fn swap(&self, token: &impl BorrowMutToken<T>, other: &NOptRefCell<T>) {
+        self.swap_multi_token(token, token, other)
     }
 }
 

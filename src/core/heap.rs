@@ -4,7 +4,10 @@ use std::any::TypeId;
 
 use crate::util::{leak, ConstSafeBuildHasherDefault, FxHashMap};
 
-use super::token::{ExclusiveTokenHint, MainThreadToken, NOptRefCell, UnJailMutToken};
+use super::{
+    cell::{OptRef, OptRefMut},
+    token::{BorrowMutToken, BorrowToken, GetToken, MainThreadToken, NOptRefCell},
+};
 
 static FREE_SLOTS: NOptRefCell<FxHashMap<TypeId, Vec<*const ()>>> =
     NOptRefCell::new_full(FxHashMap::with_hasher(ConstSafeBuildHasherDefault::new()));
@@ -45,11 +48,13 @@ impl<T> Heap<T> {
         self.slots.len()
     }
 
-    pub fn set_slot<U>(&self, token: &U, i: usize, value: T) -> Option<T>
-    where
-        U: ExclusiveTokenHint<T> + UnJailMutToken<T>,
-    {
-        self.slots[i].value.replace(token, Some(value))
+    pub fn set_slot(
+        &self,
+        token: &impl BorrowMutToken<T>,
+        i: usize,
+        value: Option<T>,
+    ) -> Option<T> {
+        self.slots[i].value.replace(token, value)
     }
 
     pub fn slot(&self, i: usize) -> Slot<T> {
@@ -77,8 +82,20 @@ pub struct Slot<T: 'static> {
 }
 
 impl<T> Slot<T> {
-    pub fn take<U>(&self, token: &U) -> Option<T> {
-        todo!()
+    pub fn get(self, token: &impl GetToken<T>) -> &T {
+        self.value.get(token)
+    }
+
+    pub fn borrow(self, token: &impl BorrowToken<T>) -> OptRef<T> {
+        self.value.borrow(token)
+    }
+
+    pub fn borrow_mut(self, token: &impl BorrowMutToken<T>) -> OptRefMut<T> {
+        self.value.borrow_mut(token)
+    }
+
+    pub fn take(&self, token: &impl BorrowMutToken<T>) -> Option<T> {
+        self.value.take(token)
     }
 }
 
