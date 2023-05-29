@@ -18,9 +18,9 @@ use std::{
 use super::cell::{BorrowError, BorrowMutError, OptRef, OptRefCell, OptRefMut};
 use crate::util::{unpoison, FxHashMap, NOT_ON_MAIN_THREAD_MSG};
 
-// === Traits === //
+// === Access Token Traits === //
 
-// Namespace
+// Namespaces
 #[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Namespace(NonZeroU64);
 
@@ -38,6 +38,25 @@ impl Default for Namespace {
     }
 }
 
+// Token Type Markers
+mod sealed {
+    pub trait TokenKindMarker: Sized {}
+}
+
+use sealed::TokenKindMarker;
+
+pub struct MainThreadTokenKind {
+    _private: (),
+}
+
+impl TokenKindMarker for MainThreadTokenKind {}
+
+pub struct WorkerThreadTokenKind {
+    _private: (),
+}
+
+impl TokenKindMarker for WorkerThreadTokenKind {}
+
 // Access Tokens
 #[derive(Debug, Copy, Clone, Hash, Eq, PartialEq)]
 pub enum ThreadAccess {
@@ -45,27 +64,68 @@ pub enum ThreadAccess {
     Shared,
 }
 
-pub unsafe trait Token<T: ?Sized>: fmt::Debug {
+pub unsafe trait Token {
+    type Kind: TokenKindMarker;
+}
+
+pub unsafe trait TokenFor<T: ?Sized>: fmt::Debug + Token {
     fn check_access(&self, namespace: Option<Namespace>) -> Option<ThreadAccess>;
 }
 
-pub trait ReadTokenHint<T: ?Sized>: Token<T> {}
+pub trait ReadTokenHint<T: ?Sized>: TokenFor<T> {}
 
-pub trait ExclusiveTokenHint<T: ?Sized>: Token<T> {}
+pub trait ExclusiveTokenHint<T: ?Sized>: TokenFor<T> {}
 
-// Unjailing Tokens
-// FIXME: These are likely not handled correctly right now.
-pub unsafe trait UnJailRefToken<T: ?Sized> {}
+// === Unjailing Token Traits === //
 
-pub unsafe trait UnJailMutToken<T: ?Sized> {}
+/// Both [`NOptRefCell`] and [`MainThreadJail`] implement an "unjailing" system where users can only
+/// get references to non-`Sync` values on the main thread. This trait asserts that a given token can
+/// get an immutable reference to the specified type `T` given an immutable potentially-cross-thread
+/// reference to the owner assuming all other accesses were also mediated by this trait.
+///
+/// This trait cannot be implemented directly — its implementation is derived from one's implementation
+/// of [`Token`].
+pub unsafe trait UnJailRefToken<T: ?Sized>: Token {}
 
-pub unsafe trait UnJailAllToken<T: ?Sized>: UnJailMutToken<T> + UnJailRefToken<T> {}
+/// Both [`NOptRefCell`] and [`MainThreadJail`] implement an "unjailing" system where users can only
+/// get references to non-`Sync` values on the main thread.  This trait asserts that a given token can
+/// get a mutable reference to the specified type `T` given an immutable potentially-cross-thread
+/// reference to the owner assuming all other accesses were also mediated by this trait.
+///
+/// This trait cannot be implemented directly — its implementation is derived from one's implementation
+/// of [`Token`].
+pub unsafe trait UnJailMutToken<T: ?Sized>: Token {}
 
-unsafe impl<T, U> UnJailAllToken<U> for T
-where
-    T: ?Sized + UnJailRefToken<U> + UnJailMutToken<U>,
-    U: ?Sized,
-{
+mod unjail_impl {
+    use super::*;
+
+    pub unsafe trait UnJailRefTokenDisamb<T: ?Sized, Kind: TokenKindMarker> {}
+
+    pub unsafe trait UnJailMutTokenDisamb<T: ?Sized, Kind: TokenKindMarker> {}
+
+    unsafe impl<T: Token<Kind = MainThreadTokenKind>, V: ?Sized>
+        UnJailRefTokenDisamb<V, MainThreadTokenKind> for T
+    {
+    }
+
+    unsafe impl<T: Token<Kind = MainThreadTokenKind>, V: ?Sized>
+        UnJailMutTokenDisamb<V, MainThreadTokenKind> for T
+    {
+    }
+
+    unsafe impl<T: Token<Kind = WorkerThreadTokenKind>, V: ?Sized + Sync>
+        UnJailRefTokenDisamb<V, WorkerThreadTokenKind> for T
+    {
+    }
+
+    unsafe impl<T: Token<Kind = WorkerThreadTokenKind>, V: ?Sized + Send>
+        UnJailMutTokenDisamb<V, WorkerThreadTokenKind> for T
+    {
+    }
+
+    unsafe impl<T: Token + UnJailRefTokenDisamb<V, T::Kind>, V: ?Sized> UnJailRefToken<V> for T {}
+
+    unsafe impl<T: Token + UnJailMutTokenDisamb<V, T::Kind>, V: ?Sized> UnJailMutToken<V> for T {}
 }
 
 // === Blessing === //
@@ -170,17 +230,17 @@ impl MainThreadToken {
     }
 }
 
-unsafe impl<T: ?Sized> Token<T> for MainThreadToken {
+unsafe impl Token for MainThreadToken {
+    type Kind = MainThreadTokenKind;
+}
+
+unsafe impl<T: ?Sized> TokenFor<T> for MainThreadToken {
     fn check_access(&self, _namespace: Option<Namespace>) -> Option<ThreadAccess> {
         Some(ThreadAccess::Exclusive)
     }
 }
 
 impl<T: ?Sized> ExclusiveTokenHint<T> for MainThreadToken {}
-
-unsafe impl<T: ?Sized> UnJailRefToken<T> for MainThreadToken {}
-
-unsafe impl<T: ?Sized> UnJailMutToken<T> for MainThreadToken {}
 
 // === ParallelTokenSource === //
 
@@ -256,7 +316,7 @@ impl ParallelTokenSource {
         }
     }
 
-    // TODO: Implement namespaced tokens
+    // TODO: Implement namespaced token acquisition
 }
 
 // === TypeExclusiveToken === //
@@ -308,27 +368,17 @@ impl<T: ?Sized + 'static> Drop for TypeExclusiveToken<'_, T> {
     }
 }
 
-unsafe impl<T: ?Sized + 'static> Token<T> for TypeExclusiveToken<'_, T> {
+unsafe impl<T: ?Sized + 'static> Token for TypeExclusiveToken<'_, T> {
+    type Kind = WorkerThreadTokenKind;
+}
+
+unsafe impl<T: ?Sized + 'static> TokenFor<T> for TypeExclusiveToken<'_, T> {
     fn check_access(&self, _namespace: Option<Namespace>) -> Option<ThreadAccess> {
         Some(ThreadAccess::Exclusive)
     }
 }
 
 impl<T: ?Sized + 'static> ExclusiveTokenHint<T> for TypeExclusiveToken<'_, T> {}
-
-unsafe impl<T, U> UnJailRefToken<T> for TypeExclusiveToken<'_, U>
-where
-    T: ?Sized + Sync,
-    U: ?Sized,
-{
-}
-
-unsafe impl<T, U> UnJailMutToken<T> for TypeExclusiveToken<'_, U>
-where
-    T: ?Sized + Send,
-    U: ?Sized,
-{
-}
 
 // === TypeReadToken === //
 
@@ -373,27 +423,17 @@ impl<T: ?Sized + 'static> Drop for TypeReadToken<'_, T> {
     }
 }
 
-unsafe impl<T: ?Sized + 'static> Token<T> for TypeReadToken<'_, T> {
+unsafe impl<T: ?Sized + 'static> Token for TypeReadToken<'_, T> {
+    type Kind = WorkerThreadTokenKind;
+}
+
+unsafe impl<T: ?Sized + 'static> TokenFor<T> for TypeReadToken<'_, T> {
     fn check_access(&self, _namespace: Option<Namespace>) -> Option<ThreadAccess> {
         Some(ThreadAccess::Shared)
     }
 }
 
 impl<T: ?Sized + 'static> ReadTokenHint<T> for TypeReadToken<'_, T> {}
-
-unsafe impl<T, U> UnJailRefToken<T> for TypeReadToken<'_, U>
-where
-    T: ?Sized + Sync,
-    U: ?Sized,
-{
-}
-
-unsafe impl<T, U> UnJailMutToken<T> for TypeReadToken<'_, U>
-where
-    T: ?Sized + Send,
-    U: ?Sized,
-{
-}
 
 // === MainThreadJail === //
 
@@ -412,11 +452,12 @@ impl<T: ?Sized + fmt::Debug> fmt::Debug for MainThreadJail<T> {
     }
 }
 
-// Safety: you can only get a reference to `T` if you're on an un-jailing thread.
+// Safety: you can only get a reference to `T` if you're on the un-jailing main thread or if `T` is,
+// itself, `Sync`.
 unsafe impl<T> Sync for MainThreadJail<T> {}
 
 impl<T> MainThreadJail<T> {
-    pub fn new(value: T) -> Self {
+    pub const fn new(value: T) -> Self {
         MainThreadJail(value)
     }
 
@@ -424,14 +465,7 @@ impl<T> MainThreadJail<T> {
         self.0
     }
 
-    pub fn get(&self) -> &T
-    where
-        T: Sync,
-    {
-        &self.0
-    }
-
-    pub fn get_with_unjail(&self, _: &impl UnJailRefToken<T>) -> &T {
+    pub fn get(&self, _token: &impl UnJailRefToken<T>) -> &T {
         &self.0
     }
 
@@ -447,7 +481,8 @@ pub struct NOptRefCell<T> {
     value: OptRefCell<T>,
 }
 
-// Safety: every getter is guarded by some token.
+// Safety: `value` is not dangerous because its access is mediated by access tokens. The value
+// contained therein is also always safe because it is guarded by un-jailing semantics.
 unsafe impl<T> Sync for NOptRefCell<T> {}
 
 impl<T> NOptRefCell<T> {
@@ -513,7 +548,7 @@ impl<T> NOptRefCell<T> {
         self.value.as_ptr()
     }
 
-    pub fn is_empty(&self, token: &impl Token<T>) -> bool {
+    pub fn is_empty(&self, token: &impl TokenFor<T>) -> bool {
         self.assert_accessible_by(token, None);
 
         // Safety: we have either shared or exclusive access to this token and, in both cases, we
@@ -540,7 +575,7 @@ impl<T> NOptRefCell<T> {
         NonZeroU64::new(self.namespace.load(Ordering::Relaxed)).map(Namespace)
     }
 
-    fn assert_accessible_by(&self, token: &impl Token<T>, access: Option<ThreadAccess>) {
+    fn assert_accessible_by(&self, token: &impl TokenFor<T>, access: Option<ThreadAccess>) {
         let owner = self.namespace();
         let can_access = match access {
             Some(access) => token.check_access(owner) == Some(access),
@@ -600,6 +635,9 @@ impl<T> NOptRefCell<T> {
         // Safety: we know we can read from the `value`'s borrow count safely because this method
         // can only be run so long as we have `ReadToken`s alive and we can't cause reads
         // until we get a `ExclusiveToken`s, which is only possible once `token` is dead.
+        //
+        // We know that it is safe to give this thread immutable access to `T` because `UnJailRefToken`
+        // asserts as much.
         unsafe {
             // Safety: additionally, we know nobody can borrow this cell mutably until all
             // `ReadToken`s die out so this is safe as well.
@@ -646,6 +684,8 @@ impl<T> NOptRefCell<T> {
         // c) change the owner to admit new namespaces on other threads until all the borrows
         //    expire.
         //
+        // We know that it is safe to give this thread access to `T` because `UnJailXyzToken`
+        // asserts as much.
         self.value.try_borrow()
     }
 
