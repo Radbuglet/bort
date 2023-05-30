@@ -1,8 +1,8 @@
 // TODO: Replace with a non-leaky implementation once `OptRefCell`s become zeroable.
 
-use std::any::TypeId;
+use std::{any::TypeId, marker::PhantomData, ops::Deref};
 
-use crate::util::{leak, ConstSafeBuildHasherDefault, FxHashMap};
+use crate::util::{ConstSafeBuildHasherDefault, FxHashMap};
 
 use super::{
     cell::{OptRef, OptRefMut},
@@ -25,7 +25,7 @@ impl<T> Heap<T> {
         if free_slots.len() < min_len {
             let additional = (min_len - free_slots.len()).max(128);
             free_slots.extend(
-                leak(Box::from_iter(
+                Box::leak(Box::from_iter(
                     (0..additional).map(|_| NOptRefCell::new_empty()),
                 ))
                 .iter()
@@ -48,17 +48,11 @@ impl<T> Heap<T> {
         self.slots.len()
     }
 
-    pub fn set_slot(
-        &self,
-        token: &impl BorrowMutToken<T>,
-        i: usize,
-        value: Option<T>,
-    ) -> Option<T> {
-        self.slots[i].value.replace(token, value)
-    }
-
-    pub fn slot(&self, i: usize) -> Slot<T> {
-        self.slots[i]
+    pub fn slot(&self, i: usize) -> WritableSlot<'_, T> {
+        WritableSlot {
+            _ty: PhantomData,
+            slot: self.slots[i],
+        }
     }
 
     pub fn slots(&self) -> &[Slot<T>] {
@@ -76,18 +70,49 @@ impl<T> Drop for Heap<T> {
     }
 }
 
+pub struct WritableSlot<'a, T: 'static> {
+    _ty: PhantomData<&'a Heap<T>>,
+    slot: Slot<T>,
+}
+
+impl<T: 'static> WritableSlot<'_, T> {
+    pub fn write(&self, token: &impl BorrowMutToken<T>, value: Option<T>) -> Option<T> {
+        self.slot.value.replace(token, value)
+    }
+}
+
+impl<T: 'static> Deref for WritableSlot<'_, T> {
+    type Target = Slot<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.slot
+    }
+}
+
 #[derive(Debug)]
 pub struct Slot<T: 'static> {
     value: &'static NOptRefCell<T>,
 }
 
 impl<T> Slot<T> {
+    pub fn get_or_none(self, token: &impl GetToken<T>) -> Option<&T> {
+        self.value.get_or_none(token)
+    }
+
     pub fn get(self, token: &impl GetToken<T>) -> &T {
         self.value.get(token)
     }
 
+    pub fn borrow_or_none(self, token: &impl BorrowToken<T>) -> Option<OptRef<T>> {
+        self.value.borrow_or_none(token)
+    }
+
     pub fn borrow(self, token: &impl BorrowToken<T>) -> OptRef<T> {
         self.value.borrow(token)
+    }
+
+    pub fn borrow_mut_or_none(self, token: &impl BorrowMutToken<T>) -> Option<OptRefMut<T>> {
+        self.value.borrow_mut_or_none(token)
     }
 
     pub fn borrow_mut(self, token: &impl BorrowMutToken<T>) -> OptRefMut<T> {

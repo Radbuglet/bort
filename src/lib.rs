@@ -1,6 +1,7 @@
+#![deny(unsafe_code)]
+
 pub mod core;
-pub mod ecs;
+pub mod debug;
 pub mod entity;
 pub mod obj;
-pub mod tag;
 mod util;
