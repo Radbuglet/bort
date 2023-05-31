@@ -244,11 +244,11 @@ pub type CompRef<T> = OptRef<'static, T>;
 pub type CompMut<T> = OptRefMut<'static, T>;
 
 // Database
-struct StorageDb {
-    storages: FxHashMap<TypeId, &'static (dyn Any + Sync)>,
+pub(crate) struct StorageDb {
+    pub(crate) storages: FxHashMap<TypeId, &'static (dyn Any + Sync)>,
 }
 
-static STORAGES: NOptRefCell<StorageDb> = NOptRefCell::new_full(StorageDb {
+pub(crate) static STORAGES: NOptRefCell<StorageDb> = NOptRefCell::new_full(StorageDb {
     storages: FxHashMap::with_hasher(ConstSafeBuildHasherDefault::new()),
 });
 
@@ -274,17 +274,17 @@ pub fn storage<T: 'static>() -> Storage<T> {
 }
 
 // Structures
-type StorageData<T> = NOptRefCell<StorageInner<T>>;
+pub(crate) type StorageData<T> = NOptRefCell<StorageInner<T>>;
 
 #[derive(Debug)]
-struct StorageInner<T: 'static> {
-    mappings: NopHashMap<Entity, EntityStorageMapping<T>>,
+pub(crate) struct StorageInner<T: 'static> {
+    pub(crate) mappings: NopHashMap<Entity, EntityStorageMapping<T>>,
     alloc: StorageInnerAllocator<T>,
 }
 
 #[derive(Debug)]
-struct EntityStorageMapping<T: 'static> {
-    slot: Slot<T>,
+pub(crate) struct EntityStorageMapping<T: 'static> {
+    pub(crate) slot: Slot<T>,
     internal_meta: Option<(StorageBlock<T>, usize)>,
 }
 

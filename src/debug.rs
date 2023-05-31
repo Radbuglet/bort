@@ -1,6 +1,9 @@
 use std::{borrow::Cow, fmt, sync::atomic};
 
-use crate::entity::{Entity, ALIVE, DEBUG_ENTITY_COUNTER};
+use crate::{
+    core::heap::DEBUG_HEAP_COUNTER,
+    entity::{Entity, ALIVE, DEBUG_ENTITY_COUNTER},
+};
 
 pub fn alive_entity_count() -> usize {
     ALIVE.with(|slots| slots.borrow().len())
@@ -15,8 +18,7 @@ pub fn spawned_entity_count() -> u64 {
 }
 
 pub fn heap_count() -> u64 {
-    // DEBUG_HEAP_COUNTER.load(atomic::Ordering::Relaxed)
-    todo!()
+    DEBUG_HEAP_COUNTER.load(atomic::Ordering::Relaxed)
 }
 
 pub fn slot_count() -> u64 {

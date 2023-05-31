@@ -571,6 +571,12 @@ impl<T> NOptRefCell<T> {
         self.value.is_empty()
     }
 
+    pub fn is_empty_mut(&mut self) -> bool {
+        // Safety: this is a method that takes exclusive access to the object. Hence, it is
+        // not impacted by our potentially dangerous `Sync` impl.
+        self.value.is_empty()
+    }
+
     pub fn set(&mut self, value: Option<T>) -> Option<T> {
         // Safety: this is a method that takes exclusive ownership of the object. Hence, it is
         // not impacted by our potentially dangerous `Sync` impl.

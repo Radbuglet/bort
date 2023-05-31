@@ -1,6 +1,11 @@
 // TODO: Replace with a non-leaky implementation once `OptRefCell`s become zeroable.
 
-use std::{any::TypeId, marker::PhantomData, ops::Deref};
+use std::{
+    any::TypeId,
+    marker::PhantomData,
+    ops::Deref,
+    sync::atomic::{AtomicU64, Ordering::Relaxed},
+};
 
 use crate::util::{ConstSafeBuildHasherDefault, FxHashMap};
 
@@ -11,6 +16,8 @@ use super::{
 
 static FREE_SLOTS: NOptRefCell<FxHashMap<TypeId, Vec<*const ()>>> =
     NOptRefCell::new_full(FxHashMap::with_hasher(ConstSafeBuildHasherDefault::new()));
+
+pub(crate) static DEBUG_HEAP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
 pub struct Heap<T: 'static> {
@@ -41,6 +48,8 @@ impl<T> Heap<T> {
                 }),
         );
 
+        DEBUG_HEAP_COUNTER.fetch_add(1, Relaxed);
+
         Self { slots }
     }
 
@@ -62,11 +71,16 @@ impl<T> Heap<T> {
 
 impl<T> Drop for Heap<T> {
     fn drop(&mut self) {
+        DEBUG_HEAP_COUNTER.fetch_sub(1, Relaxed);
+
         let token = MainThreadToken::acquire();
         let mut free_slots = FREE_SLOTS.borrow_mut(token);
         let free_slots = free_slots.entry(TypeId::of::<T>()).or_default();
 
-        todo!();
+        for slot in &mut *self.slots {
+            assert!(slot.value.is_empty(token));
+            free_slots.push(slot.value as *const NOptRefCell<T> as *const ());
+        }
     }
 }
 
