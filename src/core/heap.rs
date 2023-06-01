@@ -18,6 +18,7 @@ static FREE_SLOTS: NOptRefCell<FxHashMap<TypeId, Vec<*const ()>>> =
     NOptRefCell::new_full(FxHashMap::with_hasher(ConstSafeBuildHasherDefault::new()));
 
 pub(crate) static DEBUG_HEAP_COUNTER: AtomicU64 = AtomicU64::new(0);
+pub(crate) static DEBUG_SLOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
 pub struct Heap<T: 'static> {
@@ -77,10 +78,20 @@ impl<T> Drop for Heap<T> {
         let mut free_slots = FREE_SLOTS.borrow_mut(token);
         let free_slots = free_slots.entry(TypeId::of::<T>()).or_default();
 
-        for slot in &mut *self.slots {
-            assert!(slot.value.is_empty(token));
-            free_slots.push(slot.value as *const NOptRefCell<T> as *const ());
-        }
+        // Make all the slots contained in the heap free
+        free_slots.extend(
+            self.slots
+                .iter()
+                .map(|slot| slot.value as *const NOptRefCell<T> as *const ()),
+        );
+
+        // If any of the slots are still borrowed, panic here.
+        // In the real implementation, we'd use this panic to guard against invalid deallocation.
+        // Here, however, we just use the panic for forwards-compatibility reasons.
+        assert!(
+            self.slots.iter().all(|slot| slot.value.is_empty(token)),
+            "Heap was leaked because one or more slots were non-empty."
+        );
     }
 }
 
@@ -91,7 +102,20 @@ pub struct WritableSlot<'a, T: 'static> {
 
 impl<T: 'static> WritableSlot<'_, T> {
     pub fn write(&self, token: &impl BorrowMutToken<T>, value: Option<T>) -> Option<T> {
-        self.slot.value.replace(token, value)
+        let new_state = value.is_some();
+        let old_state = self.slot.value.replace(token, value);
+
+        match new_state as i8 - old_state.is_some() as i8 {
+            -1 => {
+                DEBUG_SLOT_COUNTER.fetch_sub(1, Relaxed);
+            }
+            1 => {
+                DEBUG_SLOT_COUNTER.fetch_add(1, Relaxed);
+            }
+            _ => {}
+        };
+
+        old_state
     }
 }
 

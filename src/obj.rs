@@ -10,6 +10,7 @@ use crate::{
 
 pub struct Obj<T: 'static> {
     entity: Entity,
+    // TODO: Ensure that the slot has the appropriate owner.
     value: Slot<T>,
 }
 

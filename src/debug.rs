@@ -1,7 +1,7 @@
 use std::{borrow::Cow, fmt, sync::atomic};
 
 use crate::{
-    core::heap::DEBUG_HEAP_COUNTER,
+    core::heap::{DEBUG_HEAP_COUNTER, DEBUG_SLOT_COUNTER},
     entity::{Entity, ALIVE, DEBUG_ENTITY_COUNTER},
 };
 
@@ -22,8 +22,7 @@ pub fn heap_count() -> u64 {
 }
 
 pub fn slot_count() -> u64 {
-    // DEBUG_ORC_COUNTER.load(atomic::Ordering::Relaxed)
-    todo!()
+    DEBUG_SLOT_COUNTER.load(atomic::Ordering::Relaxed)
 }
 
 #[derive(Debug, Clone)]
