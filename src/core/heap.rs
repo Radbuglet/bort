@@ -103,6 +103,7 @@ pub struct WritableSlot<'a, T: 'static> {
 impl<T: 'static> WritableSlot<'_, T> {
     pub fn write(&self, token: &impl BorrowMutToken<T>, value: Option<T>) -> Option<T> {
         let new_state = value.is_some();
+
         let old_state = self.slot.value.replace(token, value);
 
         match new_state as i8 - old_state.is_some() as i8 {
@@ -158,7 +159,11 @@ impl<T> Slot<T> {
     }
 
     pub fn take(&self, token: &impl BorrowMutToken<T>) -> Option<T> {
-        self.value.take(token)
+        let taken = self.value.take(token);
+        if taken.is_some() {
+            DEBUG_SLOT_COUNTER.fetch_sub(1, Relaxed);
+        }
+        taken
     }
 }
 
