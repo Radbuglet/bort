@@ -1,11 +1,14 @@
 use std::{
     any::Any,
+    cell::Cell,
     error::Error,
     fmt, hash, iter,
     marker::PhantomData,
     num::NonZeroU64,
     sync::{MutexGuard, PoisonError},
 };
+
+// === HashMap === //
 
 pub type NopHashBuilder = ConstSafeBuildHasherDefault<NoOpHasher>;
 pub type NopHashMap<K, V> = hashbrown::HashMap<K, V, NopHashBuilder>;
@@ -54,6 +57,8 @@ impl hash::Hasher for NoOpHasher {
     }
 }
 
+// === Iterator utils === //
+
 pub fn hash_iter<H, E, I>(state: &mut H, iter: I)
 where
     H: hash::Hasher,
@@ -91,9 +96,7 @@ where
     })
 }
 
-pub fn leak<T>(value: T) -> &'static T {
-    Box::leak(Box::new(value))
-}
+// === Random IDs === //
 
 pub fn xorshift64(state: NonZeroU64) -> NonZeroU64 {
     // Adapted from: https://en.wikipedia.org/w/index.php?title=Xorshift&oldid=1123949358
@@ -103,6 +106,26 @@ pub fn xorshift64(state: NonZeroU64) -> NonZeroU64 {
     let state = state ^ (state << 17);
     NonZeroU64::new(state).unwrap()
 }
+
+// FIXME: This needs to be global.
+pub fn random_uid() -> NonZeroU64 {
+    thread_local! {
+        // This doesn't directly leak anything so we're fine with not checking the blessed status
+        // of this value.
+        static ID_GEN: Cell<NonZeroU64> = const { Cell::new(const_new_nz_u64(1)) };
+    }
+
+    ID_GEN.with(|v| {
+        // N.B. `xorshift`, like all other well-constructed LSFRs, produces a full cycle of non-zero
+        // values before repeating itself. Thus, this is an effective way to generate random but
+        // unique IDs without using additional storage.
+        let state = xorshift64(v.get());
+        v.set(state);
+        state
+    })
+}
+
+// === Downcast === //
 
 pub trait AnyDowncastExt: Any {
     fn as_any(&self) -> &dyn Any;
@@ -129,6 +152,10 @@ impl AnyDowncastExt for dyn Any + Sync {
     }
 }
 
+// === RawFmt === //
+
+pub const NOT_ON_MAIN_THREAD_MSG: RawFmt = RawFmt("<not on main thread>");
+
 #[derive(Copy, Clone)]
 pub struct RawFmt<'a>(pub &'a str);
 
@@ -136,6 +163,12 @@ impl fmt::Debug for RawFmt<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.0)
     }
+}
+
+// === Misc === //
+
+pub fn leak<T>(value: T) -> &'static T {
+    Box::leak(Box::new(value))
 }
 
 pub const fn const_new_nz_u64(v: u64) -> NonZeroU64 {
@@ -157,5 +190,3 @@ pub fn unpoison<'a, T: ?Sized>(
 pub fn unwrap_error<T, E: Error>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|e| panic!("{e}"))
 }
-
-pub const NOT_ON_MAIN_THREAD_MSG: RawFmt = RawFmt("<not on main thread>");

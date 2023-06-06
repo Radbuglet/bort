@@ -19,8 +19,8 @@ use crate::{
     debug::{AsDebugLabel, DebugLabel},
     obj::{Obj, OwnedObj},
     util::{
-        const_new_nz_u64, hash_iter, leak, merge_iters, xorshift64, AnyDowncastExt,
-        ConstSafeBuildHasherDefault, FxHashMap, FxHashSet, NopHashMap, RawFmt,
+        hash_iter, leak, merge_iters, random_uid, AnyDowncastExt, ConstSafeBuildHasherDefault,
+        FxHashMap, FxHashSet, NopHashMap, RawFmt,
     },
 };
 
@@ -215,25 +215,6 @@ impl ComponentList {
                 })
         })
     }
-}
-
-// === Random ID Generator === //
-
-fn random_uid() -> NonZeroU64 {
-    thread_local! {
-        // This doesn't directly leak anything so we're fine with not checking the blessed status
-        // of this value.
-        static ID_GEN: Cell<NonZeroU64> = const { Cell::new(const_new_nz_u64(1)) };
-    }
-
-    ID_GEN.with(|v| {
-        // N.B. `xorshift`, like all other well-constructed LSFRs, produces a full cycle of non-zero
-        // values before repeating itself. Thus, this is an effective way to generate random but
-        // unique IDs without using additional storage.
-        let state = xorshift64(v.get());
-        v.set(state);
-        state
-    })
 }
 
 // === Storage === //

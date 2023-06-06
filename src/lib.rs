@@ -4,6 +4,7 @@ pub mod core;
 pub mod debug;
 pub mod entity;
 pub mod obj;
+pub mod tag;
 pub mod threading;
 mod util;
 
