@@ -103,6 +103,8 @@ mod unjail_impl {
 
     pub unsafe trait UnJailMutTokenDisamb<T: ?Sized, Kind: TokenKindMarker> {}
 
+    // Safety: if `V: !Sync`, `V` can only be read on the main thread, so there is no risk of a race
+    // condition.
     unsafe impl<T: Token<Kind = MainThreadTokenKind>, V: ?Sized>
         UnJailRefTokenDisamb<V, MainThreadTokenKind> for T
     {
@@ -495,8 +497,7 @@ pub struct NOptRefCell<T> {
     value: OptRefCell<T>,
 }
 
-// Safety: `value` is not dangerous because its access is mediated by access tokens. The value
-// contained therein is also always safe because it is guarded by un-jailing semantics.
+// FIXME: This is probably unsound.
 unsafe impl<T> Sync for NOptRefCell<T> {}
 
 impl<T> NOptRefCell<T> {
