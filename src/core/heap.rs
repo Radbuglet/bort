@@ -1,6 +1,6 @@
 use std::{
     any::TypeId,
-    cell::Cell,
+    fmt,
     marker::PhantomData,
     mem::ManuallyDrop,
     ops::Deref,
@@ -12,43 +12,43 @@ use crate::util::{leak, ConstSafeBuildHasherDefault, FxHashMap};
 
 use super::{
     cell::{OptRef, OptRefMut},
-    token::{BorrowMutToken, BorrowToken, GetToken, MainThreadToken, TokenFor},
-    token_cell::NOptRefCell,
+    token::{BorrowMutToken, BorrowToken, GetToken, MainThreadToken, Token, TokenFor},
+    token_cell::{NMainCell, NOptRefCell},
 };
 
 pub(crate) static DEBUG_HEAP_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub(crate) static DEBUG_SLOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-// === Indirector === //
+// === ThreadedPtrMut == //
 
-static FREE_SLOTS: NOptRefCell<FxHashMap<TypeId, IndirectorSet>> =
-    NOptRefCell::new_full(FxHashMap::with_hasher(ConstSafeBuildHasherDefault::new()));
+struct ThreadedPtrRef<T: ?Sized>(pub *const T);
 
-#[derive(Debug)]
-struct IndirectorSet {
-    empty: *const (),
-    free_slots: Vec<&'static Indirector>,
+impl<T: ?Sized> Copy for ThreadedPtrRef<T> {}
+
+impl<T: ?Sized> Clone for ThreadedPtrRef<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
-#[derive(Debug)]
-struct Indirector(Cell<*const ()>);
+unsafe impl<T: ?Sized> Send for ThreadedPtrRef<T> {}
+unsafe impl<T: ?Sized> Sync for ThreadedPtrRef<T> {}
 
-unsafe impl Send for Indirector {}
-unsafe impl Sync for Indirector {}
+// === Indirector === //
+
+static FREE_INDIRECTORS: NOptRefCell<FxHashMap<TypeId, IndirectorSet>> =
+    NOptRefCell::new_full(FxHashMap::with_hasher(ConstSafeBuildHasherDefault::new()));
+
+struct IndirectorSet {
+    empty: ThreadedPtrRef<()>,
+    free_indirectors: Vec<&'static Indirector>,
+}
+
+struct Indirector(NMainCell<ThreadedPtrRef<()>>);
 
 impl Default for Indirector {
     fn default() -> Self {
-        Self(Cell::new(null_mut()))
-    }
-}
-
-impl Indirector {
-    pub fn get(&self) -> *const () {
-        self.0.get()
-    }
-
-    pub fn set(&self, _token: &MainThreadToken, ptr: *const ()) {
-        self.0.set(ptr);
+        Self(NMainCell::new(ThreadedPtrRef(null_mut())))
     }
 }
 
@@ -68,15 +68,17 @@ impl<T> Heap<T> {
         let values = ManuallyDrop::new(Box::from_iter((0..len).map(|_| NOptRefCell::new_empty())));
 
         // Allocate free slots
-        let mut free_slots = FREE_SLOTS.borrow_mut(token);
+        let mut free_slots = FREE_INDIRECTORS.borrow_mut(token);
         let free_slots = free_slots
             .entry(TypeId::of::<T>())
             .or_insert_with(|| IndirectorSet {
-                empty: leak(NOptRefCell::new_empty()) as *const NOptRefCell<T> as *const (),
-                free_slots: Vec::new(),
+                empty: ThreadedPtrRef(
+                    leak(NOptRefCell::new_empty()) as *const NOptRefCell<T> as *const ()
+                ),
+                free_indirectors: Vec::new(),
             });
 
-        let free_slots = &mut free_slots.free_slots;
+        let free_slots = &mut free_slots.free_indirectors;
 
         if free_slots.len() < len {
             let additional = (len - free_slots.len()).max(128);
@@ -94,7 +96,10 @@ impl<T> Heap<T> {
                 .drain((free_slots.len() - len)..)
                 .enumerate()
                 .map(|(i, data)| {
-                    data.set(token, &values[i] as *const NOptRefCell<T> as *const ());
+                    data.0.set(
+                        token,
+                        ThreadedPtrRef(&values[i] as *const NOptRefCell<T> as *const ()),
+                    );
 
                     Slot {
                         _ty: PhantomData,
@@ -129,7 +134,7 @@ impl<T> Drop for Heap<T> {
         DEBUG_HEAP_COUNTER.fetch_sub(1, Relaxed);
 
         let token = MainThreadToken::acquire();
-        let mut free_slots = FREE_SLOTS.borrow_mut(token);
+        let mut free_slots = FREE_INDIRECTORS.borrow_mut(token);
         let entry = free_slots.get_mut(&TypeId::of::<T>()).unwrap();
 
         // Ensure that all slots are unborrowed and free them from their indirector.
@@ -139,12 +144,12 @@ impl<T> Drop for Heap<T> {
                 "Heap was leaked because one or more slots were non-empty."
             );
 
-            slot.indirector.set(token, entry.empty);
+            slot.indirector.0.set(token, entry.empty);
         }
 
         // Make all the slots contained in the heap free
         entry
-            .free_slots
+            .free_indirectors
             .extend(self.slots.iter().map(|slot| slot.indirector));
 
         // Drop the heap values
@@ -166,7 +171,7 @@ impl<T: 'static> WritableSlot<'_, T> {
         let old_state = unsafe {
             // Safety: this method is trivially safe since we never yield to the user while performing
             // the potentially unsafe action.
-            self.slot.value().replace(token, value)
+            self.slot.value(token).replace(token, value)
         };
 
         match new_state as i8 - old_state.is_some() as i8 {
@@ -191,7 +196,6 @@ impl<T: 'static> Deref for WritableSlot<'_, T> {
     }
 }
 
-#[derive(Debug)]
 pub struct Slot<T: 'static> {
     _ty: PhantomData<&'static NOptRefCell<T>>,
     // Invariants: this indirector must always point to a valid instance of `NOptRefCell<T>`.
@@ -203,22 +207,28 @@ pub struct Slot<T: 'static> {
     indirector: &'static Indirector,
 }
 
+impl<T> fmt::Debug for Slot<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Slot").finish_non_exhaustive()
+    }
+}
+
 impl<T> Slot<T> {
-    pub unsafe fn value<'a>(&self) -> &'a NOptRefCell<T> {
-        unsafe { &*self.indirector.get().cast::<NOptRefCell<T>>() }
+    pub unsafe fn value<'a>(&self, token: &impl Token) -> &'a NOptRefCell<T> {
+        unsafe { &*self.indirector.0.get(token).0.cast::<NOptRefCell<T>>() }
     }
 
     pub fn get_or_none(self, token: &impl GetToken<T>) -> Option<&T> {
         unsafe {
             // Safety: a valid `GetToken` precludes main thread access for its lifetime.
-            self.value().get_or_none(token)
+            self.value(token).get_or_none(token)
         }
     }
 
     pub fn get(self, token: &impl GetToken<T>) -> &T {
         unsafe {
             // Safety: a valid `GetToken` precludes main thread access for its lifetime.
-            self.value().get(token)
+            self.value(token).get(token)
         }
     }
 
@@ -226,7 +236,7 @@ impl<T> Slot<T> {
         unsafe {
             // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
             // precludes deletion until the reference expires.
-            self.value().borrow_or_none(token)
+            self.value(token).borrow_or_none(token)
         }
     }
 
@@ -234,7 +244,7 @@ impl<T> Slot<T> {
         unsafe {
             // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
             // precludes deletion until the reference expires.
-            self.value().borrow(token)
+            self.value(token).borrow(token)
         }
     }
 
@@ -242,7 +252,7 @@ impl<T> Slot<T> {
         unsafe {
             // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
             // precludes deletion until the reference expires.
-            self.value().borrow_mut_or_none(token)
+            self.value(token).borrow_mut_or_none(token)
         }
     }
 
@@ -250,7 +260,7 @@ impl<T> Slot<T> {
         unsafe {
             // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
             // precludes deletion until the reference expires.
-            self.value().borrow_mut(token)
+            self.value(token).borrow_mut(token)
         }
     }
 
@@ -258,7 +268,7 @@ impl<T> Slot<T> {
         let taken = unsafe {
             // Safety: this method is trivially safe since we never yield to the user while performing
             // the potentially unsafe action.
-            self.value().take(token)
+            self.value(token).take(token)
         };
 
         if taken.is_some() {
@@ -271,7 +281,7 @@ impl<T> Slot<T> {
         unsafe {
             // Safety: this method is trivially safe since we never yield to the user while performing
             // the potentially unsafe action.
-            self.value().is_empty(token)
+            self.value(token).is_empty(token)
         }
     }
 }

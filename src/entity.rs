@@ -399,12 +399,15 @@ impl<T: 'static> Storage<T> {
                     block
                 }
                 None => {
-                    MainThreadJail::new(Rc::new(StorageBlockInner {
-                        // TODO: Make this dynamic
-                        heap: RefCell::new(Heap::new(128)),
-                        slot: Cell::new(HAMMERED_OR_FULL_BLOCK_SLOT),
-                        free_mask: Cell::new(0),
-                    }))
+                    MainThreadJail::new_unjail(
+                        token,
+                        Rc::new(StorageBlockInner {
+                            // TODO: Make this dynamic
+                            heap: RefCell::new(Heap::new(128)),
+                            slot: Cell::new(HAMMERED_OR_FULL_BLOCK_SLOT),
+                            free_mask: Cell::new(0),
+                        }),
+                    )
                 }
             }
         });
@@ -427,7 +430,7 @@ impl<T: 'static> Storage<T> {
         block_inner.free_mask.set(free_mask);
 
         // If our mask if full, remove the block
-        let block_clone = MainThreadJail::new(block_inner.clone());
+        let block_clone = MainThreadJail::new_unjail(token, block_inner.clone());
         if free_mask == u128::MAX {
             // N.B. `block` is already located in the `HAMMERED_OR_FULL_BLOCK_SLOT`.
             allocator.target_block = None;
@@ -503,7 +506,7 @@ impl<T: 'static> Storage<T> {
                     // Push the block back into the `non_free_blocks` set
                     me.alloc
                         .non_full_blocks
-                        .push(MainThreadJail::new(block.clone()));
+                        .push(MainThreadJail::new_unjail(self.token, block.clone()));
                 }
 
                 // If the mask is now empty and the block is not our "hammered" block, delete it!

@@ -34,6 +34,15 @@
 //! can be jailed on the main thread, meaning that the wrapper cell itself can be made `Sync` but the
 //! inner, potentially dangerous value, can only be access on the main thread. See [`UnJailRefToken`]
 //! and [`UnJailMutToken`] for details.
+//!
+//! ## Edge-cases
+//!
+//! It is important to note that there is a different between worker threads and regular external
+//! threads. Indeed, one may run a regular thread and the main thread simultaneously but one may not
+//! run a worker thread and the main thread simultaneously. This is important for objects synchronized
+//! against the main thread rather than against a component set. Methods on these objects will
+//! consume a blank [`Token`] which seemingly affords no guarantees but, in actuality, affords the
+//! guarantee that the token is belongs to either a worker or a main thread.
 
 use hashbrown::hash_map::Entry as HashMapEntry;
 use std::{
@@ -106,8 +115,12 @@ pub enum ThreadAccess {
 ///
 /// ## Safety
 ///
-/// If [`MainThreadTokenKind`] is specified as the `Kind`, this token may only exist on the main
+/// - If `Kind` is specified as [`MainThreadTokenKind`], this token may only exist on the main
 /// thread.
+///
+/// - If `Kind` is specified as [`WorkerOrMainThreadTokenKind`], this token is either a main thread
+///   token or the main thread has been suspended and this is a *real* worker thread.
+///
 pub unsafe trait Token: Sized + fmt::Debug {
     type Kind: TokenKindMarker;
 }

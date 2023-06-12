@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     fmt,
     num::NonZeroU64,
     sync::atomic::{AtomicU64, Ordering},
@@ -9,8 +10,8 @@ use crate::util::NOT_ON_MAIN_THREAD_MSG;
 use super::{
     cell::{BorrowError, BorrowMutError, OptRef, OptRefCell, OptRefMut},
     token::{
-        is_main_thread, BorrowMutToken, BorrowToken, ExclusiveTokenHint, GetToken, Namespace,
-        ThreadAccess, TokenFor, UnJailRefToken,
+        is_main_thread, BorrowMutToken, BorrowToken, ExclusiveTokenHint, GetToken,
+        MainThreadTokenKind, Namespace, ThreadAccess, Token, TokenFor, UnJailRefToken,
     },
 };
 
@@ -33,13 +34,37 @@ impl<T: ?Sized + fmt::Debug> fmt::Debug for MainThreadJail<T> {
 
 // N.B. `Send` is still structural for `MainThreadJail`.
 
-// Safety: you can only get a reference to `T` if you're on the un-jailing main thread or if `T` is,
-// itself, `Sync`.
+// Safety: this is always safe to implement because either:
+//
+// - `T` is `Sync`, which is intrinsically safe.
+// - `T` is `!Sync`. In this case, either:
+//     - `T` is `Send` and was constructed on a non-main thread. Since it can only be referenced
+//       immutably on the main thread, one could think of this operation as temporarily moving the
+//       value to the main thread, borrowing it immutably, and then moving it back once the borrow
+//       expires.
+//     - `T` was constructed on the main thread. Since it can only be accessed on the main thread,
+//       the property that `T` be `Sync` was never relied upon so we're fine.
+//
 unsafe impl<T> Sync for MainThreadJail<T> {}
 
 impl<T> MainThreadJail<T> {
-    pub const fn new(value: T) -> Self {
-        MainThreadJail(value)
+    pub const fn new_sync(value: T) -> Self
+    where
+        T: Sync,
+    {
+        Self(value)
+    }
+
+    pub const fn new_send(value: T) -> Self
+    where
+        T: Send,
+    {
+        Self(value)
+    }
+
+    pub fn new_unjail(_token: &impl UnJailRefToken<T>, value: T) -> Self {
+        // `UnJailRefToken` means we're either on the main thread or `T` is `Sync`, as desired.
+        Self(value)
     }
 
     pub fn into_inner(self) -> T {
@@ -52,6 +77,37 @@ impl<T> MainThreadJail<T> {
 
     pub fn get_mut(&mut self) -> &mut T {
         &mut self.0
+    }
+}
+
+// === NMainCell === //
+
+pub struct NMainCell<T> {
+    value: Cell<T>,
+}
+
+unsafe impl<T: Send> Sync for NMainCell<T> {}
+
+impl<T> NMainCell<T> {
+    pub const fn new(value: T) -> Self {
+        Self {
+            value: Cell::new(value),
+        }
+    }
+
+    pub fn set(&self, _token: &impl Token<Kind = MainThreadTokenKind>, value: T) {
+        self.value.set(value);
+    }
+
+    pub fn replace(&self, _token: &impl Token<Kind = MainThreadTokenKind>, value: T) -> T {
+        self.value.replace(value)
+    }
+
+    pub fn get(&self, _token: &impl Token) -> T
+    where
+        T: Copy,
+    {
+        self.value.get()
     }
 }
 
