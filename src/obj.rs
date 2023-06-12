@@ -1,16 +1,18 @@
-// === Obj === //
-
 use std::{any::type_name, borrow::Borrow, fmt, hash, mem};
 
 use crate::{
-    core::{heap::Slot, token::MainThreadToken},
+    core::{
+        heap::Slot,
+        token::{MainThreadToken, Token},
+    },
     debug::AsDebugLabel,
     entity::{CompMut, CompRef, Entity, OwnedEntity},
 };
 
+// === Obj === //
+
 pub struct Obj<T: 'static> {
     entity: Entity,
-    // TODO: Ensure that the slot has the appropriate owner.
     value: Slot<T>,
 }
 
@@ -38,6 +40,10 @@ impl<T: 'static> Obj<T> {
         self.entity
     }
 
+    pub fn is_alive(self, token: &impl Token) -> bool {
+        self.value.owner(token) == Some(self.entity)
+    }
+
     pub fn with_debug_label<L: AsDebugLabel>(self, label: L) -> Self {
         self.entity.with_debug_label(label);
         self
@@ -48,35 +54,41 @@ impl<T: 'static> Obj<T> {
     }
 
     pub fn try_get(self) -> Option<CompRef<T>> {
-        self.value.borrow_or_none(MainThreadToken::acquire())
+        let token = MainThreadToken::acquire();
+
+        self.is_alive(token)
+            .then(|| self.value.borrow_or_none(token))
+            .flatten()
     }
 
     pub fn try_get_mut(self) -> Option<CompMut<T>> {
-        self.value.borrow_mut_or_none(MainThreadToken::acquire())
+        let token = MainThreadToken::acquire();
+
+        self.is_alive(token)
+            .then(|| self.value.borrow_mut_or_none(token))
+            .flatten()
     }
 
     pub fn get(self) -> CompRef<T> {
-        self.try_get().unwrap_or_else(|| {
-            panic!(
-                "attempted to get the value of a dead `Obj<{}>` corresponding to {:?}",
-                type_name::<T>(),
-                self.entity()
-            )
-        })
+        let token = MainThreadToken::acquire();
+        assert!(
+            self.is_alive(token),
+            "attempted to get the value of a dead `Obj<{}>` corresponding to {:?}",
+            type_name::<T>(),
+            self.entity(),
+        );
+        self.value.borrow(token)
     }
 
     pub fn get_mut(self) -> CompMut<T> {
-        self.try_get_mut().unwrap_or_else(|| {
-            panic!(
-                "attempted to get the value of a dead `Obj<{}>` corresponding to {:?}",
-                type_name::<T>(),
-                self.entity()
-            )
-        })
-    }
-
-    pub fn is_alive(self) -> bool {
-        self.entity.is_alive()
+        let token = MainThreadToken::acquire();
+        assert!(
+            self.is_alive(token),
+            "attempted to get the value of a dead `Obj<{}>` corresponding to {:?}",
+            type_name::<T>(),
+            self.entity(),
+        );
+        self.value.borrow_mut(token)
     }
 
     pub fn destroy(self) {
@@ -220,8 +232,8 @@ impl<T: 'static> OwnedObj<T> {
         self.obj.get_mut()
     }
 
-    pub fn is_alive(&self) -> bool {
-        self.obj.is_alive()
+    pub fn is_alive(&self, token: &impl Token) -> bool {
+        self.obj.is_alive(token)
     }
 
     pub fn destroy(self) {
