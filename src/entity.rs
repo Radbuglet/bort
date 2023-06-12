@@ -14,7 +14,8 @@ use crate::{
     core::{
         cell::{OptRef, OptRefMut},
         heap::{Heap, Slot, WritableSlot},
-        token::{ensure_main_thread, MainThreadJail, MainThreadToken, NOptRefCell},
+        token::{ensure_main_thread, MainThreadToken},
+        token_cell::{MainThreadJail, NOptRefCell},
     },
     debug::{AsDebugLabel, DebugLabel},
     obj::{Obj, OwnedObj},

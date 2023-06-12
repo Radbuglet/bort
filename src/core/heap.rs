@@ -12,7 +12,8 @@ use crate::util::{leak, ConstSafeBuildHasherDefault, FxHashMap};
 
 use super::{
     cell::{OptRef, OptRefMut},
-    token::{BorrowMutToken, BorrowToken, GetToken, MainThreadToken, NOptRefCell, TokenFor},
+    token::{BorrowMutToken, BorrowToken, GetToken, MainThreadToken, TokenFor},
+    token_cell::NOptRefCell,
 };
 
 pub(crate) static DEBUG_HEAP_COUNTER: AtomicU64 = AtomicU64::new(0);

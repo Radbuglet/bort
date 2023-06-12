@@ -4,7 +4,7 @@ use crate::{
     core::{
         cell::{OptRef, OptRefMut},
         heap::Slot,
-        token::{self, MainThreadToken, ParallelTokenSource, TypeExclusiveToken, TypeReadToken},
+        token::{self, MainThreadToken, ParallelTokenSource, TypeExclusiveToken, TypeSharedToken},
     },
     entity::{Entity, StorageData, StorageDb, StorageInner, STORAGES},
     util::AnyDowncastExt,
@@ -29,7 +29,7 @@ where
 #[derive(Debug, Clone)]
 pub struct ParallelismSession<'a> {
     cx: &'a ParallelTokenSource,
-    db_token: TypeReadToken<'a, StorageDb>,
+    db_token: TypeSharedToken<'a, StorageDb>,
 }
 
 impl<'a> ParallelismSession<'a> {
@@ -86,7 +86,7 @@ pub struct MutStorageView<'a, T: 'static> {
 #[derive(Debug, Clone)]
 struct MutStorageViewInner<'a, T: 'static> {
     storage: &'a StorageData<T>,
-    storage_token: TypeReadToken<'a, StorageInner<T>>,
+    storage_token: TypeSharedToken<'a, StorageInner<T>>,
     value_token: TypeExclusiveToken<'a, T>,
 }
 
@@ -148,8 +148,8 @@ pub struct ReadStorageView<'a, T: 'static> {
 #[derive(Debug, Clone)]
 struct ReadStorageViewInner<'a, T: 'static> {
     storage: &'a StorageData<T>,
-    storage_token: TypeReadToken<'a, StorageInner<T>>,
-    value_token: TypeReadToken<'a, T>,
+    storage_token: TypeSharedToken<'a, StorageInner<T>>,
+    value_token: TypeSharedToken<'a, T>,
 }
 
 impl<T: 'static + Send + Sync> ReadStorageView<'_, T> {
