@@ -360,8 +360,12 @@ impl<T: 'static> Storage<T> {
                 )
             }
             hashbrown::hash_map::Entry::Vacant(entry) => {
-                let (slot, internal_meta) =
-                    Self::allocate_slot_if_needed(self.token, &mut me.alloc, slot, Some(value));
+                let (slot, internal_meta) = Self::allocate_slot_if_needed(
+                    self.token,
+                    &mut me.alloc,
+                    slot,
+                    Some((entity, value)),
+                );
 
                 entry.insert(EntityStorageMapping {
                     slot,
@@ -378,13 +382,12 @@ impl<T: 'static> Storage<T> {
         token: &'static MainThreadToken,
         allocator: &mut StorageInnerAllocator<T>,
         slot: Option<WritableSlot<T>>,
-        value: Option<T>,
+        value: Option<(Entity, T)>,
     ) -> (Slot<T>, Option<(StorageBlock<T>, usize)>) {
         // If the user specified a slot of their own, use it.
         if let Some(slot) = slot {
-            if let Some(value) = value {
-                slot.write(token, Some(value));
-            }
+            slot.set_value_owner_pair(token, value);
+
             return (*slot, None);
         }
 
@@ -421,7 +424,7 @@ impl<T: 'static> Storage<T> {
         // Allocate a slot
         let heap = block_inner.heap.borrow_mut();
         let slot = heap.slot(slot_idx as usize);
-        slot.write(token, value);
+        slot.set_value_owner_pair(token, value);
         let slot = *slot;
         drop(heap);
 
@@ -553,13 +556,16 @@ impl<T: 'static> Storage<T> {
     }
 
     pub fn get_slot(&self, entity: Entity) -> Slot<T> {
-        self.try_get_slot(entity).unwrap_or_else(|| {
+        let slot = self.try_get_slot(entity).unwrap_or_else(|| {
             panic!(
                 "failed to find component of type {} for {:?}",
                 type_name::<T>(),
                 entity,
             )
-        })
+        });
+        debug_assert_eq!(slot.owner(self.token), Some(entity));
+
+        slot
     }
 
     pub fn try_get(&self, entity: Entity) -> Option<CompRef<T>> {

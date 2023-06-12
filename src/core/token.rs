@@ -246,17 +246,6 @@ pub trait GetToken<T: ?Sized>: SharedTokenHint<T> + UnJailRefToken<T> {}
 
 impl<T: ?Sized + SharedTokenHint<V> + UnJailRefToken<V>, V: ?Sized> GetToken<V> for T {}
 
-// === Pure UnJailer === //
-
-/// A token that merely indicates that it exists on either a main or a worker thread, which is
-/// trivially true.
-#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd, Default)]
-pub struct PureUnJailer;
-
-unsafe impl Token for PureUnJailer {
-    type Kind = WorkerOrMainThreadTokenKind;
-}
-
 // === Blessing === //
 
 static HAS_MAIN_THREAD: AtomicBool = AtomicBool::new(false);

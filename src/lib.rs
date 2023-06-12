@@ -1,4 +1,4 @@
-#![deny(unsafe_code)]
+#![deny(unsafe_code)] // Unsafe code is only permitted in `core`.
 
 pub mod core;
 pub mod debug;

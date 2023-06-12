@@ -10,8 +10,8 @@ use crate::util::NOT_ON_MAIN_THREAD_MSG;
 use super::{
     cell::{BorrowError, BorrowMutError, OptRef, OptRefCell, OptRefMut},
     token::{
-        is_main_thread, BorrowMutToken, BorrowToken, ExclusiveTokenHint, GetToken,
-        MainThreadTokenKind, Namespace, ThreadAccess, Token, TokenFor, UnJailRefToken,
+        is_main_thread, BorrowMutToken, BorrowToken, ExclusiveTokenHint, GetToken, MainThreadToken,
+        Namespace, ThreadAccess, Token, TokenFor, UnJailRefToken,
     },
 };
 
@@ -88,6 +88,20 @@ pub struct NMainCell<T> {
 
 unsafe impl<T: Send> Sync for NMainCell<T> {}
 
+impl<T: fmt::Debug + Copy> fmt::Debug for NMainCell<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if is_main_thread() {
+            f.debug_struct("NMainCell")
+                .field("value", &self.value)
+                .finish()
+        } else {
+            f.debug_struct("NMainCell")
+                .field("value", &NOT_ON_MAIN_THREAD_MSG)
+                .finish()
+        }
+    }
+}
+
 impl<T> NMainCell<T> {
     pub const fn new(value: T) -> Self {
         Self {
@@ -95,11 +109,11 @@ impl<T> NMainCell<T> {
         }
     }
 
-    pub fn set(&self, _token: &impl Token<Kind = MainThreadTokenKind>, value: T) {
+    pub fn set(&self, _token: &MainThreadToken, value: T) {
         self.value.set(value);
     }
 
-    pub fn replace(&self, _token: &impl Token<Kind = MainThreadTokenKind>, value: T) -> T {
+    pub fn replace(&self, _token: &MainThreadToken, value: T) -> T {
         self.value.replace(value)
     }
 

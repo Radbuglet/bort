@@ -8,7 +8,10 @@ use std::{
     sync::atomic::{AtomicU64, Ordering::Relaxed},
 };
 
-use crate::util::{leak, ConstSafeBuildHasherDefault, FxHashMap};
+use crate::{
+    util::{leak, ConstSafeBuildHasherDefault, FxHashMap},
+    Entity,
+};
 
 use super::{
     cell::{OptRef, OptRefMut},
@@ -55,8 +58,26 @@ impl Default for Indirector {
 // === Heap === //
 
 #[derive(Debug)]
+pub struct HeapValue<T> {
+    owner: NMainCell<Option<Entity>>,
+    value: NOptRefCell<T>,
+}
+
+impl<T> HeapValue<T> {
+    pub fn owner(&self, token: &impl Token) -> Option<Entity> {
+        self.owner.get(token)
+    }
+
+    pub fn value(&self) -> &NOptRefCell<T> {
+        &self.value
+    }
+}
+
+#[derive(Debug)]
 pub struct Heap<T: 'static> {
-    values: ManuallyDrop<Box<[NOptRefCell<T>]>>,
+    // N.B. mutability is not transitive through this box since indirectors will be referencing these
+    // values.
+    values: ManuallyDrop<Box<[HeapValue<T>]>>,
     slots: Box<[Slot<T>]>,
 }
 
@@ -65,16 +86,20 @@ impl<T> Heap<T> {
         let token = MainThreadToken::acquire();
 
         // Allocate slot data
-        let values = ManuallyDrop::new(Box::from_iter((0..len).map(|_| NOptRefCell::new_empty())));
+        let values = ManuallyDrop::new(Box::from_iter((0..len).map(|_| HeapValue {
+            owner: NMainCell::new(None),
+            value: NOptRefCell::new_empty(),
+        })));
 
         // Allocate free slots
         let mut free_slots = FREE_INDIRECTORS.borrow_mut(token);
         let free_slots = free_slots
             .entry(TypeId::of::<T>())
             .or_insert_with(|| IndirectorSet {
-                empty: ThreadedPtrRef(
-                    leak(NOptRefCell::new_empty()) as *const NOptRefCell<T> as *const ()
-                ),
+                empty: ThreadedPtrRef(leak(HeapValue {
+                    owner: NMainCell::new(None),
+                    value: NOptRefCell::new_empty(),
+                }) as *const HeapValue<T> as *const ()),
                 free_indirectors: Vec::new(),
             });
 
@@ -98,7 +123,7 @@ impl<T> Heap<T> {
                 .map(|(i, data)| {
                     data.0.set(
                         token,
-                        ThreadedPtrRef(&values[i] as *const NOptRefCell<T> as *const ()),
+                        ThreadedPtrRef(&values[i] as *const HeapValue<T> as *const ()),
                     );
 
                     Slot {
@@ -165,13 +190,20 @@ pub struct WritableSlot<'a, T: 'static> {
 }
 
 impl<T: 'static> WritableSlot<'_, T> {
-    pub fn write(&self, token: &impl BorrowMutToken<T>, value: Option<T>) -> Option<T> {
+    // TODO: Maybe we shouldn't be using main tokens for these??
+    pub fn set_owner(&self, token: &MainThreadToken, owner: Option<Entity>) {
+        unsafe { self.slot.heap_value(token) }
+            .owner
+            .set(token, owner);
+    }
+
+    pub fn set_value(&self, token: &impl BorrowMutToken<T>, value: Option<T>) -> Option<T> {
         let new_state = value.is_some();
 
         let old_state = unsafe {
             // Safety: this method is trivially safe since we never yield to the user while performing
             // the potentially unsafe action.
-            self.slot.value(token).replace(token, value)
+            self.slot.heap_value(token).value().replace(token, value)
         };
 
         match new_state as i8 - old_state.is_some() as i8 {
@@ -186,6 +218,20 @@ impl<T: 'static> WritableSlot<'_, T> {
 
         old_state
     }
+
+    pub fn set_value_owner_pair(
+        &self,
+        token: &MainThreadToken,
+        value: Option<(Entity, T)>,
+    ) -> Option<T> {
+        if let Some((owner, value)) = value {
+            self.set_owner(token, Some(owner));
+            self.set_value(token, Some(value))
+        } else {
+            self.set_owner(token, None);
+            self.set_value(token, None)
+        }
+    }
 }
 
 impl<T: 'static> Deref for WritableSlot<'_, T> {
@@ -197,8 +243,8 @@ impl<T: 'static> Deref for WritableSlot<'_, T> {
 }
 
 pub struct Slot<T: 'static> {
-    _ty: PhantomData<&'static NOptRefCell<T>>,
-    // Invariants: this indirector must always point to a valid instance of `NOptRefCell<T>`.
+    _ty: PhantomData<&'static HeapValue<T>>,
+    // Invariants: this indirector must always point to a valid instance of `HeapValue<T>`.
     // Additionally, the active indirect pointee cannot be invalidated until:
     //
     // a) the main thread regains control
@@ -214,21 +260,29 @@ impl<T> fmt::Debug for Slot<T> {
 }
 
 impl<T> Slot<T> {
-    pub unsafe fn value<'a>(&self, token: &impl Token) -> &'a NOptRefCell<T> {
-        unsafe { &*self.indirector.0.get(token).0.cast::<NOptRefCell<T>>() }
+    pub unsafe fn heap_value<'a>(&self, token: &impl Token) -> &'a HeapValue<T> {
+        unsafe { &*self.indirector.0.get(token).0.cast::<HeapValue<T>>() }
+    }
+
+    pub fn owner(&self, token: &impl Token) -> Option<Entity> {
+        unsafe {
+            // Safety: this method is trivially safe since we never yield to the user while performing
+            // the potentially unsafe action.
+            self.heap_value(token).owner(token)
+        }
     }
 
     pub fn get_or_none(self, token: &impl GetToken<T>) -> Option<&T> {
         unsafe {
             // Safety: a valid `GetToken` precludes main thread access for its lifetime.
-            self.value(token).get_or_none(token)
+            self.heap_value(token).value().get_or_none(token)
         }
     }
 
     pub fn get(self, token: &impl GetToken<T>) -> &T {
         unsafe {
             // Safety: a valid `GetToken` precludes main thread access for its lifetime.
-            self.value(token).get(token)
+            self.heap_value(token).value().get(token)
         }
     }
 
@@ -236,7 +290,7 @@ impl<T> Slot<T> {
         unsafe {
             // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
             // precludes deletion until the reference expires.
-            self.value(token).borrow_or_none(token)
+            self.heap_value(token).value().borrow_or_none(token)
         }
     }
 
@@ -244,7 +298,7 @@ impl<T> Slot<T> {
         unsafe {
             // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
             // precludes deletion until the reference expires.
-            self.value(token).borrow(token)
+            self.heap_value(token).value().borrow(token)
         }
     }
 
@@ -252,7 +306,7 @@ impl<T> Slot<T> {
         unsafe {
             // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
             // precludes deletion until the reference expires.
-            self.value(token).borrow_mut_or_none(token)
+            self.heap_value(token).value().borrow_mut_or_none(token)
         }
     }
 
@@ -260,7 +314,7 @@ impl<T> Slot<T> {
         unsafe {
             // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
             // precludes deletion until the reference expires.
-            self.value(token).borrow_mut(token)
+            self.heap_value(token).value().borrow_mut(token)
         }
     }
 
@@ -268,7 +322,7 @@ impl<T> Slot<T> {
         let taken = unsafe {
             // Safety: this method is trivially safe since we never yield to the user while performing
             // the potentially unsafe action.
-            self.value(token).take(token)
+            self.heap_value(token).value().take(token)
         };
 
         if taken.is_some() {
@@ -281,7 +335,7 @@ impl<T> Slot<T> {
         unsafe {
             // Safety: this method is trivially safe since we never yield to the user while performing
             // the potentially unsafe action.
-            self.value(token).is_empty(token)
+            self.heap_value(token).value().is_empty(token)
         }
     }
 }
