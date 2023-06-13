@@ -1,5 +1,3 @@
-// === ComponentList === //
-
 use std::{
     any::{type_name, Any, TypeId},
     borrow::Borrow,
@@ -25,6 +23,8 @@ use crate::{
         set::{hash_iter_write, merge_iters},
     },
 };
+
+// === ComponentList === //
 
 #[derive(Copy, Clone)]
 pub(crate) struct ComponentType {
@@ -73,6 +73,7 @@ impl PartialEq for ComponentType {
     }
 }
 
+// TODO: Replace with new system
 pub(crate) struct ComponentList {
     comps: Box<[ComponentType]>,
     extensions: RefCell<FxHashMap<TypeId, &'static Self>>,

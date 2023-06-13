@@ -1,19 +1,24 @@
 use std::{cmp::Ordering, fmt, marker::PhantomData, num::NonZeroU64};
 
 use crate::{
-    util::map::{FxHashMap, NopHashMap},
+    util::{
+        map::NopHashMap,
+        set::{FreeListHeap, SetMap, SetMapRef},
+    },
     Entity,
 };
 
 // === TagManager === //
 
+type ArchetypeRef = SetMapRef<RawTag, ManagedArchetype, FreeListHeap>;
+
 struct TagManager {
-    archetypes: FxHashMap<Box<[RawTag]>, ManagedArchetype>,
+    archetypes: SetMap<RawTag, ManagedArchetype, FreeListHeap>,
     tags: NopHashMap<RawTag, ManagedTag>,
 }
 
 struct ManagedTag {
-    archetypes: Vec<()>,
+    archetypes: Vec<ArchetypeRef>,
 }
 
 struct ManagedArchetype {
