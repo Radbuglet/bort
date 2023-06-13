@@ -155,28 +155,25 @@ impl<T> Heap<T> {
 
 impl<T> Drop for Heap<T> {
     fn drop(&mut self) {
+        let token = MainThreadToken::acquire();
+
+        // We decrement the heap counter here so unfree-able heaps aren't forever included in the
+        // count.
         DEBUG_HEAP_COUNTER.fetch_sub(1, Relaxed);
 
-        let token = MainThreadToken::acquire();
+        // Ensure that all slots are cleared. If a slot is still being borrowed, this will panic.
+        self.clear_slots(token);
+
+        // Free all slots from their indirector and add them to the free indirector set.
         let mut free_slots = FREE_INDIRECTORS.borrow_mut(token);
         let entry = free_slots.get_mut(&TypeId::of::<T>()).unwrap();
 
-        // Ensure that all slots are unborrowed and free them from their indirector.
         for slot in self.slots.iter() {
-            assert!(
-                slot.is_empty(token),
-                "Heap was leaked because one or more slots were non-empty."
-            );
-
             slot.indirector.0.set(token, entry.empty);
+            entry.free_indirectors.push(slot.indirector);
         }
 
-        // Make all the slots contained in the heap free
-        entry
-            .free_indirectors
-            .extend(self.slots.iter().map(|slot| slot.indirector));
-
-        // Drop the heap values
+        // Drop the boxed slice of heap values.
         unsafe { ManuallyDrop::drop(&mut self.values) };
     }
 }
@@ -232,6 +229,17 @@ impl<'a, T: 'static> WritableSlot<'a, T> {
             self.set_owner(token, None);
             self.set_value(token, None)
         }
+    }
+
+    pub fn swap(self, token: &MainThreadToken, other: WritableSlot<'_, T>) {
+        // Swap the values
+        self.heap_value.value.swap(token, &other.heap_value.value);
+
+        // Swap the owners
+        self.heap_value.owner.swap(token, &other.heap_value.owner);
+
+        // Swap the indirector pointees
+        self.slot.indirector.0.swap(token, &other.slot.indirector.0);
     }
 
     pub fn owner(self, token: &impl Token) -> Option<Entity> {

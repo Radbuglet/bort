@@ -117,6 +117,10 @@ impl<T> NMainCell<T> {
         self.value.replace(value)
     }
 
+    pub fn swap(&self, _token: &MainThreadToken, other: &NMainCell<T>) {
+        self.value.swap(&other.value)
+    }
+
     pub fn get(&self, _token: &impl Token) -> T
     where
         T: Copy,

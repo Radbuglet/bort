@@ -68,13 +68,13 @@ fn access_tests() {
 
     c.bench_function("heap-access", |c| {
         let token = MainThreadToken::acquire();
+        let dummy = OwnedEntity::new();
+
         let positions = Heap::new(10_000);
         let velocities = Heap::new(10_000);
 
-        let dummy = OwnedEntity::new();
-
-        for i in 0..positions.len() {
-            positions.slot(i).set_value_owner_pair(
+        for (pos, vel) in positions.slots().zip(velocities.slots()) {
+            pos.set_value_owner_pair(
                 token,
                 Some((
                     dummy.entity(),
@@ -82,7 +82,7 @@ fn access_tests() {
                 )),
             );
 
-            velocities.slot(i).set_value_owner_pair(
+            vel.set_value_owner_pair(
                 token,
                 Some((
                     dummy.entity(),
@@ -96,9 +96,6 @@ fn access_tests() {
                 *pos.borrow_mut(token) += *vel.borrow(token);
             }
         });
-
-        positions.clear_slots(token);
-        velocities.clear_slots(token);
     });
 
     c.bench_function("std-ref-cell", |c| {
