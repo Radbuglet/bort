@@ -1,6 +1,11 @@
 use std::{cmp::Ordering, fmt, marker::PhantomData, num::NonZeroU64};
 
 use crate::{
+    core::{
+        cell::{OptRef, OptRefMut},
+        token::MainThreadToken,
+        token_cell::NOptRefCell,
+    },
     util::{
         map::NopHashMap,
         set::{FreeListHeap, SetMap, SetMapRef},
@@ -12,6 +17,7 @@ use crate::{
 
 type ArchetypeRef = SetMapRef<RawTag, ManagedArchetype, FreeListHeap>;
 
+#[derive(Default)]
 struct TagManager {
     archetypes: SetMap<RawTag, ManagedArchetype, FreeListHeap>,
     tags: NopHashMap<RawTag, ManagedTag>,
@@ -21,8 +27,22 @@ struct ManagedTag {
     archetypes: Vec<ArchetypeRef>,
 }
 
+#[derive(Default)]
 struct ManagedArchetype {
     members: Vec<Entity>,
+}
+
+fn tag_manager() -> OptRefMut<'static, TagManager> {
+    static TAG_MANAGER: NOptRefCell<TagManager> = NOptRefCell::new_empty();
+
+    let token = MainThreadToken::try_acquire()
+        .expect("attempted to perform a tag operation on a non-main thread");
+
+    if TAG_MANAGER.is_empty(token) {
+        TAG_MANAGER.replace(token, Some(TagManager::default()));
+    }
+
+    TAG_MANAGER.borrow_mut(token)
 }
 
 // === Tag === //

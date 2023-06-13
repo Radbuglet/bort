@@ -205,6 +205,15 @@ pub struct SpecFreeListHeap<V> {
     free: Vec<usize>,
 }
 
+impl<V> Default for SpecFreeListHeap<V> {
+    fn default() -> Self {
+        Self {
+            values: Default::default(),
+            free: Default::default(),
+        }
+    }
+}
+
 impl<V> SpecLocalHeap<V> for SpecFreeListHeap<V> {
     type Ptr = usize;
 
@@ -256,6 +265,18 @@ pub struct SetMapEntry<K, V, H: LocalHeap> {
     extensions: FxHashMap<K, SetMapRef<K, V, H>>,
     de_extensions: FxHashMap<K, SetMapRef<K, V, H>>,
     value: V,
+}
+
+impl<K, V, H> Default for SetMap<K, V, H>
+where
+    K: 'static + Ord + hash::Hash + Copy,
+    V: Default,
+    H: LocalHeap,
+    H::For<SetMapEntry<K, V, H>>: Default,
+{
+    fn default() -> Self {
+        Self::new(Default::default())
+    }
 }
 
 impl<K, V, H> SetMap<K, V, H>

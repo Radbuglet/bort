@@ -12,13 +12,13 @@ use crate::{
     core::{
         cell::{OptRef, OptRefMut},
         heap::{Heap, Slot, WritableSlot},
-        token::{ensure_main_thread, MainThreadToken},
+        token::MainThreadToken,
         token_cell::{MainThreadJail, NOptRefCell},
     },
     debug::{AsDebugLabel, DebugLabel},
     obj::{Obj, OwnedObj},
     util::{
-        map::{FxHashBuilder, FxHashMap, FxHashSet, NopHashMap},
+        map::{FxHashBuilder, FxHashMap, FxHashSet, NopHashBuilder, NopHashMap},
         misc::{leak, random_thread_local_uid, AnyDowncastExt, RawFmt},
         set::{hash_iter_write, merge_iters},
     },
@@ -332,8 +332,8 @@ impl<T: 'static> Storage<T> {
         slot: Option<WritableSlot<T>>,
     ) -> (Obj<T>, Option<T>) {
         // Ensure that the entity is alive and extend the component list.
-        ALIVE.with(|slots| {
-            let mut slots = slots.borrow_mut();
+        {
+            let mut slots = ALIVE.borrow_mut(self.token);
             let slot = slots.get_mut(&entity).unwrap_or_else(|| {
                 panic!(
                     "attempted to attach a component of type {} to the dead or cross-thread {:?}.",
@@ -345,7 +345,7 @@ impl<T: 'static> Storage<T> {
             // N.B. we always run this, regardless of entry state, to account for preallocated slots,
             // which don't update the entry yet.
             *slot = slot.extend(ComponentType::of::<T>());
-        });
+        }
 
         // Update the storage
         let me = &mut *self.inner.borrow_mut(self.token);
@@ -461,12 +461,10 @@ impl<T: 'static> Storage<T> {
             // in the of being destroyed. This is the opposite behavior of `insert`, which requires
             // the entity to be valid before modifying it. This pairing ensures that, by the time
             // `Entity::destroy()` resolves, all of the entity's components will have been removed.
-            ALIVE.with(|slots| {
-                let mut slots = slots.borrow_mut();
-                let Some(slot) = slots.get_mut(&entity) else { return };
-
+            let mut slots = ALIVE.borrow_mut(self.token);
+            if let Some(slot) = slots.get_mut(&entity) {
                 *slot = slot.de_extend(ComponentType::of::<T>());
-            });
+            }
 
             Some(removed)
         } else {
@@ -605,25 +603,21 @@ impl<T: 'static> Clone for Storage<T> {
 
 pub(crate) static DEBUG_ENTITY_COUNTER: atomic::AtomicU64 = atomic::AtomicU64::new(0);
 
-thread_local! {
-    pub(crate) static ALIVE: RefCell<NopHashMap<Entity, &'static ComponentList>> = {
-        ensure_main_thread("Spawned, despawned, or checked the liveness of an entity");
-        Default::default()
-    };
-}
+pub(crate) static ALIVE: NOptRefCell<NopHashMap<Entity, &'static ComponentList>> =
+    NOptRefCell::new_full(NopHashMap::with_hasher(NopHashBuilder::new()));
 
 #[derive(Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Entity(NonZeroU64);
 
 impl Entity {
     pub fn new_unmanaged() -> Self {
+        let token = MainThreadToken::acquire();
+
         // Allocate a slot
         let me = Self(random_thread_local_uid());
 
         // Register our slot in the alive set
-        // N.B. we call `ComponentList::empty()` within the `ALIVE.with` section to ensure that blessed
-        // validation occurs before we allocate an empty component list.
-        ALIVE.with(|slots| slots.borrow_mut().insert(me, ComponentList::empty()));
+        ALIVE.borrow_mut(token).insert(me, ComponentList::empty());
 
         // Increment the total entity counter
         // N.B. we do this once everything else has succeeded so that calls to `new_unmanaged` on
@@ -711,40 +705,32 @@ impl Entity {
     }
 
     pub fn is_alive(self) -> bool {
-        ALIVE.with(|slots| slots.borrow().contains_key(&self))
+        ALIVE.borrow(MainThreadToken::acquire()).contains_key(&self)
     }
 
     pub fn destroy(self) {
-        ALIVE.with(|slots| {
-            // Remove the slot
-            let slot = slots.borrow_mut().remove(&self).unwrap_or_else(|| {
+        let slot = ALIVE
+            .borrow_mut(MainThreadToken::acquire())
+            .remove(&self)
+            .unwrap_or_else(|| {
                 panic!(
                     "attempted to destroy the already-dead or cross-threaded {:?}.",
                     self
                 )
             });
 
-            // Run the component destructors
-            slot.run_dtors(self);
-        });
+        // Run the component destructors
+        slot.run_dtors(self);
     }
 }
 
 impl fmt::Debug for Entity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        struct StrLit<'a>(&'a str);
+        #[derive(Debug)]
+        struct Id(NonZeroU64);
 
-        impl fmt::Debug for StrLit<'_> {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str(self.0)
-            }
-        }
-
-        ALIVE.with(|alive| {
-            #[derive(Debug)]
-            struct Id(NonZeroU64);
-
-            if let Some(components) = alive.borrow().get(self) {
+        if let Some(token) = MainThreadToken::try_acquire() {
+            if let Some(components) = ALIVE.borrow(token).get(self) {
                 let mut builder = f.debug_tuple("Entity");
 
                 if let Some(label) = self.try_get::<DebugLabel>() {
@@ -755,18 +741,23 @@ impl fmt::Debug for Entity {
 
                 for v in components.comps.iter() {
                     if v.id != TypeId::of::<DebugLabel>() {
-                        builder.field(&StrLit(v.name));
+                        builder.field(&RawFmt(v.name));
                     }
                 }
 
                 builder.finish()
             } else {
                 f.debug_tuple("Entity")
-                    .field(&RawFmt("<dead or cross-thread>"))
+                    .field(&RawFmt("<dead>"))
                     .field(&Id(self.0))
                     .finish()
             }
-        })
+        } else {
+            f.debug_tuple("Entity")
+                .field(&RawFmt("<cross-thread>"))
+                .field(&Id(self.0))
+                .finish()
+        }
     }
 }
 
