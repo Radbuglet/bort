@@ -7,7 +7,7 @@ use crate::{
         token::{self, MainThreadToken, ParallelTokenSource, TypeExclusiveToken, TypeSharedToken},
     },
     entity::{Entity, StorageData, StorageDb, StorageInner, STORAGES},
-    util::AnyDowncastExt,
+    util::misc::AnyDowncastExt,
 };
 
 // Re-export `is_main_thread`

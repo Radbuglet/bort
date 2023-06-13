@@ -58,7 +58,7 @@ use std::{
     thread::{self, current, Thread},
 };
 
-use crate::util::{unpoison, FxHashMap};
+use crate::util::{misc::unpoison, map::FxHashMap};
 
 // === Access Token Traits === //
 

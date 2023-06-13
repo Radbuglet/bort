@@ -9,7 +9,10 @@ use std::{
 };
 
 use crate::{
-    util::{leak, ConstSafeBuildHasherDefault, FxHashMap},
+    util::{
+        map::{FxHashBuilder, FxHashMap},
+        misc::leak,
+    },
     Entity,
 };
 
@@ -40,7 +43,7 @@ unsafe impl<T: ?Sized> Sync for ThreadedPtrRef<T> {}
 // === Indirector === //
 
 static FREE_INDIRECTORS: NOptRefCell<FxHashMap<TypeId, IndirectorSet>> =
-    NOptRefCell::new_full(FxHashMap::with_hasher(ConstSafeBuildHasherDefault::new()));
+    NOptRefCell::new_full(FxHashMap::with_hasher(FxHashBuilder::new()));
 
 struct IndirectorSet {
     empty: ThreadedPtrRef<()>,

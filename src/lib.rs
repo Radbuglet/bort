@@ -3,6 +3,7 @@
 pub mod core;
 pub mod debug;
 pub mod entity;
+pub mod event;
 pub mod obj;
 pub mod tag;
 pub mod threading;

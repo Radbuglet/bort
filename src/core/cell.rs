@@ -29,7 +29,7 @@ use std::{
     ptr::NonNull,
 };
 
-use crate::util::{unwrap_error, RawFmt};
+use crate::util::misc::{unwrap_error, RawFmt};
 
 // === Borrow state === ///
 

@@ -5,7 +5,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use crate::util::NOT_ON_MAIN_THREAD_MSG;
+use crate::util::misc::NOT_ON_MAIN_THREAD_MSG;
 
 use super::{
     cell::{BorrowError, BorrowMutError, OptRef, OptRefCell, OptRefMut},

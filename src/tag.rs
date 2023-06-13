@@ -1,7 +1,7 @@
 use std::{cmp::Ordering, fmt, marker::PhantomData, num::NonZeroU64};
 
 use crate::{
-    util::{FxHashMap, NopHashMap},
+    util::map::{FxHashMap, NopHashMap},
     Entity,
 };
 

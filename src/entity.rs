@@ -20,8 +20,9 @@ use crate::{
     debug::{AsDebugLabel, DebugLabel},
     obj::{Obj, OwnedObj},
     util::{
-        hash_iter, leak, merge_iters, random_uid, AnyDowncastExt, ConstSafeBuildHasherDefault,
-        FxHashMap, FxHashSet, NopHashMap, RawFmt,
+        map::{FxHashBuilder, FxHashMap, FxHashSet, NopHashMap},
+        misc::{leak, random_thread_local_uid, AnyDowncastExt, RawFmt},
+        set::{hash_iter_write, merge_iters},
     },
 };
 
@@ -80,7 +81,7 @@ pub(crate) struct ComponentList {
 
 impl hash::Hash for ComponentList {
     fn hash<H: hash::Hasher>(&self, state: &mut H) {
-        hash_iter(state, self.comps.iter());
+        hash_iter_write(state, self.comps.iter());
     }
 }
 
@@ -156,7 +157,7 @@ impl ComponentList {
 
         impl hash::Hash for ComponentListSearch<'_> {
             fn hash<H: hash::Hasher>(&self, state: &mut H) {
-                hash_iter(state, merge_iters(self.0, &[self.1]));
+                hash_iter_write(state, merge_iters(self.0, &[self.1]));
             }
         }
 
@@ -188,7 +189,7 @@ impl ComponentList {
 
         impl hash::Hash for ComponentListSearch<'_> {
             fn hash<H: hash::Hasher>(&self, state: &mut H) {
-                hash_iter(state, self.0.iter().filter(|v| **v != self.1));
+                hash_iter_write(state, self.0.iter().filter(|v| **v != self.1));
             }
         }
 
@@ -231,7 +232,7 @@ pub(crate) struct StorageDb {
 }
 
 pub(crate) static STORAGES: NOptRefCell<StorageDb> = NOptRefCell::new_full(StorageDb {
-    storages: FxHashMap::with_hasher(ConstSafeBuildHasherDefault::new()),
+    storages: FxHashMap::with_hasher(FxHashBuilder::new()),
 });
 
 pub fn storage<T: 'static>() -> Storage<T> {
@@ -616,7 +617,7 @@ pub struct Entity(NonZeroU64);
 impl Entity {
     pub fn new_unmanaged() -> Self {
         // Allocate a slot
-        let me = Self(random_uid());
+        let me = Self(random_thread_local_uid());
 
         // Register our slot in the alive set
         // N.B. we call `ComponentList::empty()` within the `ALIVE.with` section to ensure that blessed

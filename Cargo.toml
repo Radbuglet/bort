@@ -5,12 +5,12 @@ edition = "2021"
 
 [dependencies]
 cfgenius = "0.1.0"
-hashbrown = { version = "0.13.2", default-features = false }
+hashbrown = { version = "0.14.0", default-features = false, features = ["raw"] }
 rustc-hash = "1.1.0"
 
 [dev-dependencies]
 criterion = "0.5.1"
-fastrand = "1.9.0"  # For "fuzzing"
+fastrand = "2.0.0"  # For "fuzzing"
 glam = "0.24.0"  # For doc-test
 
 [[bench]]
