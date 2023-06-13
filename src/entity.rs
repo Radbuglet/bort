@@ -8,6 +8,8 @@ use std::{
     sync::atomic,
 };
 
+use derive_where::derive_where;
+
 use crate::{
     core::{
         cell::{OptRef, OptRefMut},
@@ -291,6 +293,7 @@ const HAMMERED_OR_FULL_BLOCK_SLOT: usize = usize::MAX;
 
 // Storage API
 #[derive(Debug)]
+#[derive_where(Copy, Clone)]
 pub struct Storage<T: 'static> {
     inner: &'static StorageData<T>,
     token: &'static MainThreadToken,
@@ -588,14 +591,6 @@ impl<T: 'static> Storage<T> {
 
     pub fn has(&self, entity: Entity) -> bool {
         self.try_get_slot(entity).is_some()
-    }
-}
-
-impl<T: 'static> Copy for Storage<T> {}
-
-impl<T: 'static> Clone for Storage<T> {
-    fn clone(&self) -> Self {
-        *self
     }
 }
 

@@ -4,6 +4,7 @@ use std::{
     slice,
 };
 
+use derive_where::derive_where;
 use hashbrown::raw::RawTable;
 
 use super::map::{FxHashBuilder, FxHashMap};
@@ -56,24 +57,10 @@ where
     }
 }
 
+#[derive_where(Clone; A: Clone, B: Clone, A::Item: Clone, B::Item: Clone)]
 pub struct IterMerger<A: Iterator, B: Iterator> {
     a_iter: iter::Peekable<A>,
     b_iter: iter::Peekable<B>,
-}
-
-impl<A, B> Clone for IterMerger<A, B>
-where
-    A: Iterator + Clone,
-    B: Iterator + Clone,
-    A::Item: Clone,
-    B::Item: Clone,
-{
-    fn clone(&self) -> Self {
-        Self {
-            a_iter: self.a_iter.clone(),
-            b_iter: self.b_iter.clone(),
-        }
-    }
 }
 
 impl<I, A, B> Iterator for IterMerger<A, B>
@@ -200,18 +187,10 @@ impl LocalHeap for FreeListHeap {
     type For<V> = SpecFreeListHeap<V>;
 }
 
+#[derive_where(Default)]
 pub struct SpecFreeListHeap<V> {
     values: Vec<Option<V>>,
     free: Vec<usize>,
-}
-
-impl<V> Default for SpecFreeListHeap<V> {
-    fn default() -> Self {
-        Self {
-            values: Default::default(),
-            free: Default::default(),
-        }
-    }
 }
 
 impl<V> SpecLocalHeap<V> for SpecFreeListHeap<V> {

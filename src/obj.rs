@@ -1,4 +1,6 @@
-use std::{any::type_name, borrow::Borrow, fmt, hash, mem};
+use std::{any::type_name, borrow::Borrow, mem};
+
+use derive_where::derive_where;
 
 use crate::{
     core::{
@@ -11,8 +13,11 @@ use crate::{
 
 // === Obj === //
 
+#[derive(Debug)]
+#[derive_where(Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Obj<T: 'static> {
     entity: Entity,
+    #[derive_where(skip)]
     value: Slot<T>,
 }
 
@@ -96,49 +101,6 @@ impl<T: 'static> Obj<T> {
     }
 }
 
-impl<T: 'static + fmt::Debug> fmt::Debug for Obj<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Obj")
-            .field("entity", &self.entity)
-            .field("value", &self.value)
-            .finish()
-    }
-}
-
-impl<T: 'static> Copy for Obj<T> {}
-
-impl<T: 'static> Clone for Obj<T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<T: 'static> hash::Hash for Obj<T> {
-    fn hash<H: hash::Hasher>(&self, state: &mut H) {
-        self.entity.hash(state);
-    }
-}
-
-impl<T: 'static> Eq for Obj<T> {}
-
-impl<T: 'static> PartialEq for Obj<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.entity == other.entity
-    }
-}
-
-impl<T: 'static> Ord for Obj<T> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.entity.cmp(&other.entity)
-    }
-}
-
-impl<T: 'static> PartialOrd for Obj<T> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
 impl<T: 'static> Borrow<Entity> for Obj<T> {
     fn borrow(&self) -> &Entity {
         &self.entity
@@ -147,6 +109,8 @@ impl<T: 'static> Borrow<Entity> for Obj<T> {
 
 // === OwnedObj === //
 
+#[derive(Debug)]
+#[derive_where(Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct OwnedObj<T: 'static> {
     obj: Obj<T>,
 }
@@ -247,41 +211,9 @@ impl<T: 'static> Drop for OwnedObj<T> {
     }
 }
 
-impl<T: 'static + fmt::Debug> fmt::Debug for OwnedObj<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("OwnedObj").field("obj", &self.obj).finish()
-    }
-}
-
 impl<T: 'static + Default> Default for OwnedObj<T> {
     fn default() -> Self {
         Self::new(T::default())
-    }
-}
-
-impl<T: 'static> hash::Hash for OwnedObj<T> {
-    fn hash<H: hash::Hasher>(&self, state: &mut H) {
-        self.obj.hash(state);
-    }
-}
-
-impl<T: 'static> Eq for OwnedObj<T> {}
-
-impl<T: 'static> PartialEq for OwnedObj<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.obj == other.obj
-    }
-}
-
-impl<T: 'static> Ord for OwnedObj<T> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.obj.cmp(&other.obj)
-    }
-}
-
-impl<T: 'static> PartialOrd for OwnedObj<T> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.obj.partial_cmp(&other.obj)
     }
 }
 

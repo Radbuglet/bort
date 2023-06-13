@@ -8,12 +8,14 @@ use std::{
     sync::atomic::{AtomicU64, Ordering::Relaxed},
 };
 
+use derive_where::derive_where;
+
 use crate::{
+    entity::Entity,
     util::{
         map::{FxHashBuilder, FxHashMap},
         misc::leak,
     },
-    Entity,
 };
 
 use super::{
@@ -27,15 +29,8 @@ pub(crate) static DEBUG_SLOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 // === ThreadedPtrMut == //
 
+#[derive_where(Copy, Clone)]
 struct ThreadedPtrRef<T: ?Sized>(pub *const T);
-
-impl<T: ?Sized> Copy for ThreadedPtrRef<T> {}
-
-impl<T: ?Sized> Clone for ThreadedPtrRef<T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
 
 unsafe impl<T: ?Sized> Send for ThreadedPtrRef<T> {}
 unsafe impl<T: ?Sized> Sync for ThreadedPtrRef<T> {}
@@ -245,6 +240,7 @@ impl<T: 'static> Deref for WritableSlot<'_, T> {
     }
 }
 
+#[derive_where(Copy, Clone)]
 pub struct Slot<T: 'static> {
     _ty: PhantomData<&'static HeapValue<T>>,
     // Invariants: this indirector must always point to a valid instance of `HeapValue<T>`.
@@ -340,13 +336,5 @@ impl<T> Slot<T> {
             // the potentially unsafe action.
             self.heap_value(token).value().is_empty(token)
         }
-    }
-}
-
-impl<T> Copy for Slot<T> {}
-
-impl<T> Clone for Slot<T> {
-    fn clone(&self) -> Self {
-        *self
     }
 }
