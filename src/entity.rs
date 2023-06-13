@@ -393,7 +393,7 @@ impl<T: 'static> Storage<T> {
         if let Some(slot) = slot {
             slot.set_value_owner_pair(token, value);
 
-            return (*slot, None);
+            return (slot.slot(), None);
         }
 
         // Otherwise, acquire a block...
@@ -430,7 +430,7 @@ impl<T: 'static> Storage<T> {
         let heap = block_inner.heap.borrow_mut();
         let slot = heap.slot(slot_idx as usize);
         slot.set_value_owner_pair(token, value);
-        let slot = *slot;
+        let slot = slot.slot();
         drop(heap);
 
         // Mark the slot as occupied

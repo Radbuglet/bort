@@ -1,7 +1,11 @@
 use std::{cell::RefCell, time::Duration};
 
-use bort::{core::cell::OptRefCell, storage, OwnedEntity, OwnedObj};
+use bort::{
+    core::{cell::OptRefCell, heap::Heap, token::MainThreadToken},
+    storage, OwnedEntity, OwnedObj,
+};
 use criterion::{criterion_main, Criterion};
+use glam::Vec3;
 
 fn access_tests() {
     let mut c = Criterion::default()
@@ -60,6 +64,41 @@ fn access_tests() {
         let foo = OptRefCell::new_full(3);
 
         c.iter(|| foo.borrow());
+    });
+
+    c.bench_function("heap-access", |c| {
+        let token = MainThreadToken::acquire();
+        let positions = Heap::new(10_000);
+        let velocities = Heap::new(10_000);
+
+        let dummy = OwnedEntity::new();
+
+        for i in 0..positions.len() {
+            positions.slot(i).set_value_owner_pair(
+                token,
+                Some((
+                    dummy.entity(),
+                    Vec3::new(fastrand::f32(), fastrand::f32(), fastrand::f32()),
+                )),
+            );
+
+            velocities.slot(i).set_value_owner_pair(
+                token,
+                Some((
+                    dummy.entity(),
+                    Vec3::new(fastrand::f32(), fastrand::f32(), fastrand::f32()),
+                )),
+            );
+        }
+
+        c.iter(|| {
+            for (pos, vel) in positions.slots().zip(velocities.slots()) {
+                *pos.borrow_mut(token) += *vel.borrow(token);
+            }
+        });
+
+        positions.clear_slots(token);
+        velocities.clear_slots(token);
     });
 
     c.bench_function("std-ref-cell", |c| {

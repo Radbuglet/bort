@@ -3,7 +3,6 @@ use std::{
     fmt,
     marker::PhantomData,
     mem::ManuallyDrop,
-    ops::Deref,
     ptr::null_mut,
     sync::atomic::{AtomicU64, Ordering::Relaxed},
 };
@@ -56,19 +55,9 @@ impl Default for Indirector {
 // === Heap === //
 
 #[derive(Debug)]
-pub struct HeapValue<T> {
+struct HeapValue<T> {
     owner: NMainCell<Option<Entity>>,
     value: NOptRefCell<T>,
-}
-
-impl<T> HeapValue<T> {
-    pub fn owner(&self, token: &impl Token) -> Option<Entity> {
-        self.owner.get(token)
-    }
-
-    pub fn value(&self) -> &NOptRefCell<T> {
-        &self.value
-    }
 }
 
 #[derive(Debug)]
@@ -142,13 +131,25 @@ impl<T> Heap<T> {
 
     pub fn slot(&self, i: usize) -> WritableSlot<'_, T> {
         WritableSlot {
-            _ty: PhantomData,
             slot: self.slots[i],
+            heap_value: &self.values[i],
         }
     }
 
-    pub fn slots(&self) -> &[Slot<T>] {
-        &self.slots
+    pub fn slots(&self) -> (impl ExactSizeIterator<Item = WritableSlot<'_, T>> + Clone) {
+        self.slots
+            .iter()
+            .zip(self.values.iter())
+            .map(|(slot, heap_value)| WritableSlot {
+                slot: *slot,
+                heap_value,
+            })
+    }
+
+    pub fn clear_slots(&self, token: &MainThreadToken) {
+        for slot in self.slots() {
+            slot.set_value_owner_pair(token, None);
+        }
     }
 }
 
@@ -182,27 +183,29 @@ impl<T> Drop for Heap<T> {
 
 // === Slot === //
 
+#[derive_where(Copy, Clone)]
 pub struct WritableSlot<'a, T: 'static> {
-    _ty: PhantomData<&'a Heap<T>>,
     slot: Slot<T>,
+    heap_value: &'a HeapValue<T>,
 }
 
-impl<T: 'static> WritableSlot<'_, T> {
-    // TODO: Maybe we shouldn't be using main tokens for these??
-    pub fn set_owner(&self, token: &MainThreadToken, owner: Option<Entity>) {
-        unsafe { self.slot.heap_value(token) }
-            .owner
-            .set(token, owner);
+impl<'a, T: 'static> WritableSlot<'a, T> {
+    unsafe fn heap_value_prolonged<'b>(self) -> &'b HeapValue<T> {
+        &*(self.heap_value as *const HeapValue<T>)
     }
 
-    pub fn set_value(&self, token: &impl BorrowMutToken<T>, value: Option<T>) -> Option<T> {
-        let new_state = value.is_some();
+    pub fn slot(self) -> Slot<T> {
+        self.slot
+    }
 
-        let old_state = unsafe {
-            // Safety: this method is trivially safe since we never yield to the user while performing
-            // the potentially unsafe action.
-            self.slot.heap_value(token).value().replace(token, value)
-        };
+    // TODO: Maybe we shouldn't be using main tokens for these??
+    pub fn set_owner(self, token: &MainThreadToken, owner: Option<Entity>) {
+        self.heap_value.owner.set(token, owner);
+    }
+
+    pub fn set_value(self, token: &impl BorrowMutToken<T>, value: Option<T>) -> Option<T> {
+        let new_state = value.is_some();
+        let old_state = self.heap_value.value.replace(token, value);
 
         match new_state as i8 - old_state.is_some() as i8 {
             -1 => {
@@ -218,7 +221,7 @@ impl<T: 'static> WritableSlot<'_, T> {
     }
 
     pub fn set_value_owner_pair(
-        &self,
+        self,
         token: &MainThreadToken,
         value: Option<(Entity, T)>,
     ) -> Option<T> {
@@ -230,13 +233,80 @@ impl<T: 'static> WritableSlot<'_, T> {
             self.set_value(token, None)
         }
     }
-}
 
-impl<T: 'static> Deref for WritableSlot<'_, T> {
-    type Target = Slot<T>;
+    pub fn owner(self, token: &impl Token) -> Option<Entity> {
+        self.heap_value.owner.get(token)
+    }
 
-    fn deref(&self) -> &Self::Target {
-        &self.slot
+    pub fn get_or_none(self, token: &impl GetToken<T>) -> Option<&T> {
+        unsafe {
+            // Safety: a valid `GetToken` precludes main thread access for its lifetime.
+            self.heap_value_prolonged()
+        }
+        .value
+        .get_or_none(token)
+    }
+
+    pub fn get(self, token: &impl GetToken<T>) -> &T {
+        unsafe {
+            // Safety: a valid `GetToken` precludes main thread access for its lifetime.
+            self.heap_value_prolonged()
+        }
+        .value
+        .get(token)
+    }
+
+    pub fn borrow_or_none(self, token: &impl BorrowToken<T>) -> Option<OptRef<T>> {
+        unsafe {
+            // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
+            // precludes deletion until the reference expires.
+            self.heap_value_prolonged()
+        }
+        .value
+        .borrow_or_none(token)
+    }
+
+    pub fn borrow(self, token: &impl BorrowToken<T>) -> OptRef<T> {
+        unsafe {
+            // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
+            // precludes deletion until the reference expires.
+            self.heap_value_prolonged()
+        }
+        .value
+        .borrow(token)
+    }
+
+    pub fn borrow_mut_or_none(self, token: &impl BorrowMutToken<T>) -> Option<OptRefMut<T>> {
+        unsafe {
+            // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
+            // precludes deletion until the reference expires.
+            self.heap_value_prolonged()
+        }
+        .value
+        .borrow_mut_or_none(token)
+    }
+
+    pub fn borrow_mut(self, token: &impl BorrowMutToken<T>) -> OptRefMut<T> {
+        unsafe {
+            // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
+            // precludes deletion until the reference expires.
+            self.heap_value_prolonged()
+        }
+        .value
+        .borrow_mut(token)
+    }
+
+    pub fn take(self, token: &impl BorrowMutToken<T>) -> Option<T> {
+        let taken = self.heap_value.value.take(token);
+
+        if taken.is_some() {
+            DEBUG_SLOT_COUNTER.fetch_sub(1, Relaxed);
+        }
+        taken
+    }
+
+    pub fn is_empty(self, token: &impl TokenFor<T>) -> bool {
+        self.heap_value.value.is_empty(token)
     }
 }
 
@@ -259,69 +329,79 @@ impl<T> fmt::Debug for Slot<T> {
 }
 
 impl<T> Slot<T> {
-    pub unsafe fn heap_value<'a>(&self, token: &impl Token) -> &'a HeapValue<T> {
-        unsafe { &*self.indirector.0.get(token).0.cast::<HeapValue<T>>() }
+    pub unsafe fn writable_slot<'a>(self, token: &impl Token) -> WritableSlot<'a, T> {
+        let heap_value = unsafe {
+            // Safety: provided by caller
+            &*self.indirector.0.get(token).0.cast::<HeapValue<T>>()
+        };
+
+        WritableSlot {
+            slot: self,
+            heap_value,
+        }
     }
 
     pub fn owner(&self, token: &impl Token) -> Option<Entity> {
         unsafe {
-            // Safety: this method is trivially safe since we never yield to the user while performing
-            // the potentially unsafe action.
-            self.heap_value(token).owner(token)
+            // Safety: the slot cannot expire until this function returns because we never call to
+            // external user code.
+            self.writable_slot(token).owner(token)
         }
     }
 
     pub fn get_or_none(self, token: &impl GetToken<T>) -> Option<&T> {
         unsafe {
-            // Safety: a valid `GetToken` precludes main thread access for its lifetime.
-            self.heap_value(token).value().get_or_none(token)
+            // Safety: the slot cannot expire until this function returns because we never call to
+            // external user code.
+            self.writable_slot(token).get_or_none(token)
         }
     }
 
     pub fn get(self, token: &impl GetToken<T>) -> &T {
         unsafe {
-            // Safety: a valid `GetToken` precludes main thread access for its lifetime.
-            self.heap_value(token).value().get(token)
+            // Safety: the slot cannot expire until this function returns because we never call to
+            // external user code.
+            self.writable_slot(token).get(token)
         }
     }
 
     pub fn borrow_or_none(self, token: &impl BorrowToken<T>) -> Option<OptRef<T>> {
         unsafe {
-            // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
-            // precludes deletion until the reference expires.
-            self.heap_value(token).value().borrow_or_none(token)
+            // Safety: the slot cannot expire until this function returns because we never call to
+            // external user code.
+            self.writable_slot(token).borrow_or_none(token)
         }
     }
 
     pub fn borrow(self, token: &impl BorrowToken<T>) -> OptRef<T> {
         unsafe {
-            // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
-            // precludes deletion until the reference expires.
-            self.heap_value(token).value().borrow(token)
+            // Safety: the slot cannot expire until this function returns because we never call to
+            // external user code.
+            self.writable_slot(token).borrow(token)
         }
     }
 
     pub fn borrow_mut_or_none(self, token: &impl BorrowMutToken<T>) -> Option<OptRefMut<T>> {
         unsafe {
-            // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
-            // precludes deletion until the reference expires.
-            self.heap_value(token).value().borrow_mut_or_none(token)
+            // Safety: the slot cannot expire until this function returns because we never call to
+            // external user code.
+            self.writable_slot(token).borrow_mut_or_none(token)
         }
     }
 
     pub fn borrow_mut(self, token: &impl BorrowMutToken<T>) -> OptRefMut<T> {
         unsafe {
-            // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
-            // precludes deletion until the reference expires.
-            self.heap_value(token).value().borrow_mut(token)
+            // Safety: the slot cannot expire until this function returns because we never call to
+            // external user code.
+            self.writable_slot(token).borrow_mut(token)
         }
     }
 
     pub fn take(&self, token: &impl BorrowMutToken<T>) -> Option<T> {
         let taken = unsafe {
-            // Safety: this method is trivially safe since we never yield to the user while performing
-            // the potentially unsafe action.
-            self.heap_value(token).value().take(token)
+            // Safety: the slot cannot expire until this function returns because we never call to
+            // external user code.
+            self.writable_slot(token).take(token)
         };
 
         if taken.is_some() {
@@ -332,9 +412,9 @@ impl<T> Slot<T> {
 
     pub fn is_empty(&self, token: &impl TokenFor<T>) -> bool {
         unsafe {
-            // Safety: this method is trivially safe since we never yield to the user while performing
-            // the potentially unsafe action.
-            self.heap_value(token).value().is_empty(token)
+            // Safety: the slot cannot expire until this function returns because we never call to
+            // external user code.
+            self.writable_slot(token).is_empty(token)
         }
     }
 }
