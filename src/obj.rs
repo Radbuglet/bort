@@ -45,8 +45,12 @@ impl<T: 'static> Obj<T> {
         self.entity
     }
 
-    pub fn is_alive(self, token: &impl Token) -> bool {
+    fn is_alive_internal(self, token: &impl Token) -> bool {
         self.value.owner(token) == Some(self.entity)
+    }
+
+    pub fn is_alive(self) -> bool {
+        self.is_alive_internal(MainThreadToken::acquire())
     }
 
     pub fn with_debug_label<L: AsDebugLabel>(self, label: L) -> Self {
@@ -61,7 +65,7 @@ impl<T: 'static> Obj<T> {
     pub fn try_get(self) -> Option<CompRef<T>> {
         let token = MainThreadToken::acquire();
 
-        self.is_alive(token)
+        self.is_alive_internal(token)
             .then(|| self.value.borrow_or_none(token))
             .flatten()
     }
@@ -69,7 +73,7 @@ impl<T: 'static> Obj<T> {
     pub fn try_get_mut(self) -> Option<CompMut<T>> {
         let token = MainThreadToken::acquire();
 
-        self.is_alive(token)
+        self.is_alive_internal(token)
             .then(|| self.value.borrow_mut_or_none(token))
             .flatten()
     }
@@ -77,7 +81,7 @@ impl<T: 'static> Obj<T> {
     pub fn get(self) -> CompRef<T> {
         let token = MainThreadToken::acquire();
         assert!(
-            self.is_alive(token),
+            self.is_alive_internal(token),
             "attempted to get the value of a dead `Obj<{}>` corresponding to {:?}",
             type_name::<T>(),
             self.entity(),
@@ -88,7 +92,7 @@ impl<T: 'static> Obj<T> {
     pub fn get_mut(self) -> CompMut<T> {
         let token = MainThreadToken::acquire();
         assert!(
-            self.is_alive(token),
+            self.is_alive_internal(token),
             "attempted to get the value of a dead `Obj<{}>` corresponding to {:?}",
             type_name::<T>(),
             self.entity(),
@@ -196,8 +200,8 @@ impl<T: 'static> OwnedObj<T> {
         self.obj.get_mut()
     }
 
-    pub fn is_alive(&self, token: &impl Token) -> bool {
-        self.obj.is_alive(token)
+    pub fn is_alive(&self) -> bool {
+        self.obj.is_alive()
     }
 
     pub fn destroy(self) {

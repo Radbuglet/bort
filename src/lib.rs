@@ -10,6 +10,7 @@ mod util;
 
 pub mod prelude {
     pub use crate::{
+        core::cell::{OptRef, OptRefMut},
         entity::{storage, CompMut, CompRef, Entity, OwnedEntity, Storage},
         obj::{Obj, OwnedObj},
     };
