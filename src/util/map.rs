@@ -2,6 +2,7 @@ use std::{hash, marker::PhantomData};
 
 pub type NopHashBuilder = ConstSafeBuildHasherDefault<NoOpHasher>;
 pub type NopHashMap<K, V> = hashbrown::HashMap<K, V, NopHashBuilder>;
+pub type NopHashSet<T> = hashbrown::HashSet<T, NopHashBuilder>;
 
 pub type FxHashBuilder = ConstSafeBuildHasherDefault<rustc_hash::FxHasher>;
 pub type FxHashMap<K, V> = hashbrown::HashMap<K, V, FxHashBuilder>;

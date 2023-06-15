@@ -2,46 +2,7 @@ use std::{marker::PhantomData, num::NonZeroU64};
 
 use derive_where::derive_where;
 
-use crate::{
-    core::{cell::OptRefMut, token::MainThreadToken, token_cell::NOptRefCell},
-    entity::Entity,
-    util::{
-        map::NopHashMap,
-        set::{FreeListHeap, SetMap, SetMapRef},
-    },
-};
-
-// === TagManager === //
-
-type ArchetypeRef = SetMapRef<RawTag, ManagedArchetype, FreeListHeap>;
-
-#[derive(Default)]
-struct TagManager {
-    archetypes: SetMap<RawTag, ManagedArchetype, FreeListHeap>,
-    tags: NopHashMap<RawTag, ManagedTag>,
-}
-
-struct ManagedTag {
-    archetypes: Vec<ArchetypeRef>,
-}
-
-#[derive(Default)]
-struct ManagedArchetype {
-    members: Vec<Entity>,
-}
-
-fn tag_manager() -> OptRefMut<'static, TagManager> {
-    static TAG_MANAGER: NOptRefCell<TagManager> = NOptRefCell::new_empty();
-
-    let token = MainThreadToken::try_acquire()
-        .expect("attempted to perform a tag operation on a non-main thread");
-
-    if TAG_MANAGER.is_empty(token) {
-        TAG_MANAGER.replace(token, Some(TagManager::default()));
-    }
-
-    TAG_MANAGER.borrow_mut(token)
-}
+use crate::{entity::Entity, util::map::NopHashSet, CompMut, Obj, OwnedEntity};
 
 // === Tag === //
 
@@ -62,24 +23,104 @@ pub struct RawTag {
     id: NonZeroU64,
 }
 
-// === API === //
+// === Tag API === //
+
+// TODO: Use a real implementation for this.
+#[derive(Default)]
+struct Tags {
+    tags: NopHashSet<RawTag>,
+}
 
 impl Entity {
+    fn tag_state(self) -> CompMut<Tags> {
+        self.try_get_mut::<Tags>()
+            .unwrap_or_else(|| Obj::insert(self, Tags::default()).get_mut())
+    }
+
     pub fn tag(self, tag: impl Into<RawTag>) {
-        todo!();
+        self.tag_state().tags.insert(tag.into());
     }
 
     pub fn untag(self, tag: impl Into<RawTag>) {
-        todo!();
+        self.tag_state().tags.remove(&tag.into());
     }
 
     pub fn has_tag(self, tag: impl Into<RawTag>) -> bool {
-        todo!()
+        self.tag_state().tags.contains(&tag.into())
     }
 }
 
-impl<T> Tag<T> {
-    pub fn archetypes(self) {
-        todo!();
+impl OwnedEntity {
+    pub fn tag(self, tag: impl Into<RawTag>) {
+        self.entity().tag(tag)
+    }
+
+    pub fn untag(self, tag: impl Into<RawTag>) {
+        self.entity().untag(tag)
+    }
+
+    pub fn has_tag(self, tag: impl Into<RawTag>) -> bool {
+        self.entity().has_tag(tag)
+    }
+}
+
+// === Dispatch === //
+
+#[derive(Debug, Clone)]
+#[derive_where(Default)]
+pub struct Event<E> {
+    targets: Vec<(Entity, E)>,
+}
+
+impl<E> Event<E> {
+    pub const fn new() -> Self {
+        Self {
+            targets: Vec::new(),
+        }
+    }
+
+    pub fn fire(&mut self, entity: Entity, event: E) {
+        self.targets.push((entity, event));
+    }
+
+    pub fn merge_in(&mut self, event: Event<E>) {
+        self.targets.extend(event.targets);
+    }
+
+    pub fn iter_tagged(
+        &self,
+        tag: impl Into<RawTag>,
+    ) -> impl Iterator<Item = (Entity, &'_ E)> + '_ {
+        let tag = tag.into();
+        self.targets
+            .iter()
+            .map(|(ent, val)| (*ent, val))
+            .filter(move |(ent, _)| ent.has_tag(tag))
+    }
+}
+
+#[derive(Debug, Clone)]
+#[derive_where(Default)]
+pub struct AnonEvent<E> {
+    targets: Vec<E>,
+}
+
+impl<E> AnonEvent<E> {
+    pub const fn new() -> Self {
+        Self {
+            targets: Vec::new(),
+        }
+    }
+
+    pub fn fire(&mut self, event: E) {
+        self.targets.push(event);
+    }
+
+    pub fn merge_in(&mut self, event: AnonEvent<E>) {
+        self.targets.extend(event.targets);
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &'_ E> + '_ {
+        self.targets.iter()
     }
 }
