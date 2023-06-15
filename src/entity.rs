@@ -1,6 +1,6 @@
 use std::{
     any::{type_name, Any, TypeId},
-    borrow::Borrow,
+    borrow,
     cell::{Cell, RefCell},
     fmt, hash, mem,
     num::NonZeroU64,
@@ -20,9 +20,9 @@ use crate::{
     debug::{AsDebugLabel, DebugLabel},
     obj::{Obj, OwnedObj},
     util::{
-        map::{FxHashBuilder, FxHashMap, FxHashSet, NopHashBuilder, NopHashMap},
+        map::{FxHashBuilder, FxHashMap, NopHashBuilder, NopHashMap},
         misc::{leak, random_thread_local_uid, AnyDowncastExt, RawFmt},
-        set::{hash_iter_write, merge_iters},
+        set::{LeakyHeap, SetMap, SetMapRef},
     },
 };
 
@@ -75,151 +75,18 @@ impl PartialEq for ComponentType {
     }
 }
 
-// TODO: Replace with new system
-pub(crate) struct ComponentList {
-    comps: Box<[ComponentType]>,
-    extensions: RefCell<FxHashMap<TypeId, &'static Self>>,
-    de_extensions: RefCell<FxHashMap<TypeId, &'static Self>>,
-}
+type ComponentListDb = SetMap<ComponentType, (), LeakyHeap>;
+type ComponentListRef = SetMapRef<ComponentType, (), LeakyHeap>;
 
-impl hash::Hash for ComponentList {
-    fn hash<H: hash::Hasher>(&self, state: &mut H) {
-        hash_iter_write(state, self.comps.iter());
-    }
-}
+fn component_list_db(token: &'static MainThreadToken) -> OptRefMut<'static, ComponentListDb> {
+    static COMPONENT_LIST_DB: NOptRefCell<SetMap<ComponentType, (), LeakyHeap>> =
+        NOptRefCell::new_empty();
 
-impl Eq for ComponentList {}
-
-impl PartialEq for ComponentList {
-    fn eq(&self, other: &Self) -> bool {
-        self.comps == other.comps
-    }
-}
-
-impl ComponentList {
-    pub fn empty() -> &'static Self {
-        thread_local! {
-            // N.B. we don't need `assert_blessed` here because methods on `ComponentList` are only
-            // called after liveness has been determined.
-            static EMPTY: &'static ComponentList = leak(ComponentList {
-                comps: Box::new([]),
-                extensions: Default::default(),
-                de_extensions: Default::default(),
-            });
-        }
-
-        EMPTY.with(|v| *v)
+    if COMPONENT_LIST_DB.is_empty(token) {
+        COMPONENT_LIST_DB.replace(token, Some(SetMap::default()));
     }
 
-    pub fn run_dtors(&self, target: Entity) {
-        for comp in &*self.comps {
-            (comp.dtor)(target);
-        }
-    }
-
-    pub fn extend(&'static self, with: ComponentType) -> &'static Self {
-        self.extensions
-            .borrow_mut()
-            .entry(with.id)
-            .or_insert_with(|| {
-                if self.comps.contains(&with) {
-                    self
-                } else {
-                    Self::find_extension_in_db(&self.comps, with)
-                }
-            })
-    }
-
-    pub fn de_extend(&'static self, without: ComponentType) -> &'static Self {
-        self.de_extensions
-            .borrow_mut()
-            .entry(without.id)
-            .or_insert_with(|| {
-                if !self.comps.contains(&without) {
-                    self
-                } else {
-                    Self::find_de_extension_in_db(&self.comps, without)
-                }
-            })
-    }
-
-    // === Database === //
-
-    thread_local! {
-        // N.B. we don't need `assert_blessed` here because methods on `ComponentList` are only
-        // called after liveness has been determined.
-        static COMP_LISTS: RefCell<FxHashSet<&'static ComponentList>> = {
-            RefCell::new(FxHashSet::from_iter([
-                ComponentList::empty(),
-            ]))
-        };
-    }
-
-    fn find_extension_in_db(base_set: &[ComponentType], with: ComponentType) -> &'static Self {
-        struct ComponentListSearch<'a>(&'a [ComponentType], ComponentType);
-
-        impl hash::Hash for ComponentListSearch<'_> {
-            fn hash<H: hash::Hasher>(&self, state: &mut H) {
-                hash_iter_write(state, merge_iters(self.0, &[self.1]));
-            }
-        }
-
-        impl hashbrown::Equivalent<&'static ComponentList> for ComponentListSearch<'_> {
-            fn equivalent(&self, key: &&'static ComponentList) -> bool {
-                // See if the key component list without the additional component is equal to the
-                // base list.
-                key.comps.iter().filter(|v| **v == self.1).eq(self.0.iter())
-            }
-        }
-
-        ComponentList::COMP_LISTS.with(|set| {
-            *set.borrow_mut()
-                .get_or_insert_with(&ComponentListSearch(base_set, with), |_| {
-                    leak(Self {
-                        comps: Box::from_iter(merge_iters(base_set.iter().copied(), [with])),
-                        extensions: Default::default(),
-                        de_extensions: Default::default(),
-                    })
-                })
-        })
-    }
-
-    fn find_de_extension_in_db(
-        base_set: &[ComponentType],
-        without: ComponentType,
-    ) -> &'static Self {
-        struct ComponentListSearch<'a>(&'a [ComponentType], ComponentType);
-
-        impl hash::Hash for ComponentListSearch<'_> {
-            fn hash<H: hash::Hasher>(&self, state: &mut H) {
-                hash_iter_write(state, self.0.iter().filter(|v| **v != self.1));
-            }
-        }
-
-        impl hashbrown::Equivalent<&'static ComponentList> for ComponentListSearch<'_> {
-            fn equivalent(&self, key: &&'static ComponentList) -> bool {
-                // See if the base component list without the removed component is equal to the key
-                // list.
-                self.0.iter().filter(|v| **v == self.1).eq(key.comps.iter())
-            }
-        }
-
-        ComponentList::COMP_LISTS.with(|set| {
-            *set.borrow_mut()
-                .get_or_insert_with(&ComponentListSearch(base_set, without), |_| {
-                    leak(Self {
-                        comps: base_set
-                            .iter()
-                            .copied()
-                            .filter(|v| *v != without)
-                            .collect::<Vec<_>>()
-                            .into_boxed_slice(),
-                        extensions: Default::default(),
-                        de_extensions: Default::default(),
-                    })
-                })
-        })
-    }
+    COMPONENT_LIST_DB.borrow_mut(token)
 }
 
 // === Storage === //
@@ -347,7 +214,8 @@ impl<T: 'static> Storage<T> {
 
             // N.B. we always run this, regardless of entry state, to account for preallocated slots,
             // which don't update the entry yet.
-            *slot = slot.extend(ComponentType::of::<T>());
+            *slot = component_list_db(self.token)
+                .lookup_extension(Some(slot), ComponentType::of::<T>());
         }
 
         // Update the storage
@@ -466,7 +334,8 @@ impl<T: 'static> Storage<T> {
             // `Entity::destroy()` resolves, all of the entity's components will have been removed.
             let mut slots = ALIVE.borrow_mut(self.token);
             if let Some(slot) = slots.get_mut(&entity) {
-                *slot = slot.de_extend(ComponentType::of::<T>());
+                *slot = component_list_db(self.token)
+                    .lookup_de_extension(slot, ComponentType::of::<T>());
             }
 
             Some(removed)
@@ -598,7 +467,7 @@ impl<T: 'static> Storage<T> {
 
 pub(crate) static DEBUG_ENTITY_COUNTER: atomic::AtomicU64 = atomic::AtomicU64::new(0);
 
-pub(crate) static ALIVE: NOptRefCell<NopHashMap<Entity, &'static ComponentList>> =
+pub(crate) static ALIVE: NOptRefCell<NopHashMap<Entity, ComponentListRef>> =
     NOptRefCell::new_full(NopHashMap::with_hasher(NopHashBuilder::new()));
 
 #[derive(Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
@@ -612,7 +481,9 @@ impl Entity {
         let me = Self(random_thread_local_uid());
 
         // Register our slot in the alive set
-        ALIVE.borrow_mut(token).insert(me, ComponentList::empty());
+        ALIVE
+            .borrow_mut(token)
+            .insert(me, *component_list_db(token).root());
 
         // Increment the total entity counter
         // N.B. we do this once everything else has succeeded so that calls to `new_unmanaged` on
@@ -715,7 +586,9 @@ impl Entity {
             });
 
         // Run the component destructors
-        slot.run_dtors(self);
+        for key in slot.borrow().keys() {
+            (key.dtor)(self);
+        }
     }
 }
 
@@ -734,7 +607,7 @@ impl fmt::Debug for Entity {
 
                 builder.field(&Id(self.0));
 
-                for v in components.comps.iter() {
+                for v in components.borrow().keys().iter() {
                     if v.id != TypeId::of::<DebugLabel>() {
                         builder.field(&RawFmt(v.name));
                     }
@@ -885,7 +758,7 @@ impl Default for OwnedEntity {
     }
 }
 
-impl Borrow<Entity> for OwnedEntity {
+impl borrow::Borrow<Entity> for OwnedEntity {
     fn borrow(&self) -> &Entity {
         &self.entity
     }

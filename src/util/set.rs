@@ -1,4 +1,5 @@
 use std::{
+    cell::{Ref, RefCell, RefMut},
     hash, iter,
     ops::{Deref, DerefMut},
     slice,
@@ -7,7 +8,10 @@ use std::{
 use derive_where::derive_where;
 use hashbrown::raw::RawTable;
 
-use super::map::{FxHashBuilder, FxHashMap};
+use super::{
+    map::{FxHashBuilder, FxHashMap},
+    misc::leak,
+};
 
 // === Helpers === //
 
@@ -117,13 +121,17 @@ where
 // === LocalHeap === //
 
 // Traits
-pub type LocalHeapPtr<H, V> = <<H as LocalHeap>::For<V> as SpecLocalHeap<V>>::Ptr;
+pub type LocalHeapOf<H, V> = <V as LocalHeapValueFor<H>>::Heap;
 
-pub trait LocalHeap {
-    type For<V>: SpecLocalHeap<V>;
+pub type LocalPtrOf<H, V> = <LocalHeapOf<H, V> as LocalHeap<V>>::Ptr;
+
+pub trait LocalHeapClass {}
+
+pub trait LocalHeapValueFor<H: LocalHeapClass>: Sized {
+    type Heap: LocalHeap<Self>;
 }
 
-pub trait SpecLocalHeap<V> {
+pub trait LocalHeap<V> {
     type Ptr: Clone;
     type Ref<'a>: Deref<Target = V>
     where
@@ -142,49 +150,54 @@ pub trait SpecLocalHeap<V> {
     fn cmp_ptr(&self, a: &Self::Ptr, b: &Self::Ptr) -> bool;
 }
 
-pub trait SpecLocalHeapWithDealloc<V>: SpecLocalHeap<V> {
+pub trait LocalHeapWithDealloc<V>: LocalHeap<V> {
     fn dealloc(&mut self, key: &Self::Ptr) -> V;
 }
 
 // Leaky
-// pub struct LeakyObjHeap;
-//
-// impl LocalHeap for LeakyObjHeap {
-//     type For<V> = LeakyObjHeap;
-// }
-//
-// impl<V: 'static> SpecLocalHeap<V> for LeakyObjHeap {
-//     type Ptr = &'static RefCell<V>;
-//     type Ref<'a> = Ref<'a, V>
-//     where
-//         Self: 'a;
-//
-//     type Mut<'a>  = RefMut<'a, V>
-//     where
-//         Self: 'a;
-//
-//     fn alloc(&mut self, value: V) -> Self::Ptr {
-//         leak(RefCell::new(value))
-//     }
-//
-//     fn get<'a>(&'a self, key: &'a Self::Ptr) -> Self::Ref<'a> {
-//         key.borrow()
-//     }
-//
-//     fn get_mut<'a>(&'a mut self, key: &'a Self::Ptr) -> Self::Mut<'a> {
-//         key.borrow_mut()
-//     }
-//
-//     fn cmp_ptr(&self, a: &Self::Ptr, b: &Self::Ptr) -> bool {
-//         (*a) as *const RefCell<V> == (*b) as *const RefCell<V>
-//     }
-// }
+#[derive(Default)]
+pub struct LeakyHeap;
+
+impl LocalHeapClass for LeakyHeap {}
+
+impl<V: 'static> LocalHeapValueFor<LeakyHeap> for V {
+    type Heap = LeakyHeap;
+}
+
+impl<V: 'static> LocalHeap<V> for LeakyHeap {
+    type Ptr = &'static RefCell<V>;
+    type Ref<'a> = Ref<'a, V>
+    where
+        Self: 'a;
+
+    type Mut<'a>  = RefMut<'a, V>
+    where
+        Self: 'a;
+
+    fn alloc(&mut self, value: V) -> Self::Ptr {
+        leak(RefCell::new(value))
+    }
+
+    fn get<'a>(&'a self, key: &'a Self::Ptr) -> Self::Ref<'a> {
+        key.borrow()
+    }
+
+    fn get_mut<'a>(&'a mut self, key: &'a Self::Ptr) -> Self::Mut<'a> {
+        key.borrow_mut()
+    }
+
+    fn cmp_ptr(&self, a: &Self::Ptr, b: &Self::Ptr) -> bool {
+        (*a) as *const RefCell<V> == (*b) as *const RefCell<V>
+    }
+}
 
 // FreeList
 pub struct FreeListHeap;
 
-impl LocalHeap for FreeListHeap {
-    type For<V> = SpecFreeListHeap<V>;
+impl LocalHeapClass for FreeListHeap {}
+
+impl<V> LocalHeapValueFor<FreeListHeap> for V {
+    type Heap = SpecFreeListHeap<V>;
 }
 
 #[derive_where(Default)]
@@ -193,7 +206,7 @@ pub struct SpecFreeListHeap<V> {
     free: Vec<usize>,
 }
 
-impl<V> SpecLocalHeap<V> for SpecFreeListHeap<V> {
+impl<V> LocalHeap<V> for SpecFreeListHeap<V> {
     type Ptr = usize;
 
     type Ref<'a> = &'a V
@@ -230,41 +243,47 @@ impl<V> SpecLocalHeap<V> for SpecFreeListHeap<V> {
 
 // === SetMap === //
 
-pub type SetMapRef<K, V, H> = LocalHeapPtr<H, SetMapEntry<K, V, H>>;
+pub type SetMapRef<K, V, H> = LocalPtrOf<H, SetMapEntry<K, V, H>>;
 
-pub struct SetMap<K, V, H: LocalHeap> {
+pub struct SetMap<K, V, H: LocalHeapClass>
+where
+    SetMapEntry<K, V, H>: LocalHeapValueFor<H>,
+{
     root: SetMapRef<K, V, H>,
     map: RawTable<(u64, SetMapRef<K, V, H>)>,
     hasher: FxHashBuilder,
-    heap: H::For<SetMapEntry<K, V, H>>,
+    heap: LocalHeapOf<H, SetMapEntry<K, V, H>>,
 }
 
-pub struct SetMapEntry<K, V, H: LocalHeap> {
+pub struct SetMapEntry<K, V, H: LocalHeapClass>
+where
+    SetMapEntry<K, V, H>: LocalHeapValueFor<H>,
+{
     keys: Box<[K]>,
     extensions: FxHashMap<K, SetMapRef<K, V, H>>,
     de_extensions: FxHashMap<K, SetMapRef<K, V, H>>,
     value: V,
 }
 
-impl<K, V, H> Default for SetMap<K, V, H>
+impl<K, V, H: LocalHeapClass> Default for SetMap<K, V, H>
 where
     K: 'static + Ord + hash::Hash + Copy,
     V: Default,
-    H: LocalHeap,
-    H::For<SetMapEntry<K, V, H>>: Default,
+    SetMapEntry<K, V, H>: LocalHeapValueFor<H>,
+    LocalHeapOf<H, SetMapEntry<K, V, H>>: Default,
 {
     fn default() -> Self {
         Self::new(Default::default())
     }
 }
 
-impl<K, V, H> SetMap<K, V, H>
+impl<K, V, H: LocalHeapClass> SetMap<K, V, H>
 where
     K: 'static + Ord + hash::Hash + Copy,
     V: Default,
-    H: LocalHeap,
+    SetMapEntry<K, V, H>: LocalHeapValueFor<H>,
 {
-    pub fn new(mut heap: H::For<SetMapEntry<K, V, H>>) -> Self {
+    pub fn new(mut heap: LocalHeapOf<H, SetMapEntry<K, V, H>>) -> Self {
         let mut hasher = FxHashBuilder::new();
         let root = heap.alloc(SetMapEntry {
             keys: Box::from_iter([]),
@@ -399,7 +418,7 @@ where
 
     pub fn remove(&mut self, removed_ptr: &SetMapRef<K, V, H>)
     where
-        H::For<SetMapEntry<K, V, H>>: SpecLocalHeapWithDealloc<SetMapEntry<K, V, H>>,
+        LocalHeapOf<H, SetMapEntry<K, V, H>>: LocalHeapWithDealloc<SetMapEntry<K, V, H>>,
     {
         let removed_data = self.heap.dealloc(removed_ptr);
 
@@ -424,9 +443,17 @@ where
             self.heap.cmp_ptr(candidate_ptr, removed_ptr)
         });
     }
+
+    pub fn heap(&self) -> &LocalHeapOf<H, SetMapEntry<K, V, H>> {
+        &self.heap
+    }
+
+    pub fn heap_mut(&mut self) -> &mut LocalHeapOf<H, SetMapEntry<K, V, H>> {
+        &mut self.heap
+    }
 }
 
-pub trait GoofyIterCtorHack<'a, K: 'static> {
+trait GoofyIterCtorHack<'a, K: 'static> {
     type Iter: IntoIterator<Item = K> + Clone;
 
     fn make_iter(&self, base: &'a [K], add: K) -> Self::Iter;
@@ -441,5 +468,26 @@ where
 
     fn make_iter(&self, base: &'a [K], add: K) -> Self::Iter {
         (self)(base, add)
+    }
+}
+
+impl<K, V, H: LocalHeapClass> SetMapEntry<K, V, H>
+where
+    Self: LocalHeapValueFor<H>,
+{
+    pub fn keys(&self) -> &[K] {
+        &self.keys
+    }
+
+    pub fn value(&self) -> &V {
+        &self.value
+    }
+
+    pub fn value_mut(&mut self) -> &mut V {
+        &mut self.value
+    }
+
+    pub fn pair_mut(&mut self) -> (&[K], &mut V) {
+        (&self.keys, &mut self.value)
     }
 }

@@ -205,11 +205,13 @@ impl<'a, T: 'static> WritableSlot<'a, T> {
         let old_state = self.heap_value.value.replace(token, value);
 
         match new_state as i8 - old_state.is_some() as i8 {
-            -1 => {
-                DEBUG_SLOT_COUNTER.fetch_sub(1, Relaxed);
-            }
             1 => {
                 DEBUG_SLOT_COUNTER.fetch_add(1, Relaxed);
+                println!("spawned");
+            }
+            -1 => {
+                DEBUG_SLOT_COUNTER.fetch_sub(1, Relaxed);
+                println!("despawned");
             }
             _ => {}
         };
@@ -406,16 +408,11 @@ impl<T> Slot<T> {
     }
 
     pub fn take(&self, token: &impl BorrowMutToken<T>) -> Option<T> {
-        let taken = unsafe {
+        unsafe {
             // Safety: the slot cannot expire until this function returns because we never call to
             // external user code.
             self.writable_slot(token).take(token)
-        };
-
-        if taken.is_some() {
-            DEBUG_SLOT_COUNTER.fetch_sub(1, Relaxed);
         }
-        taken
     }
 
     pub fn is_empty(&self, token: &impl TokenFor<T>) -> bool {
