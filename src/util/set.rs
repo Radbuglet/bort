@@ -1,6 +1,7 @@
 use std::{
     cell::{Ref, RefCell, RefMut},
     hash, iter,
+    marker::PhantomData,
     ops::{Deref, DerefMut},
     slice,
 };
@@ -203,11 +204,11 @@ impl<V> LocalHeapValueFor<FreeListHeap> for V {
 #[derive_where(Default)]
 pub struct SpecFreeListHeap<V> {
     values: Vec<Option<V>>,
-    free: Vec<usize>,
+    free: Vec<SpecFreeListPtr<V>>,
 }
 
 impl<V> LocalHeap<V> for SpecFreeListHeap<V> {
-    type Ptr = usize;
+    type Ptr = SpecFreeListPtr<V>;
 
     type Ref<'a> = &'a V
     where
@@ -219,26 +220,35 @@ impl<V> LocalHeap<V> for SpecFreeListHeap<V> {
 
     fn alloc(&mut self, value: V) -> Self::Ptr {
         if let Some(free) = self.free.pop() {
-            self.values[free] = Some(value);
+            self.values[free.index] = Some(value);
             free
         } else {
-            let index = self.values.len();
+            let index = SpecFreeListPtr {
+                _ty: PhantomData,
+                index: self.values.len(),
+            };
             self.values.push(Some(value));
             index
         }
     }
 
     fn get<'a>(&'a self, key: &'a Self::Ptr) -> Self::Ref<'a> {
-        self.values[*key].as_ref().unwrap()
+        self.values[key.index].as_ref().unwrap()
     }
 
     fn get_mut<'a>(&'a mut self, key: &'a Self::Ptr) -> Self::Mut<'a> {
-        self.values[*key].as_mut().unwrap()
+        self.values[key.index].as_mut().unwrap()
     }
 
     fn cmp_ptr(&self, a: &Self::Ptr, b: &Self::Ptr) -> bool {
         a == b
     }
+}
+
+#[derive_where(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub struct SpecFreeListPtr<V> {
+    _ty: PhantomData<fn() -> V>,
+    index: usize,
 }
 
 // === SetMap === //
