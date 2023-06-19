@@ -170,10 +170,10 @@ impl<'a, T: ?Sized> SpecArenaRefMut<'a> for &'a mut T {
     type Mapped<U: ?Sized + 'a> = &'a mut U;
 
     fn filter_map<O: ?Sized>(
-        orig: Self,
+        _orig: Self,
         _f: impl FnOnce(&mut Self::Value) -> Option<&mut O>,
     ) -> Result<Self::Mapped<O>, Self> {
-        unimplemented!();
+        todo!();
     }
 
     fn map<O: ?Sized>(orig: Self, f: impl FnOnce(&mut Self::Value) -> &mut O) -> Self::Mapped<O> {
