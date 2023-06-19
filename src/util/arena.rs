@@ -248,6 +248,10 @@ impl ArenaKind for FreeListArena {}
 
 impl FreeableArenaKind for FreeListArena {}
 
+impl<T> StorableIn<FreeListArena> for T {
+    type Spec = SpecFreeListArena<T>;
+}
+
 #[derive(Debug, Clone)]
 #[derive_where(Default)]
 pub struct SpecFreeListArena<T> {
@@ -322,6 +326,10 @@ pub struct LeakyArena;
 
 impl ArenaKind for LeakyArena {}
 
+impl<T: 'static> StorableIn<LeakyArena> for T {
+    type Spec = SpecLeakyArena<T>;
+}
+
 #[derive_where(Debug, Clone, Default)]
 pub struct SpecLeakyArena<T: 'static> {
     _ty: PhantomData<fn() -> T>,
@@ -385,4 +393,14 @@ impl<T> PartialEq for SpecLeakyPtr<T> {
 
 impl<T> SpecArenaPtr for SpecLeakyPtr<T> {
     type Value = T;
+}
+
+impl<T> SpecLeakyPtr<T> {
+    pub fn direct_borrow(&self) -> Ref<'static, T> {
+        self.value.borrow()
+    }
+
+    pub fn direct_borrow_mut(&self) -> RefMut<'static, T> {
+        self.value.borrow_mut()
+    }
 }

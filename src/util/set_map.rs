@@ -1,17 +1,11 @@
-use std::{
-    cell::{Ref, RefCell, RefMut},
-    hash, iter,
-    marker::PhantomData,
-    ops::{Deref, DerefMut},
-    slice,
-};
+use std::{hash, iter, slice};
 
 use derive_where::derive_where;
 use hashbrown::raw::RawTable;
 
 use super::{
+    arena::{Arena, ArenaKind, ArenaPtr, FreeableArenaKind, SpecArena, StorableIn},
     hash_map::{FxHashBuilder, FxHashMap},
-    misc::leak,
 };
 
 // === Helpers === //
@@ -119,181 +113,48 @@ where
     }
 }
 
-// === LocalHeap === //
-
-// Traits
-pub type LocalHeapOf<H, V> = <V as LocalHeapValueFor<H>>::Heap;
-
-pub type LocalPtrOf<H, V> = <LocalHeapOf<H, V> as LocalHeap<V>>::Ptr;
-
-pub trait LocalHeapClass {}
-
-pub trait LocalHeapValueFor<H: LocalHeapClass>: Sized {
-    type Heap: LocalHeap<Self>;
-}
-
-pub trait LocalHeap<V> {
-    type Ptr: Clone;
-    type Ref<'a>: Deref<Target = V>
-    where
-        Self: 'a;
-
-    type Mut<'a>: DerefMut<Target = V>
-    where
-        Self: 'a;
-
-    fn alloc(&mut self, value: V) -> Self::Ptr;
-
-    fn get<'a>(&'a self, key: &'a Self::Ptr) -> Self::Ref<'a>;
-
-    fn get_mut<'a>(&'a mut self, key: &'a Self::Ptr) -> Self::Mut<'a>;
-
-    fn cmp_ptr(&self, a: &Self::Ptr, b: &Self::Ptr) -> bool;
-}
-
-pub trait LocalHeapWithDealloc<V>: LocalHeap<V> {
-    fn dealloc(&mut self, key: &Self::Ptr) -> V;
-}
-
-// Leaky
-#[derive(Default)]
-pub struct LeakyHeap;
-
-impl LocalHeapClass for LeakyHeap {}
-
-impl<V: 'static> LocalHeapValueFor<LeakyHeap> for V {
-    type Heap = LeakyHeap;
-}
-
-impl<V: 'static> LocalHeap<V> for LeakyHeap {
-    type Ptr = &'static RefCell<V>;
-    type Ref<'a> = Ref<'a, V>
-    where
-        Self: 'a;
-
-    type Mut<'a>  = RefMut<'a, V>
-    where
-        Self: 'a;
-
-    fn alloc(&mut self, value: V) -> Self::Ptr {
-        leak(RefCell::new(value))
-    }
-
-    fn get<'a>(&'a self, key: &'a Self::Ptr) -> Self::Ref<'a> {
-        key.borrow()
-    }
-
-    fn get_mut<'a>(&'a mut self, key: &'a Self::Ptr) -> Self::Mut<'a> {
-        key.borrow_mut()
-    }
-
-    fn cmp_ptr(&self, a: &Self::Ptr, b: &Self::Ptr) -> bool {
-        (*a) as *const RefCell<V> == (*b) as *const RefCell<V>
-    }
-}
-
-// FreeList
-pub struct FreeListHeap;
-
-impl LocalHeapClass for FreeListHeap {}
-
-impl<V> LocalHeapValueFor<FreeListHeap> for V {
-    type Heap = SpecFreeListHeap<V>;
-}
-
-#[derive_where(Default)]
-pub struct SpecFreeListHeap<V> {
-    values: Vec<Option<V>>,
-    free: Vec<SpecFreeListPtr<V>>,
-}
-
-impl<V> LocalHeap<V> for SpecFreeListHeap<V> {
-    type Ptr = SpecFreeListPtr<V>;
-
-    type Ref<'a> = &'a V
-    where
-        Self: 'a;
-
-    type Mut<'a> = &'a mut V
-    where
-        Self: 'a;
-
-    fn alloc(&mut self, value: V) -> Self::Ptr {
-        if let Some(free) = self.free.pop() {
-            self.values[free.index] = Some(value);
-            free
-        } else {
-            let index = SpecFreeListPtr {
-                _ty: PhantomData,
-                index: self.values.len(),
-            };
-            self.values.push(Some(value));
-            index
-        }
-    }
-
-    fn get<'a>(&'a self, key: &'a Self::Ptr) -> Self::Ref<'a> {
-        self.values[key.index].as_ref().unwrap()
-    }
-
-    fn get_mut<'a>(&'a mut self, key: &'a Self::Ptr) -> Self::Mut<'a> {
-        self.values[key.index].as_mut().unwrap()
-    }
-
-    fn cmp_ptr(&self, a: &Self::Ptr, b: &Self::Ptr) -> bool {
-        a == b
-    }
-}
-
-#[derive_where(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
-pub struct SpecFreeListPtr<V> {
-    _ty: PhantomData<fn() -> V>,
-    index: usize,
-}
-
 // === SetMap === //
 
-pub type SetMapRef<K, V, H> = LocalPtrOf<H, SetMapEntry<K, V, H>>;
+pub type SetMapPtr<K, V, A> = ArenaPtr<SetMapEntry<K, V, A>, A>;
 
-pub struct SetMap<K, V, H: LocalHeapClass>
+pub struct SetMap<K, V, A: ArenaKind>
 where
-    SetMapEntry<K, V, H>: LocalHeapValueFor<H>,
+    SetMapEntry<K, V, A>: StorableIn<A>,
 {
-    root: SetMapRef<K, V, H>,
-    map: RawTable<(u64, SetMapRef<K, V, H>)>,
+    root: SetMapPtr<K, V, A>,
+    map: RawTable<(u64, SetMapPtr<K, V, A>)>,
     hasher: FxHashBuilder,
-    heap: LocalHeapOf<H, SetMapEntry<K, V, H>>,
+    heap: Arena<SetMapEntry<K, V, A>, A>,
 }
 
-pub struct SetMapEntry<K, V, H: LocalHeapClass>
+pub struct SetMapEntry<K, V, A: ArenaKind>
 where
-    SetMapEntry<K, V, H>: LocalHeapValueFor<H>,
+    SetMapEntry<K, V, A>: StorableIn<A>,
 {
     keys: Box<[K]>,
-    extensions: FxHashMap<K, SetMapRef<K, V, H>>,
-    de_extensions: FxHashMap<K, SetMapRef<K, V, H>>,
+    extensions: FxHashMap<K, SetMapPtr<K, V, A>>,
+    de_extensions: FxHashMap<K, SetMapPtr<K, V, A>>,
     value: V,
 }
 
-impl<K, V, H: LocalHeapClass> Default for SetMap<K, V, H>
+impl<K, V, A: ArenaKind> Default for SetMap<K, V, A>
 where
+    SetMapEntry<K, V, A>: StorableIn<A>,
     K: 'static + Ord + hash::Hash + Copy,
     V: Default,
-    SetMapEntry<K, V, H>: LocalHeapValueFor<H>,
-    LocalHeapOf<H, SetMapEntry<K, V, H>>: Default,
 {
     fn default() -> Self {
         Self::new(Default::default())
     }
 }
 
-impl<K, V, H: LocalHeapClass> SetMap<K, V, H>
+impl<K, V, A: ArenaKind> SetMap<K, V, A>
 where
+    SetMapEntry<K, V, A>: StorableIn<A>,
     K: 'static + Ord + hash::Hash + Copy,
     V: Default,
-    SetMapEntry<K, V, H>: LocalHeapValueFor<H>,
 {
-    pub fn new(mut heap: LocalHeapOf<H, SetMapEntry<K, V, H>>) -> Self {
+    pub fn new(mut heap: Arena<SetMapEntry<K, V, A>, A>) -> Self {
         let mut hasher = FxHashBuilder::new();
         let root = heap.alloc(SetMapEntry {
             keys: Box::from_iter([]),
@@ -314,19 +175,19 @@ where
         }
     }
 
-    pub fn root(&self) -> &SetMapRef<K, V, H> {
+    pub fn root(&self) -> &SetMapPtr<K, V, A> {
         &self.root
     }
 
     fn lookup_extension_common(
         &mut self,
-        base_ptr: Option<&SetMapRef<K, V, H>>,
+        base_ptr: Option<&SetMapPtr<K, V, A>>,
         key: K,
-        positive_getter_ref: impl Fn(&SetMapEntry<K, V, H>) -> &FxHashMap<K, SetMapRef<K, V, H>>,
-        positive_getter_mut: impl Fn(&mut SetMapEntry<K, V, H>) -> &mut FxHashMap<K, SetMapRef<K, V, H>>,
-        negative_getter_mut: impl Fn(&mut SetMapEntry<K, V, H>) -> &mut FxHashMap<K, SetMapRef<K, V, H>>,
+        positive_getter_ref: impl Fn(&SetMapEntry<K, V, A>) -> &FxHashMap<K, SetMapPtr<K, V, A>>,
+        positive_getter_mut: impl Fn(&mut SetMapEntry<K, V, A>) -> &mut FxHashMap<K, SetMapPtr<K, V, A>>,
+        negative_getter_mut: impl Fn(&mut SetMapEntry<K, V, A>) -> &mut FxHashMap<K, SetMapPtr<K, V, A>>,
         iter_ctor: impl for<'a> GoofyIterCtorHack<'a, K>,
-    ) -> SetMapRef<K, V, H> {
+    ) -> SetMapPtr<K, V, A> {
         // Attempt to get the extension from the base element's extension edges.
         let base_ptr = base_ptr.unwrap_or(&self.root);
         let base_data = self.heap.get(base_ptr);
@@ -391,9 +252,9 @@ where
 
     pub fn lookup_extension(
         &mut self,
-        base: Option<&SetMapRef<K, V, H>>,
+        base: Option<&SetMapPtr<K, V, A>>,
         key: K,
-    ) -> SetMapRef<K, V, H> {
+    ) -> SetMapPtr<K, V, A> {
         fn iter_ctor<K: Copy>(
             a: &[K],
             b: K,
@@ -404,14 +265,14 @@ where
         self.lookup_extension_common(
             base,
             key,
-            |a: &SetMapEntry<K, V, H>| &a.extensions,
-            |a: &mut SetMapEntry<K, V, H>| &mut a.extensions,
-            |a: &mut SetMapEntry<K, V, H>| &mut a.de_extensions,
+            |a: &SetMapEntry<K, V, A>| &a.extensions,
+            |a: &mut SetMapEntry<K, V, A>| &mut a.extensions,
+            |a: &mut SetMapEntry<K, V, A>| &mut a.de_extensions,
             iter_ctor,
         )
     }
 
-    pub fn lookup_de_extension(&mut self, base: &SetMapRef<K, V, H>, key: K) -> SetMapRef<K, V, H> {
+    pub fn lookup_de_extension(&mut self, base: &SetMapPtr<K, V, A>, key: K) -> SetMapPtr<K, V, A> {
         fn iter_ctor<K: Copy>(a: &[K], b: K) -> IterFilter<iter::Copied<slice::Iter<'_, K>>> {
             IterFilter(a.iter().copied(), b)
         }
@@ -419,21 +280,22 @@ where
         self.lookup_extension_common(
             Some(base),
             key,
-            |a: &SetMapEntry<K, V, H>| &a.de_extensions,
-            |a: &mut SetMapEntry<K, V, H>| &mut a.extensions,
-            |a: &mut SetMapEntry<K, V, H>| &mut a.extensions,
+            |a: &SetMapEntry<K, V, A>| &a.de_extensions,
+            |a: &mut SetMapEntry<K, V, A>| &mut a.extensions,
+            |a: &mut SetMapEntry<K, V, A>| &mut a.extensions,
             iter_ctor,
         )
     }
 
-    pub fn remove(&mut self, removed_ptr: &SetMapRef<K, V, H>)
+    pub fn remove(&mut self, removed_ptr: SetMapPtr<K, V, A>)
     where
-        LocalHeapOf<H, SetMapEntry<K, V, H>>: LocalHeapWithDealloc<SetMapEntry<K, V, H>>,
+        A: FreeableArenaKind,
     {
+        let removed_ptr_2 = removed_ptr.clone();
         let removed_data = self.heap.dealloc(removed_ptr);
 
         for (key, referencer) in &removed_data.de_extensions {
-            if self.heap.cmp_ptr(removed_ptr, referencer) {
+            if &removed_ptr_2 == referencer {
                 continue;
             }
 
@@ -441,7 +303,7 @@ where
         }
 
         for (key, referencer) in &removed_data.extensions {
-            if self.heap.cmp_ptr(removed_ptr, referencer) {
+            if &removed_ptr_2 == referencer {
                 continue;
             }
 
@@ -450,15 +312,15 @@ where
 
         let removed_hash = hash_iter(&mut self.hasher, removed_data.keys.iter());
         self.map.remove_entry(removed_hash, |(_, candidate_ptr)| {
-            self.heap.cmp_ptr(candidate_ptr, removed_ptr)
+            &removed_ptr_2 == candidate_ptr
         });
     }
 
-    pub fn heap(&self) -> &LocalHeapOf<H, SetMapEntry<K, V, H>> {
+    pub fn arena(&self) -> &Arena<SetMapEntry<K, V, A>, A> {
         &self.heap
     }
 
-    pub fn heap_mut(&mut self) -> &mut LocalHeapOf<H, SetMapEntry<K, V, H>> {
+    pub fn arena_mut(&mut self) -> &mut Arena<SetMapEntry<K, V, A>, A> {
         &mut self.heap
     }
 }
@@ -481,9 +343,9 @@ where
     }
 }
 
-impl<K, V, H: LocalHeapClass> SetMapEntry<K, V, H>
+impl<K, V, A: ArenaKind> SetMapEntry<K, V, A>
 where
-    Self: LocalHeapValueFor<H>,
+    Self: StorableIn<A>,
 {
     pub fn keys(&self) -> &[K] {
         &self.keys

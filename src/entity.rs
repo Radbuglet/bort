@@ -20,9 +20,10 @@ use crate::{
     debug::{AsDebugLabel, DebugLabel},
     obj::{Obj, OwnedObj},
     util::{
+        arena::LeakyArena,
         hash_map::{FxHashBuilder, FxHashMap, NopHashBuilder, NopHashMap},
         misc::{leak, random_thread_local_uid, AnyDowncastExt, RawFmt},
-        set::{LeakyHeap, SetMap, SetMapRef},
+        set_map::{SetMap, SetMapPtr},
     },
 };
 
@@ -75,11 +76,11 @@ impl PartialEq for ComponentType {
     }
 }
 
-type ComponentListDb = SetMap<ComponentType, (), LeakyHeap>;
-type ComponentListRef = SetMapRef<ComponentType, (), LeakyHeap>;
+type ComponentListDb = SetMap<ComponentType, (), LeakyArena>;
+type ComponentListRef = SetMapPtr<ComponentType, (), LeakyArena>;
 
 fn component_list_db(token: &'static MainThreadToken) -> OptRefMut<'static, ComponentListDb> {
-    static COMPONENT_LIST_DB: NOptRefCell<SetMap<ComponentType, (), LeakyHeap>> =
+    static COMPONENT_LIST_DB: NOptRefCell<SetMap<ComponentType, (), LeakyArena>> =
         NOptRefCell::new_empty();
 
     if COMPONENT_LIST_DB.is_empty(token) {
@@ -586,7 +587,7 @@ impl Entity {
             });
 
         // Run the component destructors
-        for key in slot.borrow().keys() {
+        for key in slot.direct_borrow().keys() {
             (key.dtor)(self);
         }
     }
@@ -607,7 +608,7 @@ impl fmt::Debug for Entity {
 
                 builder.field(&Id(self.0));
 
-                for v in components.borrow().keys().iter() {
+                for v in components.direct_borrow().keys().iter() {
                     if v.id != TypeId::of::<DebugLabel>() {
                         builder.field(&RawFmt(v.name));
                     }
