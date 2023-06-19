@@ -12,7 +12,7 @@ use derive_where::derive_where;
 use crate::{
     entity::Entity,
     util::{
-        map::{FxHashBuilder, FxHashMap},
+        hash_map::{FxHashBuilder, FxHashMap},
         misc::leak,
     },
 };

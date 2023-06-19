@@ -10,7 +10,7 @@ use derive_where::derive_where;
 use hashbrown::raw::RawTable;
 
 use super::{
-    map::{FxHashBuilder, FxHashMap},
+    hash_map::{FxHashBuilder, FxHashMap},
     misc::leak,
 };
 

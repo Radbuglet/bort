@@ -20,7 +20,7 @@ use crate::{
     debug::{AsDebugLabel, DebugLabel},
     obj::{Obj, OwnedObj},
     util::{
-        map::{FxHashBuilder, FxHashMap, NopHashBuilder, NopHashMap},
+        hash_map::{FxHashBuilder, FxHashMap, NopHashBuilder, NopHashMap},
         misc::{leak, random_thread_local_uid, AnyDowncastExt, RawFmt},
         set::{LeakyHeap, SetMap, SetMapRef},
     },

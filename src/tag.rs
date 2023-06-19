@@ -2,7 +2,7 @@ use std::{marker::PhantomData, num::NonZeroU64};
 
 use derive_where::derive_where;
 
-use crate::{entity::Entity, util::map::NopHashSet, CompMut, Obj, OwnedEntity};
+use crate::{entity::Entity, util::hash_map::NopHashSet, CompMut, Obj, OwnedEntity};
 
 // === Tag === //
 
