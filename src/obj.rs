@@ -27,7 +27,7 @@ impl<T: 'static> Obj<T> {
     }
 
     pub fn insert(entity: Entity, value: T) -> Self {
-        entity.insert_and_return_slot(value).0
+        entity.insert_with_obj(value).0
     }
 
     pub fn wrap(entity: Entity) -> Self {
@@ -50,7 +50,9 @@ impl<T: 'static> Obj<T> {
     }
 
     pub fn is_alive(self) -> bool {
-        self.is_alive_internal(MainThreadToken::acquire())
+        self.is_alive_internal(MainThreadToken::acquire_fmt(
+            "determine whether an Obj was alive",
+        ))
     }
 
     pub fn with_debug_label<L: AsDebugLabel>(self, label: L) -> Self {
@@ -63,7 +65,7 @@ impl<T: 'static> Obj<T> {
     }
 
     pub fn try_get(self) -> Option<CompRef<T>> {
-        let token = MainThreadToken::acquire();
+        let token = MainThreadToken::acquire_fmt("fetch entity component data");
 
         self.is_alive_internal(token)
             .then(|| self.value.borrow_or_none(token))
@@ -71,7 +73,7 @@ impl<T: 'static> Obj<T> {
     }
 
     pub fn try_get_mut(self) -> Option<CompMut<T>> {
-        let token = MainThreadToken::acquire();
+        let token = MainThreadToken::acquire_fmt("fetch entity component data");
 
         self.is_alive_internal(token)
             .then(|| self.value.borrow_mut_or_none(token))
@@ -79,7 +81,7 @@ impl<T: 'static> Obj<T> {
     }
 
     pub fn get(self) -> CompRef<T> {
-        let token = MainThreadToken::acquire();
+        let token = MainThreadToken::acquire_fmt("fetch entity component data");
         assert!(
             self.is_alive_internal(token),
             "attempted to get the value of a dead `Obj<{}>` corresponding to {:?}",
@@ -90,7 +92,7 @@ impl<T: 'static> Obj<T> {
     }
 
     pub fn get_mut(self) -> CompMut<T> {
-        let token = MainThreadToken::acquire();
+        let token = MainThreadToken::acquire_fmt("fetch entity component data");
         assert!(
             self.is_alive_internal(token),
             "attempted to get the value of a dead `Obj<{}>` corresponding to {:?}",

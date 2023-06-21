@@ -6,17 +6,18 @@ use std::{
 
 use crate::{
     core::{
+        cell::OptRefMut,
         heap::{Heap, Slot},
         token::MainThreadToken,
         token_cell::NOptRefCell,
     },
+    entity::Entity,
     util::{
         arena::LeakyArena,
         block::{BlockAllocator, BlockReservation},
         hash_map::{FxHashMap, NopHashMap},
         set_map::{SetMap, SetMapPtr},
     },
-    OptRefMut,
 };
 
 // === DB: Root === //
@@ -29,7 +30,7 @@ pub(crate) fn db(token: &'static MainThreadToken) -> OptRefMut<'static, DbRoot> 
             token,
             Some(DbRoot {
                 entity_gen: NonZeroU64::new(1).unwrap(),
-                entities: NopHashMap::default(),
+                alive_entities: NopHashMap::default(),
                 comp_list_map: SetMap::default(),
                 storages: FxHashMap::default(),
             }),
@@ -41,28 +42,33 @@ pub(crate) fn db(token: &'static MainThreadToken) -> OptRefMut<'static, DbRoot> 
 
 pub(crate) struct DbRoot {
     pub(crate) entity_gen: NonZeroU64,
-    pub(crate) entities: NopHashMap<Entity, DbEntity>,
+    pub(crate) alive_entities: NopHashMap<Entity, DbEntity>,
     pub(crate) comp_list_map: DbComponentListMap,
     pub(crate) storages: FxHashMap<TypeId, &'static (dyn Any + Sync)>,
 }
 
+#[derive(Copy, Clone)]
 pub(crate) struct DbEntity {
     pub(crate) comp_list: DbComponentListRef,
 }
 
+pub(crate) type DbStorage<T> = NOptRefCell<DbStorageInner<T>>;
+
+#[derive(Debug)]
 pub(crate) struct DbStorageInner<T: 'static> {
     pub(crate) misc_block_alloc: BlockAllocator<Heap<T>>,
-    pub(crate) component_map: NopHashMap<Entity, DbEntityMapping<T>>,
+    pub(crate) mappings: NopHashMap<Entity, DbEntityMapping<T>>,
 }
 
+#[derive(Debug)]
 pub(crate) struct DbEntityMapping<T: 'static> {
     pub(crate) target: Slot<T>,
     pub(crate) heap: DbEntityMappingHeap<T>,
 }
 
+#[derive(Debug)]
 pub(crate) enum DbEntityMappingHeap<T: 'static> {
     Misc(BlockReservation<Heap<T>>),
-    Arch,
 }
 
 // === DB: ComponentList === //
@@ -77,7 +83,7 @@ pub(crate) struct DbComponentType {
 impl DbComponentType {
     pub(crate) fn of<T: 'static>() -> Self {
         fn dtor<T: 'static>(entity: Entity) {
-            todo!();
+            entity.remove::<T>();
         }
 
         Self {
@@ -116,8 +122,3 @@ impl PartialEq for DbComponentType {
 
 pub(crate) type DbComponentListMap = SetMap<DbComponentType, (), LeakyArena>;
 pub(crate) type DbComponentListRef = SetMapPtr<DbComponentType, (), LeakyArena>;
-
-// === API: Entity === //
-
-#[derive(Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
-pub struct Entity(NonZeroU64);

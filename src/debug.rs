@@ -5,16 +5,19 @@ use crate::{
         heap::{DEBUG_HEAP_COUNTER, DEBUG_SLOT_COUNTER},
         token::MainThreadToken,
     },
-    entity::{Entity, ALIVE, DEBUG_ENTITY_COUNTER},
+    database::db,
+    entity::{Entity, DEBUG_ENTITY_COUNTER},
 };
 
 pub fn alive_entity_count() -> usize {
-    ALIVE.borrow_mut(MainThreadToken::acquire()).len()
+    db(MainThreadToken::acquire_fmt("fetch entity diagnostics"))
+        .alive_entities
+        .len()
 }
 
 pub fn alive_entities() -> Vec<Entity> {
-    ALIVE
-        .borrow(MainThreadToken::acquire())
+    db(MainThreadToken::acquire_fmt("fetch entity diagnostics"))
+        .alive_entities
         .keys()
         .copied()
         .collect()

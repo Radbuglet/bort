@@ -69,9 +69,7 @@ pub struct Heap<T: 'static> {
 }
 
 impl<T> Heap<T> {
-    pub fn new(len: usize) -> Self {
-        let token = MainThreadToken::acquire();
-
+    pub fn new(token: &MainThreadToken, len: usize) -> Self {
         // Allocate slot data
         let values = ManuallyDrop::new(Box::from_iter((0..len).map(|_| HeapValue {
             owner: NMainCell::new(None),
@@ -129,18 +127,18 @@ impl<T> Heap<T> {
         self.values.len()
     }
 
-    pub fn slot(&self, i: usize) -> WritableSlot<'_, T> {
-        WritableSlot {
+    pub fn slot(&self, i: usize) -> DirectSlot<'_, T> {
+        DirectSlot {
             slot: self.slots[i],
             heap_value: &self.values[i],
         }
     }
 
-    pub fn slots(&self) -> (impl ExactSizeIterator<Item = WritableSlot<'_, T>> + Clone) {
+    pub fn slots(&self) -> (impl ExactSizeIterator<Item = DirectSlot<'_, T>> + Clone) {
         self.slots
             .iter()
             .zip(self.values.iter())
-            .map(|(slot, heap_value)| WritableSlot {
+            .map(|(slot, heap_value)| DirectSlot {
                 slot: *slot,
                 heap_value,
             })
@@ -155,7 +153,7 @@ impl<T> Heap<T> {
 
 impl<T> Drop for Heap<T> {
     fn drop(&mut self) {
-        let token = MainThreadToken::acquire();
+        let token = MainThreadToken::acquire_fmt("destroy a heap");
 
         // We decrement the heap counter here so unfree-able heaps aren't forever included in the
         // count.
@@ -181,12 +179,12 @@ impl<T> Drop for Heap<T> {
 // === Slot === //
 
 #[derive_where(Copy, Clone)]
-pub struct WritableSlot<'a, T: 'static> {
+pub struct DirectSlot<'a, T: 'static> {
     slot: Slot<T>,
     heap_value: &'a HeapValue<T>,
 }
 
-impl<'a, T: 'static> WritableSlot<'a, T> {
+impl<'a, T: 'static> DirectSlot<'a, T> {
     unsafe fn heap_value_prolonged<'b>(self) -> &'b HeapValue<T> {
         &*(self.heap_value as *const HeapValue<T>)
     }
@@ -195,7 +193,6 @@ impl<'a, T: 'static> WritableSlot<'a, T> {
         self.slot
     }
 
-    // TODO: Maybe we shouldn't be using main tokens for these??
     pub fn set_owner(self, token: &MainThreadToken, owner: Option<Entity>) {
         self.heap_value.owner.set(token, owner);
     }
@@ -207,11 +204,9 @@ impl<'a, T: 'static> WritableSlot<'a, T> {
         match new_state as i8 - old_state.is_some() as i8 {
             1 => {
                 DEBUG_SLOT_COUNTER.fetch_add(1, Relaxed);
-                println!("spawned");
             }
             -1 => {
                 DEBUG_SLOT_COUNTER.fetch_sub(1, Relaxed);
-                println!("despawned");
             }
             _ => {}
         };
@@ -233,7 +228,7 @@ impl<'a, T: 'static> WritableSlot<'a, T> {
         }
     }
 
-    pub fn swap(self, token: &MainThreadToken, other: WritableSlot<'_, T>) {
+    pub fn swap(self, token: &MainThreadToken, other: DirectSlot<'_, T>) {
         // Swap the values
         self.heap_value.value.swap(token, &other.heap_value.value);
 
@@ -339,87 +334,136 @@ impl<T> fmt::Debug for Slot<T> {
 }
 
 impl<T> Slot<T> {
-    pub unsafe fn writable_slot<'a>(self, token: &impl Token) -> WritableSlot<'a, T> {
+    pub unsafe fn direct_slot<'a>(self, token: &impl Token) -> DirectSlot<'a, T> {
         let heap_value = unsafe {
             // Safety: provided by caller
             &*self.indirector.0.get(token).0.cast::<HeapValue<T>>()
         };
 
-        WritableSlot {
+        DirectSlot {
             slot: self,
             heap_value,
         }
     }
 
+    pub fn set_owner(self, token: &MainThreadToken, owner: Option<Entity>) {
+        unsafe {
+            // Safety: we only use the `DirectSlot` until the function returns, and we know the
+            // direct slot cannot be invalidated until then because we never call something which
+            // could potentially destroy the heap.
+            self.direct_slot(token).set_owner(token, owner)
+        }
+    }
+
+    pub fn set_value(self, token: &impl BorrowMutToken<T>, value: Option<T>) -> Option<T> {
+        unsafe {
+            // Safety: we only use the `DirectSlot` until the function returns, and we know the
+            // direct slot cannot be invalidated until then because we never call something which
+            // could potentially destroy the heap.
+            self.direct_slot(token).set_value(token, value)
+        }
+    }
+
+    pub fn set_value_owner_pair(
+        self,
+        token: &MainThreadToken,
+        value: Option<(Entity, T)>,
+    ) -> Option<T> {
+        unsafe {
+            // Safety: we only use the `DirectSlot` until the function returns, and we know the
+            // direct slot cannot be invalidated until then because we never call something which
+            // could potentially destroy the heap.
+            self.direct_slot(token).set_value_owner_pair(token, value)
+        }
+    }
+
+    pub fn swap(self, token: &MainThreadToken, other: DirectSlot<'_, T>) {
+        unsafe {
+            // Safety: we only use the `DirectSlot` until the function returns, and we know the
+            // direct slot cannot be invalidated until then because we never call something which
+            // could potentially destroy the heap.
+            self.direct_slot(token).swap(token, other)
+        }
+    }
+
     pub fn owner(&self, token: &impl Token) -> Option<Entity> {
         unsafe {
-            // Safety: the slot cannot expire until this function returns because we never call to
-            // external user code.
-            self.writable_slot(token).owner(token)
+            // Safety: we only use the `DirectSlot` until the function returns, and we know the
+            // direct slot cannot be invalidated until then because we never call something which
+            // could potentially destroy the heap.
+            self.direct_slot(token).owner(token)
         }
     }
 
     pub fn get_or_none(self, token: &impl GetToken<T>) -> Option<&T> {
         unsafe {
-            // Safety: the slot cannot expire until this function returns because we never call to
-            // external user code.
-            self.writable_slot(token).get_or_none(token)
+            // Safety: we only use the `DirectSlot` until the function returns, and we know the
+            // direct slot cannot be invalidated until then because we never call something which
+            // could potentially destroy the heap.
+            self.direct_slot(token).get_or_none(token)
         }
     }
 
     pub fn get(self, token: &impl GetToken<T>) -> &T {
         unsafe {
-            // Safety: the slot cannot expire until this function returns because we never call to
-            // external user code.
-            self.writable_slot(token).get(token)
+            // Safety: we only use the `DirectSlot` until the function returns, and we know the
+            // direct slot cannot be invalidated until then because we never call something which
+            // could potentially destroy the heap.
+            self.direct_slot(token).get(token)
         }
     }
 
     pub fn borrow_or_none(self, token: &impl BorrowToken<T>) -> Option<OptRef<T>> {
         unsafe {
-            // Safety: the slot cannot expire until this function returns because we never call to
-            // external user code.
-            self.writable_slot(token).borrow_or_none(token)
+            // Safety: we only use the `DirectSlot` until the function returns, and we know the
+            // direct slot cannot be invalidated until then because we never call something which
+            // could potentially destroy the heap.
+            self.direct_slot(token).borrow_or_none(token)
         }
     }
 
     pub fn borrow(self, token: &impl BorrowToken<T>) -> OptRef<T> {
         unsafe {
-            // Safety: the slot cannot expire until this function returns because we never call to
-            // external user code.
-            self.writable_slot(token).borrow(token)
+            // Safety: we only use the `DirectSlot` until the function returns, and we know the
+            // direct slot cannot be invalidated until then because we never call something which
+            // could potentially destroy the heap.
+            self.direct_slot(token).borrow(token)
         }
     }
 
     pub fn borrow_mut_or_none(self, token: &impl BorrowMutToken<T>) -> Option<OptRefMut<T>> {
         unsafe {
-            // Safety: the slot cannot expire until this function returns because we never call to
-            // external user code.
-            self.writable_slot(token).borrow_mut_or_none(token)
+            // Safety: we only use the `DirectSlot` until the function returns, and we know the
+            // direct slot cannot be invalidated until then because we never call something which
+            // could potentially destroy the heap.
+            self.direct_slot(token).borrow_mut_or_none(token)
         }
     }
 
     pub fn borrow_mut(self, token: &impl BorrowMutToken<T>) -> OptRefMut<T> {
         unsafe {
-            // Safety: the slot cannot expire until this function returns because we never call to
-            // external user code.
-            self.writable_slot(token).borrow_mut(token)
+            // Safety: we only use the `DirectSlot` until the function returns, and we know the
+            // direct slot cannot be invalidated until then because we never call something which
+            // could potentially destroy the heap.
+            self.direct_slot(token).borrow_mut(token)
         }
     }
 
     pub fn take(&self, token: &impl BorrowMutToken<T>) -> Option<T> {
         unsafe {
-            // Safety: the slot cannot expire until this function returns because we never call to
-            // external user code.
-            self.writable_slot(token).take(token)
+            // Safety: we only use the `DirectSlot` until the function returns, and we know the
+            // direct slot cannot be invalidated until then because we never call something which
+            // could potentially destroy the heap.
+            self.direct_slot(token).take(token)
         }
     }
 
     pub fn is_empty(&self, token: &impl TokenFor<T>) -> bool {
         unsafe {
-            // Safety: the slot cannot expire until this function returns because we never call to
-            // external user code.
-            self.writable_slot(token).is_empty(token)
+            // Safety: we only use the `DirectSlot` until the function returns, and we know the
+            // direct slot cannot be invalidated until then because we never call something which
+            // could potentially destroy the heap.
+            self.direct_slot(token).is_empty(token)
         }
     }
 }

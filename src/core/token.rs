@@ -62,6 +62,9 @@ use crate::util::{hash_map::FxHashMap, misc::unpoison};
 
 // === Access Token Traits === //
 
+// TODO: Tighten up these traits (e.g. all immutable tokens should be workers, main threads should be
+// more generic)
+
 // Namespaces
 #[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Namespace(pub(super) NonZeroU64);
@@ -259,7 +262,7 @@ pub fn is_main_thread() -> bool {
 }
 
 #[must_use]
-pub fn try_become_main_thread() -> bool {
+fn try_become_main_thread() -> bool {
     if is_main_thread() {
         return true;
     }
@@ -273,14 +276,6 @@ pub fn try_become_main_thread() -> bool {
     } else {
         false
     }
-}
-
-pub(crate) fn ensure_main_thread(action: impl fmt::Display) {
-    assert!(
-        try_become_main_thread(),
-        "{action} on non-main thread. See the \"multi-threading\" section of \
-		 the module documentation for details.",
-    );
 }
 
 // === MainThreadToken === //
@@ -307,12 +302,20 @@ impl MainThreadToken {
         }
     }
 
-    pub fn acquire() -> &'static Self {
-        ensure_main_thread("Attempted to acquire MainThreadToken");
+    pub fn acquire_fmt(attempted_verb: &str) -> &'static Self {
+        assert!(
+            try_become_main_thread(),
+            "Attempted to {attempted_verb} on non-main thread. See the \"multi-threading\"
+			 section of the module documentation for details.",
+        );
 
         &Self {
             _no_send_or_sync: PhantomData,
         }
+    }
+
+    pub fn acquire() -> &'static Self {
+        Self::acquire_fmt("perform a main-thread action")
     }
 
     pub fn exclusive_token<T: ?Sized + 'static>(&self) -> TypeExclusiveToken<'static, T> {

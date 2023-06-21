@@ -70,8 +70,8 @@ fn access_tests() {
         let token = MainThreadToken::acquire();
         let dummy = OwnedEntity::new();
 
-        let positions = Heap::new(10_000);
-        let velocities = Heap::new(10_000);
+        let positions = Heap::new(token, 10_000);
+        let velocities = Heap::new(token, 10_000);
 
         for (pos, vel) in positions.slots().zip(velocities.slots()) {
             pos.set_value_owner_pair(

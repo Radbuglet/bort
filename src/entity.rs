@@ -1,10 +1,7 @@
 use std::{
-    any::{type_name, Any, TypeId},
-    borrow,
-    cell::{Cell, RefCell},
-    fmt, hash, mem,
+    any::{type_name, TypeId},
+    borrow, fmt, mem,
     num::NonZeroU64,
-    rc::Rc,
     sync::atomic,
 };
 
@@ -13,82 +10,21 @@ use derive_where::derive_where;
 use crate::{
     core::{
         cell::{OptRef, OptRefMut},
-        heap::{Heap, Slot, WritableSlot},
+        heap::{Heap, Slot},
         token::MainThreadToken,
-        token_cell::{MainThreadJail, NOptRefCell},
+    },
+    database::{
+        db, DbComponentType, DbEntity, DbEntityMapping, DbEntityMappingHeap, DbStorage,
+        DbStorageInner,
     },
     debug::{AsDebugLabel, DebugLabel},
     obj::{Obj, OwnedObj},
     util::{
-        arena::LeakyArena,
-        hash_map::{FxHashBuilder, FxHashMap, NopHashBuilder, NopHashMap},
-        misc::{leak, random_thread_local_uid, AnyDowncastExt, RawFmt},
-        set_map::{SetMap, SetMapPtr},
+        block::BlockAllocator,
+        hash_map::NopHashMap,
+        misc::{leak, xorshift64, AnyDowncastExt, RawFmt},
     },
 };
-
-// === ComponentList === //
-
-#[derive(Copy, Clone)]
-pub(crate) struct ComponentType {
-    id: TypeId,
-    name: &'static str,
-    dtor: fn(Entity),
-}
-
-impl ComponentType {
-    fn of<T: 'static>() -> Self {
-        fn dtor<T: 'static>(entity: Entity) {
-            drop(storage::<T>().try_remove_untracked(entity)); // (ignores missing components)
-        }
-
-        Self {
-            id: TypeId::of::<T>(),
-            name: type_name::<T>(),
-            dtor: dtor::<T>,
-        }
-    }
-}
-
-impl Ord for ComponentType {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.id.cmp(&other.id)
-    }
-}
-
-impl PartialOrd for ComponentType {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl hash::Hash for ComponentType {
-    fn hash<H: hash::Hasher>(&self, state: &mut H) {
-        self.id.hash(state);
-    }
-}
-
-impl Eq for ComponentType {}
-
-impl PartialEq for ComponentType {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-    }
-}
-
-type ComponentListDb = SetMap<ComponentType, (), LeakyArena>;
-type ComponentListRef = SetMapPtr<ComponentType, (), LeakyArena>;
-
-fn component_list_db(token: &'static MainThreadToken) -> OptRefMut<'static, ComponentListDb> {
-    static COMPONENT_LIST_DB: NOptRefCell<SetMap<ComponentType, (), LeakyArena>> =
-        NOptRefCell::new_empty();
-
-    if COMPONENT_LIST_DB.is_empty(token) {
-        COMPONENT_LIST_DB.replace(token, Some(SetMap::default()));
-    }
-
-    COMPONENT_LIST_DB.borrow_mut(token)
-}
 
 // === Storage === //
 
@@ -97,246 +33,108 @@ pub type CompRef<T> = OptRef<'static, T>;
 
 pub type CompMut<T> = OptRefMut<'static, T>;
 
-// Database
-pub(crate) struct StorageDb {
-    pub(crate) storages: FxHashMap<TypeId, &'static (dyn Any + Sync)>,
-}
-
-pub(crate) static STORAGES: NOptRefCell<StorageDb> = NOptRefCell::new_full(StorageDb {
-    storages: FxHashMap::with_hasher(FxHashBuilder::new()),
-});
-
+// Storage API
 pub fn storage<T: 'static>() -> Storage<T> {
-    let token = MainThreadToken::acquire();
-    let mut db = STORAGES.borrow_mut(token);
-    let inner = db
+    let token = MainThreadToken::acquire_fmt("fetch entity component data");
+    let storage = *db(token)
         .storages
         .entry(TypeId::of::<T>())
         .or_insert_with(|| {
-            leak::<StorageData<T>>(NOptRefCell::new_full(StorageInner {
+            leak(DbStorage::new_full(DbStorageInner::<T> {
+                misc_block_alloc: BlockAllocator::default(),
                 mappings: NopHashMap::default(),
-                alloc: StorageInnerAllocator {
-                    target_block: None,
-                    non_full_blocks: Vec::new(),
-                },
             }))
-        })
-        .downcast_ref::<StorageData<T>>()
-        .unwrap();
+        });
 
-    Storage { inner, token }
+    Storage {
+        inner: storage.downcast_ref::<DbStorage<T>>().unwrap(),
+        token,
+    }
 }
 
-// Structures
-pub(crate) type StorageData<T> = NOptRefCell<StorageInner<T>>;
-
-#[derive(Debug)]
-pub(crate) struct StorageInner<T: 'static> {
-    pub(crate) mappings: NopHashMap<Entity, EntityStorageMapping<T>>,
-    alloc: StorageInnerAllocator<T>,
-}
-
-#[derive(Debug)]
-pub(crate) struct EntityStorageMapping<T: 'static> {
-    pub(crate) slot: Slot<T>,
-    internal_meta: Option<(StorageBlock<T>, usize)>,
-}
-
-#[derive(Debug)]
-struct StorageInnerAllocator<T: 'static> {
-    target_block: Option<StorageBlock<T>>,
-    non_full_blocks: Vec<StorageBlock<T>>,
-}
-
-type StorageBlock<T> = MainThreadJail<Rc<StorageBlockInner<T>>>;
-
-#[derive(Debug)]
-struct StorageBlockInner<T: 'static> {
-    heap: RefCell<Heap<T>>,
-    slot: Cell<usize>,
-    free_mask: Cell<u128>,
-}
-
-const HAMMERED_OR_FULL_BLOCK_SLOT: usize = usize::MAX;
-
-// Storage API
 #[derive(Debug)]
 #[derive_where(Copy, Clone)]
 pub struct Storage<T: 'static> {
-    inner: &'static StorageData<T>,
+    inner: &'static DbStorage<T>,
     token: &'static MainThreadToken,
 }
 
 impl<T: 'static> Storage<T> {
     pub fn acquire() -> Storage<T> {
-        storage()
+        storage::<T>()
     }
 
     // === Insertion === //
 
-    pub fn try_preallocate_slot(
-        &self,
-        entity: Entity,
-        slot: Option<WritableSlot<T>>,
-    ) -> Result<Slot<T>, Slot<T>> {
-        let me = &mut *self.inner.borrow_mut(self.token);
+    pub fn insert_with_obj(&self, entity: Entity, value: T) -> (Obj<T>, Option<T>) {
+        let inner = &mut *self.inner.borrow_mut(self.token);
 
-        match me.mappings.entry(entity) {
-            hashbrown::hash_map::Entry::Occupied(entry) => Err(entry.get().slot),
-            hashbrown::hash_map::Entry::Vacant(entry) => {
-                let (slot, internal_meta) =
-                    Self::allocate_slot_if_needed(self.token, &mut me.alloc, slot, None);
-
-                entry.insert(EntityStorageMapping {
-                    slot,
-                    internal_meta,
-                });
-                Ok(slot)
-            }
-        }
-    }
-
-    pub fn insert_in_slot(
-        &self,
-        entity: Entity,
-        value: T,
-        slot: Option<WritableSlot<T>>,
-    ) -> (Obj<T>, Option<T>) {
-        // Ensure that the entity is alive and extend the component list.
-        {
-            let mut slots = ALIVE.borrow_mut(self.token);
-            let slot = slots.get_mut(&entity).unwrap_or_else(|| {
-                panic!(
-                    "attempted to attach a component of type {} to the dead or cross-thread {:?}.",
-                    type_name::<T>(),
-                    entity
-                )
-            });
-
-            // N.B. we always run this, regardless of entry state, to account for preallocated slots,
-            // which don't update the entry yet.
-            *slot = component_list_db(self.token)
-                .lookup_extension(Some(slot), ComponentType::of::<T>());
-        }
-
-        // Update the storage
-        let me = &mut *self.inner.borrow_mut(self.token);
-
-        let (slot, replaced) = match me.mappings.entry(entity) {
-            hashbrown::hash_map::Entry::Occupied(entry) => {
-                let slot = entry.get().slot;
-                (
-                    slot,
-                    Some(mem::replace(
-                        &mut *slot.borrow_mut(MainThreadToken::acquire()),
-                        value,
-                    )),
-                )
-            }
-            hashbrown::hash_map::Entry::Vacant(entry) => {
-                let (slot, internal_meta) = Self::allocate_slot_if_needed(
-                    self.token,
-                    &mut me.alloc,
-                    slot,
-                    Some((entity, value)),
-                );
-
-                entry.insert(EntityStorageMapping {
-                    slot,
-                    internal_meta,
-                });
-                (slot, None)
-            }
-        };
-
-        (Obj::from_raw_parts(entity, slot), replaced)
-    }
-
-    fn allocate_slot_if_needed(
-        token: &'static MainThreadToken,
-        allocator: &mut StorageInnerAllocator<T>,
-        slot: Option<WritableSlot<T>>,
-        value: Option<(Entity, T)>,
-    ) -> (Slot<T>, Option<(StorageBlock<T>, usize)>) {
-        // If the user specified a slot of their own, use it.
-        if let Some(slot) = slot {
-            slot.set_value_owner_pair(token, value);
-
-            return (slot.slot(), None);
-        }
-
-        // Otherwise, acquire a block...
-        let block = allocator.target_block.get_or_insert_with(|| {
-            match allocator.non_full_blocks.pop() {
-                Some(block) => {
-                    // Set our slot to a sentinel value so people don't try to remove us when we
-                    // become empty.
-                    block.get(token).slot.set(HAMMERED_OR_FULL_BLOCK_SLOT);
-
-                    block
-                }
-                None => {
-                    MainThreadJail::new_unjail(
-                        token,
-                        Rc::new(StorageBlockInner {
-                            // TODO: Make this dynamic
-                            heap: RefCell::new(Heap::new(128)),
-                            slot: Cell::new(HAMMERED_OR_FULL_BLOCK_SLOT),
-                            free_mask: Cell::new(0),
-                        }),
-                    )
-                }
-            }
+        // Ensure that the entity is alive
+        let db = &mut *db(self.token);
+        let entity_info = db.alive_entities.get_mut(&entity).unwrap_or_else(|| {
+            panic!(
+                "attempted to attach a component of type {} to the dead or cross-thread {:?}.",
+                type_name::<T>(),
+                entity
+            )
         });
 
-        let block_inner = block.get_mut();
+        match inner.mappings.entry(entity) {
+            hashbrown::hash_map::Entry::Occupied(entry) => {
+                // We're merely occupied so just mutate the component without any additional fuss.
+                let entry = entry.get();
+                let replaced = mem::replace(&mut *entry.target.borrow_mut(self.token), value);
 
-        // Find the first open slot
-        let mut free_mask = block_inner.free_mask.get();
-        let slot_idx = free_mask.trailing_ones();
+                (Obj::from_raw_parts(entity, entry.target), Some(replaced))
+            }
+            hashbrown::hash_map::Entry::Vacant(entry) => {
+                // Update the component list
+                entity_info.comp_list = db
+                    .comp_list_map
+                    .lookup_extension(Some(&entity_info.comp_list), DbComponentType::of::<T>());
 
-        // Allocate a slot
-        let heap = block_inner.heap.borrow_mut();
-        let slot = heap.slot(slot_idx as usize);
-        slot.set_value_owner_pair(token, value);
-        let slot = slot.slot();
-        drop(heap);
+                // Allocate a slot for this object
+                let resv = inner.misc_block_alloc.alloc(|sz| Heap::new(self.token, sz));
+                let slot = inner
+                    .misc_block_alloc
+                    .block_mut(&resv.block)
+                    .slot(resv.slot);
 
-        // Mark the slot as occupied
-        free_mask |= 1 << slot_idx;
-        block_inner.free_mask.set(free_mask);
+                // Write the value to the slot
+                slot.set_value_owner_pair(self.token, Some((entity, value)));
 
-        // If our mask if full, remove the block
-        let block_clone = MainThreadJail::new_unjail(token, block_inner.clone());
-        if free_mask == u128::MAX {
-            // N.B. `block` is already located in the `HAMMERED_OR_FULL_BLOCK_SLOT`.
-            allocator.target_block = None;
+                // Insert the entry
+                let slot = slot.slot();
+                entry.insert(DbEntityMapping {
+                    target: slot,
+                    heap: DbEntityMappingHeap::Misc(resv),
+                });
+
+                (Obj::from_raw_parts(entity, slot), None)
+            }
         }
-
-        (slot, Some((block_clone, slot_idx as usize)))
-    }
-
-    pub fn insert_and_return_slot(&self, entity: Entity, value: T) -> (Obj<T>, Option<T>) {
-        self.insert_in_slot(entity, value, None)
     }
 
     pub fn insert(&self, entity: Entity, value: T) -> Option<T> {
-        self.insert_and_return_slot(entity, value).1
+        self.insert_with_obj(entity, value).1
     }
 
     // === Removal === //
 
     pub fn remove(&self, entity: Entity) -> Option<T> {
         if let Some(removed) = self.try_remove_untracked(entity) {
-            // Modify the component list or fail silently if the entity lacks the component.
+            let db = &mut *db(self.token);
+
+            // Modify the component list or fail silently if the entity does not exist.
+            //
             // This behavior allows users to `remove` components explicitly from entities that are
             // in the of being destroyed. This is the opposite behavior of `insert`, which requires
             // the entity to be valid before modifying it. This pairing ensures that, by the time
             // `Entity::destroy()` resolves, all of the entity's components will have been removed.
-            let mut slots = ALIVE.borrow_mut(self.token);
-            if let Some(slot) = slots.get_mut(&entity) {
-                *slot = component_list_db(self.token)
-                    .lookup_de_extension(slot, ComponentType::of::<T>());
+            if let Some(entity) = db.alive_entities.get_mut(&entity) {
+                entity.comp_list = db
+                    .comp_list_map
+                    .lookup_de_extension(&entity.comp_list, DbComponentType::of::<T>());
             }
 
             Some(removed)
@@ -344,7 +142,7 @@ impl<T: 'static> Storage<T> {
             // Only if the component is missing will we issue the standard error.
             assert!(
                 entity.is_alive(),
-                "attempted to remove a component of type {} from the already fully-dead or cross-thread {:?}",
+                "attempted to remove a component of type {} from the already fully-dead {:?}",
                 type_name::<T>(),
                 entity,
             );
@@ -353,69 +151,20 @@ impl<T: 'static> Storage<T> {
     }
 
     fn try_remove_untracked(&self, entity: Entity) -> Option<T> {
-        let mut me = self.inner.borrow_mut(self.token);
+        let inner = &mut *self.inner.borrow_mut(self.token);
 
-        // Remove the mapping
-        if let Some(mapping) = me.mappings.remove(&entity) {
-            // Destroy the Orc
-            let taken = mapping.slot.take(self.token);
+        // Unlink the entity
+        let removed = inner.mappings.remove(&entity)?;
 
-            // If the slot is internal, deallocate from the block.
-            if let Some((block, slot)) = mapping.internal_meta {
-                let block = block.into_inner();
+        // Remove the value from the heap
+        let removed_value = removed.target.set_value_owner_pair(self.token, None);
 
-                // Update the free mask
-                let old_free_mask = block.free_mask.get();
-                let mut free_mask = old_free_mask;
-                debug_assert_ne!(free_mask & (1 << slot), 0);
-                free_mask ^= 1 << slot;
-                block.free_mask.set(free_mask);
-
-                // If the block was full but no longer is, add it to the `non_full_blocks` list.
-                if old_free_mask == u128::MAX {
-                    // In this case, the block is just full and non-hammered.
-                    debug_assert_eq!(block.slot.get(), HAMMERED_OR_FULL_BLOCK_SLOT);
-
-                    // Set the block's location
-                    block.slot.set(me.alloc.non_full_blocks.len());
-
-                    // Push the block back into the `non_free_blocks` set
-                    me.alloc
-                        .non_full_blocks
-                        .push(MainThreadJail::new_unjail(self.token, block.clone()));
-                }
-
-                // If the mask is now empty and the block is not our "hammered" block, delete it!
-                let block_index = block.slot.get();
-                if free_mask == 0 && block_index != HAMMERED_OR_FULL_BLOCK_SLOT {
-                    // Destroy our block reference.
-                    drop(block);
-
-                    // Swap-remove the block from the `non_full_blocks` list and take ownership of
-                    // its contents.
-                    let block = Rc::try_unwrap(
-                        me.alloc
-                            .non_full_blocks
-                            .swap_remove(block_index)
-                            .into_inner(),
-                    )
-                    .ok()
-                    .unwrap();
-
-                    // Update the perturbed index
-                    if let Some(perturbed) = me.alloc.non_full_blocks.get_mut(block_index) {
-                        perturbed.get_mut().slot.set(block_index);
-                    }
-
-                    // Deallocate the block
-                    drop(block.heap);
-                }
-            }
-
-            taken
-        } else {
-            None
+        // Remove the reservation in the heap's allocator.
+        match removed.heap {
+            DbEntityMappingHeap::Misc(resv) => inner.misc_block_alloc.dealloc(resv, drop),
         }
+
+        removed_value
     }
 
     // === Getters === //
@@ -425,7 +174,7 @@ impl<T: 'static> Storage<T> {
             .borrow(self.token)
             .mappings
             .get(&entity)
-            .map(|mapping| mapping.slot)
+            .map(|mapping| mapping.target)
     }
 
     pub fn get_slot(&self, entity: Entity) -> Slot<T> {
@@ -468,23 +217,25 @@ impl<T: 'static> Storage<T> {
 
 pub(crate) static DEBUG_ENTITY_COUNTER: atomic::AtomicU64 = atomic::AtomicU64::new(0);
 
-pub(crate) static ALIVE: NOptRefCell<NopHashMap<Entity, ComponentListRef>> =
-    NOptRefCell::new_full(NopHashMap::with_hasher(NopHashBuilder::new()));
-
 #[derive(Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Entity(NonZeroU64);
 
 impl Entity {
     pub fn new_unmanaged() -> Self {
-        let token = MainThreadToken::acquire();
+        let token = MainThreadToken::acquire_fmt("fetch entity component data");
+        let db = &mut *db(token);
 
         // Allocate a slot
-        let me = Self(random_thread_local_uid());
+        db.entity_gen = xorshift64(db.entity_gen);
+        let me = Self(db.entity_gen);
 
         // Register our slot in the alive set
-        ALIVE
-            .borrow_mut(token)
-            .insert(me, *component_list_db(token).root());
+        db.alive_entities.insert(
+            me,
+            DbEntity {
+                comp_list: *db.comp_list_map.root(),
+            },
+        );
 
         // Increment the total entity counter
         // N.B. we do this once everything else has succeeded so that calls to `new_unmanaged` on
@@ -512,23 +263,8 @@ impl Entity {
         self
     }
 
-    pub fn try_preallocate_slot<T: 'static>(
-        self,
-        slot: Option<WritableSlot<T>>,
-    ) -> Result<Slot<T>, Slot<T>> {
-        storage::<T>().try_preallocate_slot(self, slot)
-    }
-
-    pub fn insert_in_slot<T: 'static>(
-        self,
-        comp: T,
-        slot: Option<WritableSlot<T>>,
-    ) -> (Obj<T>, Option<T>) {
-        storage::<T>().insert_in_slot(self, comp, slot)
-    }
-
-    pub fn insert_and_return_slot<T: 'static>(self, comp: T) -> (Obj<T>, Option<T>) {
-        storage::<T>().insert_and_return_slot(self, comp)
+    pub fn insert_with_obj<T: 'static>(self, comp: T) -> (Obj<T>, Option<T>) {
+        storage::<T>().insert_with_obj(self, comp)
     }
 
     pub fn insert<T: 'static>(self, comp: T) -> Option<T> {
@@ -572,22 +308,23 @@ impl Entity {
     }
 
     pub fn is_alive(self) -> bool {
-        ALIVE.borrow(MainThreadToken::acquire()).contains_key(&self)
+        db(MainThreadToken::acquire_fmt(
+            "determine whether an entity was alive",
+        ))
+        .alive_entities
+        .contains_key(&self)
     }
 
     pub fn destroy(self) {
-        let slot = ALIVE
-            .borrow_mut(MainThreadToken::acquire())
+        let token = MainThreadToken::acquire_fmt("destroy an entity");
+
+        let entity_info = db(token)
+            .alive_entities
             .remove(&self)
-            .unwrap_or_else(|| {
-                panic!(
-                    "attempted to destroy the already-dead or cross-threaded {:?}.",
-                    self
-                )
-            });
+            .unwrap_or_else(|| panic!("attempted to destroy the already-dead {:?}.", self));
 
         // Run the component destructors
-        for key in slot.direct_borrow().keys() {
+        for key in entity_info.comp_list.direct_borrow().keys() {
             (key.dtor)(self);
         }
     }
@@ -599,7 +336,12 @@ impl fmt::Debug for Entity {
         struct Id(NonZeroU64);
 
         if let Some(token) = MainThreadToken::try_acquire() {
-            if let Some(components) = ALIVE.borrow(token).get(self) {
+            let db = db(token);
+            if let Some(&entity_info) = db.alive_entities.get(self) {
+                // Move ownership of EntityInfo out of the db so we can call `.try_get`.
+                drop(db);
+
+                // Format the component list
                 let mut builder = f.debug_tuple("Entity");
 
                 if let Some(label) = self.try_get::<DebugLabel>() {
@@ -608,7 +350,7 @@ impl fmt::Debug for Entity {
 
                 builder.field(&Id(self.0));
 
-                for v in components.direct_borrow().keys().iter() {
+                for v in entity_info.comp_list.direct_borrow().keys().iter() {
                     if v.id != TypeId::of::<DebugLabel>() {
                         builder.field(&RawFmt(v.name));
                     }
@@ -681,23 +423,8 @@ impl OwnedEntity {
         self
     }
 
-    pub fn try_preallocate_slot<T: 'static>(
-        &self,
-        slot: Option<WritableSlot<T>>,
-    ) -> Result<Slot<T>, Slot<T>> {
-        self.entity.try_preallocate_slot(slot)
-    }
-
-    pub fn insert_in_slot<T: 'static>(
-        &self,
-        comp: T,
-        slot: Option<WritableSlot<T>>,
-    ) -> (Obj<T>, Option<T>) {
-        self.entity.insert_in_slot(comp, slot)
-    }
-
-    pub fn insert_and_return_slot<T: 'static>(&self, comp: T) -> (Obj<T>, Option<T>) {
-        self.entity.insert_and_return_slot(comp)
+    pub fn insert_with_obj<T: 'static>(&self, comp: T) -> (Obj<T>, Option<T>) {
+        self.entity.insert_with_obj(comp)
     }
 
     pub fn insert<T: 'static>(&self, comp: T) -> Option<T> {

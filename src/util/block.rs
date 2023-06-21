@@ -8,6 +8,7 @@ pub type BlockRef<T> = ArenaPtr<Block<T>, BlockArena>;
 
 const HAMMERED_OR_FULL_BLOCK_SLOT: usize = usize::MAX;
 
+#[derive(Debug)]
 #[derive_where(Default)]
 pub struct BlockAllocator<T> {
     blocks: Arena<Block<T>, BlockArena>,
@@ -15,6 +16,7 @@ pub struct BlockAllocator<T> {
     non_full: Vec<BlockRef<T>>,
 }
 
+#[derive(Debug)]
 pub struct Block<T> {
     value: T,
     non_full_index: usize,
@@ -22,7 +24,7 @@ pub struct Block<T> {
 }
 
 impl<T> BlockAllocator<T> {
-    pub fn alloc(&mut self, block_ctor: impl FnOnce() -> T) -> BlockReservation<T> {
+    pub fn alloc(&mut self, block_ctor: impl FnOnce(usize) -> T) -> BlockReservation<T> {
         let block = self
             .hammered
             .get_or_insert_with(|| match self.non_full.pop() {
@@ -31,9 +33,9 @@ impl<T> BlockAllocator<T> {
                     block
                 }
                 None => self.blocks.alloc(Block {
-                    value: (block_ctor)(),
+                    value: block_ctor(128),
                     non_full_index: HAMMERED_OR_FULL_BLOCK_SLOT,
-                    occupied_mask: u128::MAX,
+                    occupied_mask: 0,
                 }),
             });
 
@@ -84,7 +86,9 @@ impl<T> BlockAllocator<T> {
         {
             let block_data = self.blocks.dealloc(reservation.block);
 
-            // Update the perturbed index
+            // Remove from the `non_full` list
+            self.non_full.swap_remove(block_data.non_full_index);
+
             if let Some(perturbed) = self.non_full.get_mut(block_data.non_full_index) {
                 self.blocks.get_mut(perturbed).non_full_index = block_data.non_full_index;
             }

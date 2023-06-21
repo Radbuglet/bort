@@ -1,6 +1,5 @@
 use std::{
     any::Any,
-    cell::Cell,
     error::Error,
     fmt,
     num::NonZeroU64,
@@ -16,21 +15,6 @@ pub fn xorshift64(state: NonZeroU64) -> NonZeroU64 {
     let state = state ^ (state >> 7);
     let state = state ^ (state << 17);
     NonZeroU64::new(state).unwrap()
-}
-
-pub fn random_thread_local_uid() -> NonZeroU64 {
-    thread_local! {
-        static ID_GEN: Cell<NonZeroU64> = const { Cell::new(const_new_nz_u64(1)) };
-    }
-
-    ID_GEN.with(|v| {
-        // N.B. `xorshift`, like all other well-constructed LSFRs, produces a full cycle of non-zero
-        // values before repeating itself. Thus, this is an effective way to generate random but
-        // unique IDs without using additional storage.
-        let state = xorshift64(v.get());
-        v.set(state);
-        state
-    })
 }
 
 // === Downcast === //
