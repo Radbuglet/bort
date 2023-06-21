@@ -131,6 +131,7 @@ pub struct SetMapEntry<K, V, A: ArenaKind>
 where
     SetMapEntry<K, V, A>: StorableIn<A>,
 {
+    self_ptr: Option<SetMapPtr<K, V, A>>,
     keys: Box<[K]>,
     extensions: FxHashMap<K, SetMapPtr<K, V, A>>,
     de_extensions: FxHashMap<K, SetMapPtr<K, V, A>>,
@@ -157,11 +158,13 @@ where
     pub fn new(mut heap: Arena<SetMapEntry<K, V, A>, A>) -> Self {
         let mut hasher = FxHashBuilder::new();
         let root = heap.alloc(SetMapEntry {
+            self_ptr: None,
             keys: Box::from_iter([]),
             extensions: FxHashMap::default(),
             de_extensions: FxHashMap::default(),
             value: V::default(),
         });
+        heap.get_mut(&root).self_ptr = Some(root.clone());
 
         let mut map = RawTable::default();
         let root_hash = hash_iter(&mut hasher, None::<K>);
@@ -188,16 +191,18 @@ where
         negative_getter_mut: impl Fn(&mut SetMapEntry<K, V, A>) -> &mut FxHashMap<K, SetMapPtr<K, V, A>>,
         iter_ctor: impl for<'a> GoofyIterCtorHack<'a, K>,
     ) -> SetMapPtr<K, V, A> {
-        // Attempt to get the extension from the base element's extension edges.
-        //
-        // N.B. for insertions of components already in the list, structure invariants ensure that
-        // the extension list will always include self loops for these keys.
-        //
-        // De-extensions of elements already in this list are handled without a problem by the filter
-        // so no special casing is needing for that.
         let base_ptr = base_ptr.unwrap_or(&self.root);
         let base_data = self.heap.get(base_ptr);
 
+        // Attempt to get the extension from the base element's extension edges.
+        //
+        // N.B. for insertions of components already in the list, structure invariants ensure that
+        //  the extension list will always include self loops for these keys. These invariants are
+        //  necessary because the `iter_ctor` provided by `lookup_extension` really cannot handle
+        //  duplicate keys.
+        //
+        //  De-extensions of elements already in this list are handled without a problem by the filter
+        //  so no special casing is needing for that.
         if let Some(extension) = (positive_getter_ref)(&base_data).get(&key) {
             return extension.clone();
         }
@@ -223,8 +228,18 @@ where
             drop(keys);
             drop(base_data);
 
+            // Cache the positive-sense lookup going from base to target.
             (positive_getter_mut)(&mut self.heap.get_mut(base_ptr)).insert(key, target_ptr.clone());
-            (negative_getter_mut)(&mut self.heap.get_mut(target_ptr)).insert(key, base_ptr.clone());
+
+            // Cache the negative-sense lookup going from target to base.
+            //
+            // N.B. The logic here is *super* subtle when it comes to no-op (de)extensions. If the
+            // `target_ptr` is equal to the `base_ptr`, we can't actually say that the negative sense
+            // will also be a no-op (and, indeed, it certainly won't be).
+            if base_ptr != target_ptr {
+                (negative_getter_mut)(&mut self.heap.get_mut(target_ptr))
+                    .insert(key, base_ptr.clone());
+            }
 
             return target_ptr.clone();
         }
@@ -235,6 +250,7 @@ where
 
         let target_ptr = {
             let mut target_entry = SetMapEntry {
+                self_ptr: None,
                 keys,
                 extensions: FxHashMap::default(),
                 de_extensions: FxHashMap::default(),
@@ -250,13 +266,15 @@ where
         // base -> target
         (positive_getter_mut)(&mut self.heap.get_mut(base_ptr)).insert(key, target_ptr.clone());
 
-        // self referential
+        // self referential & self_id
         {
             let target = &mut *self.heap.get_mut(&target_ptr);
 
             for key in &*target.keys {
                 target.extensions.insert(key.clone(), target_ptr.clone());
             }
+
+            target.self_ptr = Some(target_ptr.clone());
         }
 
         self.map.insert(
@@ -299,7 +317,7 @@ where
             Some(base),
             key,
             |a: &SetMapEntry<K, V, A>| &a.de_extensions,
-            |a: &mut SetMapEntry<K, V, A>| &mut a.extensions,
+            |a: &mut SetMapEntry<K, V, A>| &mut a.de_extensions,
             |a: &mut SetMapEntry<K, V, A>| &mut a.extensions,
             iter_ctor,
         )
@@ -309,12 +327,14 @@ where
     where
         A: FreeableArenaKind,
     {
-        let removed_ptr_2 = removed_ptr.clone();
-        let removed_data = self.heap.dealloc(removed_ptr);
+        let removed_data = self.heap.dealloc(removed_ptr.clone());
 
+        // Because every (de)extension link (besides self referential ones) is doubly linked, we can
+        // iterate through each sense of the link and unlink the back-reference to fully strip the
+        // graph of dangling references.
         for (key, referencer) in &removed_data.de_extensions {
-            // N.B. this is necessary to handle self-referential structures
-            if &removed_ptr_2 == referencer {
+            // N.B. this is necessary to prevent UAFs for self-referential structures
+            if &removed_ptr == referencer {
                 continue;
             }
 
@@ -322,16 +342,18 @@ where
         }
 
         for (key, referencer) in &removed_data.extensions {
-            if &removed_ptr_2 == referencer {
+            // N.B. this is necessary to prevent UAFs for self-referential structures
+            if &removed_ptr == referencer {
                 continue;
             }
 
             self.heap.get_mut(&referencer).de_extensions.remove(key);
         }
 
+        // We still have to remove the entry from the primary map.
         let removed_hash = hash_iter(&mut self.hasher, removed_data.keys.iter());
         self.map.remove_entry(removed_hash, |(_, candidate_ptr)| {
-            &removed_ptr_2 == candidate_ptr
+            &removed_ptr == candidate_ptr
         });
     }
 
@@ -364,7 +386,9 @@ where
 
 impl<K, V, A: ArenaKind> SetMapEntry<K, V, A>
 where
-    Self: StorableIn<A>,
+    SetMapEntry<K, V, A>: StorableIn<A>,
+    K: 'static + Ord + hash::Hash + Copy,
+    V: Default,
 {
     pub fn keys(&self) -> &[K] {
         &self.keys
@@ -374,8 +398,16 @@ where
     where
         K: Ord,
     {
-        // TODO: This could likely be more efficient
-        self.keys().binary_search(key).is_ok()
+        debug_assert!(self.self_ptr.is_some());
+
+        // N.B. we make it an invariant of our data structure that all positive no-op extensions are
+        // already included in the `extensions` map. If extending ourself gives us a `self_ptr`, we
+        // know our set contains this element.
+        self.extensions
+            .get(key)
+            // Wow, that's ugly.
+            .filter(|target| Some(target) == self.self_ptr.as_ref().as_ref())
+            .is_some()
     }
 
     pub fn value(&self) -> &V {
