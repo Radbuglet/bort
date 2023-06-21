@@ -565,7 +565,6 @@ impl<T: fmt::Debug> fmt::Debug for OptRefCell<T> {
 }
 
 impl<T: Clone> Clone for OptRefCell<T> {
-    #[inline]
     #[track_caller]
     fn clone(&self) -> Self {
         Self::new(self.borrow_or_none().map(|v| v.clone()))

@@ -20,9 +20,10 @@ use crate::{
     debug::{AsDebugLabel, DebugLabel},
     obj::{Obj, OwnedObj},
     util::{
+        arena::SpecArena,
         block::BlockAllocator,
         hash_map::NopHashMap,
-        misc::{leak, xorshift64, AnyDowncastExt, RawFmt},
+        misc::{leak, AnyDowncastExt, RawFmt},
     },
 };
 
@@ -70,15 +71,22 @@ impl<T: 'static> Storage<T> {
         let inner = &mut *self.inner.borrow_mut(self.token);
 
         // Ensure that the entity is alive
-        let db = &mut *db(self.token);
-        let entity_info = db.alive_entities.get_mut(&entity).unwrap_or_else(|| {
-            panic!(
-                "attempted to attach a component of type {} to the dead or cross-thread {:?}.",
-                type_name::<T>(),
-                entity
-            )
-        });
+        let mut db_guard = db(self.token);
+        let db = &mut *db_guard;
 
+        let entity_info = match db.alive_entities.get_mut(&entity) {
+            Some(entity_info) => entity_info,
+            None => {
+                drop(db_guard);
+                panic!(
+                    "attempted to attach a component of type {} to the dead or cross-thread {:?}.",
+                    type_name::<T>(),
+                    entity
+                );
+            }
+        };
+
+        // Update the value
         match inner.mappings.entry(entity) {
             hashbrown::hash_map::Entry::Occupied(entry) => {
                 // We're merely occupied so just mutate the component without any additional fuss.
@@ -226,14 +234,14 @@ impl Entity {
         let db = &mut *db(token);
 
         // Allocate a slot
-        db.entity_gen = xorshift64(db.entity_gen);
-        let me = Self(db.entity_gen);
+        let me = Self(db.new_uid());
 
         // Register our slot in the alive set
         db.alive_entities.insert(
             me,
             DbEntity {
                 comp_list: *db.comp_list_map.root(),
+                tag_list: *db.tag_list_map.root(),
             },
         );
 
@@ -305,6 +313,58 @@ impl Entity {
 
     pub fn obj<T: 'static>(self) -> Obj<T> {
         Obj::wrap(self)
+    }
+
+    pub fn tag(self, tag: Tag) {
+        let mut db_guard = db(MainThreadToken::acquire_fmt("tag an entity"));
+        let db = &mut *db_guard;
+
+        let entity_info = match db.alive_entities.get_mut(&self) {
+            Some(entity_info) => entity_info,
+            None => {
+                drop(db_guard);
+                panic!("attempted to tag the dead entity {self:?}");
+            }
+        };
+
+        entity_info.tag_list = db
+            .tag_list_map
+            .lookup_extension(Some(&entity_info.tag_list), tag);
+    }
+
+    pub fn untag(self, tag: Tag) {
+        let mut db_guard = db(MainThreadToken::acquire_fmt("untag an entity"));
+        let db = &mut *db_guard;
+
+        let entity_info = match db.alive_entities.get_mut(&self) {
+            Some(entity_info) => entity_info,
+            None => {
+                drop(db_guard);
+                panic!("attempted to untag the dead entity {self:?}");
+            }
+        };
+
+        entity_info.tag_list = db
+            .tag_list_map
+            .lookup_de_extension(&entity_info.tag_list, tag);
+    }
+
+    pub fn is_tagged(self, tag: Tag) -> bool {
+        let mut db_guard = db(MainThreadToken::acquire_fmt("query entity tags"));
+        let db = &mut *db_guard;
+
+        let entity_info = match db.alive_entities.get_mut(&self) {
+            Some(entity_info) => entity_info,
+            None => {
+                drop(db_guard);
+                panic!("attempted to query the tags of the dead entity {self:?}");
+            }
+        };
+
+        db.tag_list_map
+            .arena()
+            .get(&entity_info.tag_list)
+            .has_key(&tag)
     }
 
     pub fn is_alive(self) -> bool {
@@ -471,6 +531,18 @@ impl OwnedEntity {
         OwnedObj::wrap(self)
     }
 
+    pub fn tag(&self, tag: Tag) {
+        self.entity().tag(tag)
+    }
+
+    pub fn untag(&self, tag: Tag) {
+        self.entity().untag(tag)
+    }
+
+    pub fn is_tagged(&self, tag: Tag) -> bool {
+        self.entity().is_tagged(tag)
+    }
+
     pub fn is_alive(&self) -> bool {
         self.entity.is_alive()
     }
@@ -495,5 +567,22 @@ impl borrow::Borrow<Entity> for OwnedEntity {
 impl Drop for OwnedEntity {
     fn drop(&mut self) {
         self.entity.destroy();
+    }
+}
+
+// === Tag === //
+
+#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
+pub struct Tag {
+    id: NonZeroU64,
+}
+
+impl Tag {
+    pub fn new() -> Self {
+        let token = MainThreadToken::acquire_fmt("create a tag");
+
+        Self {
+            id: db(token).new_uid(),
+        }
     }
 }

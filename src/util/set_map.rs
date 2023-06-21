@@ -189,6 +189,12 @@ where
         iter_ctor: impl for<'a> GoofyIterCtorHack<'a, K>,
     ) -> SetMapPtr<K, V, A> {
         // Attempt to get the extension from the base element's extension edges.
+        //
+        // N.B. for insertions of components already in the list, structure invariants ensure that
+        // the extension list will always include self loops for these keys.
+        //
+        // De-extensions of elements already in this list are handled without a problem by the filter
+        // so no special casing is needing for that.
         let base_ptr = base_ptr.unwrap_or(&self.root);
         let base_data = self.heap.get(base_ptr);
 
@@ -234,12 +240,24 @@ where
                 de_extensions: FxHashMap::default(),
                 value: V::default(),
             };
+
+            // target -> base
             (negative_getter_mut)(&mut target_entry).insert(key, base_ptr.clone());
 
             self.heap.alloc(target_entry)
         };
 
+        // base -> target
         (positive_getter_mut)(&mut self.heap.get_mut(base_ptr)).insert(key, target_ptr.clone());
+
+        // self referential
+        {
+            let target = &mut *self.heap.get_mut(&target_ptr);
+
+            for key in &*target.keys {
+                target.extensions.insert(key.clone(), target_ptr.clone());
+            }
+        }
 
         self.map.insert(
             target_hash,
@@ -295,6 +313,7 @@ where
         let removed_data = self.heap.dealloc(removed_ptr);
 
         for (key, referencer) in &removed_data.de_extensions {
+            // N.B. this is necessary to handle self-referential structures
             if &removed_ptr_2 == referencer {
                 continue;
             }
@@ -349,6 +368,14 @@ where
 {
     pub fn keys(&self) -> &[K] {
         &self.keys
+    }
+
+    pub fn has_key(&self, key: &K) -> bool
+    where
+        K: Ord,
+    {
+        // TODO: This could likely be more efficient
+        self.keys().binary_search(key).is_ok()
     }
 
     pub fn value(&self) -> &V {

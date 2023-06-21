@@ -11,16 +11,17 @@ use crate::{
         token::MainThreadToken,
         token_cell::NOptRefCell,
     },
-    entity::Entity,
+    entity::{Entity, Tag},
     util::{
-        arena::LeakyArena,
+        arena::{FreeListArena, LeakyArena},
         block::{BlockAllocator, BlockReservation},
         hash_map::{FxHashMap, NopHashMap},
+        misc::xorshift64,
         set_map::{SetMap, SetMapPtr},
     },
 };
 
-// === DB: Root === //
+// === Root === //
 
 static DB: NOptRefCell<DbRoot> = NOptRefCell::new_empty();
 
@@ -29,9 +30,10 @@ pub(crate) fn db(token: &'static MainThreadToken) -> OptRefMut<'static, DbRoot> 
         DB.replace(
             token,
             Some(DbRoot {
-                entity_gen: NonZeroU64::new(1).unwrap(),
+                uid_gen: NonZeroU64::new(1).unwrap(),
                 alive_entities: NopHashMap::default(),
                 comp_list_map: SetMap::default(),
+                tag_list_map: SetMap::default(),
                 storages: FxHashMap::default(),
             }),
         );
@@ -41,15 +43,17 @@ pub(crate) fn db(token: &'static MainThreadToken) -> OptRefMut<'static, DbRoot> 
 }
 
 pub(crate) struct DbRoot {
-    pub(crate) entity_gen: NonZeroU64,
+    pub(crate) uid_gen: NonZeroU64,
     pub(crate) alive_entities: NopHashMap<Entity, DbEntity>,
     pub(crate) comp_list_map: DbComponentListMap,
+    pub(crate) tag_list_map: DbArchetypeListMap,
     pub(crate) storages: FxHashMap<TypeId, &'static (dyn Any + Sync)>,
 }
 
 #[derive(Copy, Clone)]
 pub(crate) struct DbEntity {
     pub(crate) comp_list: DbComponentListRef,
+    pub(crate) tag_list: DbArchetypeListRef,
 }
 
 pub(crate) type DbStorage<T> = NOptRefCell<DbStorageInner<T>>;
@@ -71,7 +75,7 @@ pub(crate) enum DbEntityMappingHeap<T: 'static> {
     Misc(BlockReservation<Heap<T>>),
 }
 
-// === DB: ComponentList === //
+// === ComponentList === //
 
 #[derive(Copy, Clone)]
 pub(crate) struct DbComponentType {
@@ -122,3 +126,20 @@ impl PartialEq for DbComponentType {
 
 pub(crate) type DbComponentListMap = SetMap<DbComponentType, (), LeakyArena>;
 pub(crate) type DbComponentListRef = SetMapPtr<DbComponentType, (), LeakyArena>;
+
+// === Archetype === //
+
+#[derive(Default)]
+pub(crate) struct DbArchetype {}
+
+pub(crate) type DbArchetypeListMap = SetMap<Tag, DbArchetype, FreeListArena>;
+pub(crate) type DbArchetypeListRef = SetMapPtr<Tag, DbArchetype, FreeListArena>;
+
+// === Shared logic === //
+
+impl DbRoot {
+    pub fn new_uid(&mut self) -> NonZeroU64 {
+        self.uid_gen = xorshift64(self.uid_gen);
+        self.uid_gen
+    }
+}
