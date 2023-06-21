@@ -44,11 +44,17 @@ struct IndirectorSet {
     free_indirectors: Vec<&'static Indirector>,
 }
 
-struct Indirector(NMainCell<ThreadedPtrRef<()>>);
+struct Indirector {
+    owner: NMainCell<Option<Entity>>,
+    value: NMainCell<ThreadedPtrRef<()>>,
+}
 
 impl Default for Indirector {
     fn default() -> Self {
-        Self(NMainCell::new(ThreadedPtrRef(null_mut())))
+        Self {
+            owner: NMainCell::new(None),
+            value: NMainCell::new(ThreadedPtrRef(null_mut())),
+        }
     }
 }
 
@@ -56,7 +62,6 @@ impl Default for Indirector {
 
 #[derive(Debug)]
 struct HeapValue<T> {
-    owner: NMainCell<Option<Entity>>,
     value: NOptRefCell<T>,
 }
 
@@ -72,7 +77,6 @@ impl<T> Heap<T> {
     pub fn new(token: &MainThreadToken, len: usize) -> Self {
         // Allocate slot data
         let values = ManuallyDrop::new(Box::from_iter((0..len).map(|_| HeapValue {
-            owner: NMainCell::new(None),
             value: NOptRefCell::new_empty(),
         })));
 
@@ -82,7 +86,6 @@ impl<T> Heap<T> {
             .entry(TypeId::of::<T>())
             .or_insert_with(|| IndirectorSet {
                 empty: ThreadedPtrRef(leak(HeapValue {
-                    owner: NMainCell::new(None),
                     value: NOptRefCell::new_empty(),
                 }) as *const HeapValue<T> as *const ()),
                 free_indirectors: Vec::new(),
@@ -106,7 +109,7 @@ impl<T> Heap<T> {
                 .drain((free_slots.len() - len)..)
                 .enumerate()
                 .map(|(i, data)| {
-                    data.0.set(
+                    data.value.set(
                         token,
                         ThreadedPtrRef(&values[i] as *const HeapValue<T> as *const ()),
                     );
@@ -167,7 +170,7 @@ impl<T> Drop for Heap<T> {
         let entry = free_slots.get_mut(&TypeId::of::<T>()).unwrap();
 
         for slot in self.slots.iter() {
-            slot.indirector.0.set(token, entry.empty);
+            slot.indirector.value.set(token, entry.empty);
             entry.free_indirectors.push(slot.indirector);
         }
 
@@ -194,7 +197,7 @@ impl<'a, T: 'static> DirectSlot<'a, T> {
     }
 
     pub fn set_owner(self, token: &MainThreadToken, owner: Option<Entity>) {
-        self.heap_value.owner.set(token, owner);
+        self.slot.indirector.owner.set(token, owner);
     }
 
     pub fn set_value(self, token: &impl BorrowMutToken<T>, value: Option<T>) -> Option<T> {
@@ -233,14 +236,20 @@ impl<'a, T: 'static> DirectSlot<'a, T> {
         self.heap_value.value.swap(token, &other.heap_value.value);
 
         // Swap the owners
-        self.heap_value.owner.swap(token, &other.heap_value.owner);
+        self.slot
+            .indirector
+            .owner
+            .swap(token, &other.slot.indirector.owner);
 
         // Swap the indirector pointees
-        self.slot.indirector.0.swap(token, &other.slot.indirector.0);
+        self.slot
+            .indirector
+            .value
+            .swap(token, &other.slot.indirector.value);
     }
 
     pub fn owner(self, token: &impl Token) -> Option<Entity> {
-        self.heap_value.owner.get(token)
+        self.slot.indirector.owner.get(token)
     }
 
     pub fn get_or_none(self, token: &impl GetToken<T>) -> Option<&T> {
@@ -337,7 +346,7 @@ impl<T> Slot<T> {
     pub unsafe fn direct_slot<'a>(self, token: &impl Token) -> DirectSlot<'a, T> {
         let heap_value = unsafe {
             // Safety: provided by caller
-            &*self.indirector.0.get(token).0.cast::<HeapValue<T>>()
+            &*self.indirector.value.get(token).0.cast::<HeapValue<T>>()
         };
 
         DirectSlot {

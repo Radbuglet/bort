@@ -40,20 +40,20 @@ use crate::util::misc::{unwrap_error, RawFmt};
 // - A value equal to `NEUTRAL` means that the value is present and unborrowed.
 // - A value greater than `NEUTRAL` means that the value is immutably borrowed.
 //
-const EMPTY: usize = 0;
-const NEUTRAL: usize = usize::MAX / 2;
+const EMPTY: u32 = 0;
+const NEUTRAL: u32 = u32::MAX / 2;
 
 type CellBorrowRef<'b> = CellBorrow<'b, false>;
 type CellBorrowMut<'a> = CellBorrow<'a, true>;
 
 #[derive(Debug)]
 struct CellBorrow<'b, const MUTABLE: bool> {
-    state: &'b Cell<usize>,
+    state: &'b Cell<u32>,
 }
 
 impl<'b> CellBorrowRef<'b> {
     #[inline(always)]
-    fn acquire(state_cell: &'b Cell<usize>, location: &BorrowTracker) -> Option<Self> {
+    fn acquire(state_cell: &'b Cell<u32>, location: &BorrowTracker) -> Option<Self> {
         let state = state_cell.get();
 
         // Increment the state unconditionally
@@ -81,7 +81,7 @@ impl<'b> CellBorrowRef<'b> {
 
 impl<'b> CellBorrowMut<'b> {
     #[inline(always)]
-    fn acquire(state_cell: &'b Cell<usize>, location: &BorrowTracker) -> Option<Self> {
+    fn acquire(state_cell: &'b Cell<u32>, location: &BorrowTracker) -> Option<Self> {
         let state = state_cell.get();
         if state == NEUTRAL {
             location.set();
@@ -101,7 +101,7 @@ impl<const MUTABLE: bool> Clone for CellBorrow<'_, MUTABLE> {
             assert_ne!(state, EMPTY + 1, "too many mutable borrows");
             state - 1
         } else {
-            assert_ne!(state, usize::MAX, "too many immutable borrows");
+            assert_ne!(state, u32::MAX, "too many immutable borrows");
             state + 1
         };
         self.state.set(state);
@@ -182,7 +182,7 @@ impl fmt::Display for BorrowMutError {
 }
 
 // Internal
-fn fmt_borrow_error_prefix(f: &mut fmt::Formatter, state: usize, mutably: bool) -> fmt::Result {
+fn fmt_borrow_error_prefix(f: &mut fmt::Formatter, state: u32, mutably: bool) -> fmt::Result {
     write!(
         f,
         "failed to borrow cell {}: ",
@@ -218,7 +218,7 @@ cfgenius::cond! {
     if macro(tracks_borrow_location) {
         #[derive(Clone)]
         struct CommonBorrowError<const MUTABLY: bool> {
-            state: usize,
+            state: u32,
             location: Option<&'static Location<'static>>,
         }
 
@@ -263,7 +263,7 @@ cfgenius::cond! {
     } else {
         #[derive(Clone)]
         struct CommonBorrowError<const MUTABLY: bool> {
-            state: usize,
+            state: u32,
         }
 
         impl<const MUTABLY: bool> CommonBorrowError<MUTABLY> {
@@ -294,7 +294,7 @@ cfgenius::cond! {
 // === OptRefCell === //
 
 pub struct OptRefCell<T> {
-    state: Cell<usize>,
+    state: Cell<u32>,
     borrowed_at: BorrowTracker,
     value: UnsafeCell<MaybeUninit<T>>,
 }
