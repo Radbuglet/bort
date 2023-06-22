@@ -27,7 +27,7 @@ impl<T: 'static> Obj<T> {
     }
 
     pub fn insert(entity: Entity, value: T) -> Self {
-        entity.insert_with_obj(value).0
+        entity.insert_with_obj(value).1
     }
 
     pub fn wrap(entity: Entity) -> Self {

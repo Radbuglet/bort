@@ -1,7 +1,7 @@
-use bort::{OwnedEntity, Tag};
+use bort::{entity::VirtualTag, OwnedEntity};
 
 fn main() {
-    let foo = Tag::new();
+    let foo = VirtualTag::new();
 
     let bar = OwnedEntity::new();
 
