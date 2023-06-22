@@ -35,6 +35,7 @@ pub(crate) fn db(token: &'static MainThreadToken) -> OptRefMut<'static, DbRoot> 
                 comp_list_map: SetMap::default(),
                 tag_list_map: SetMap::default(),
                 storages: FxHashMap::default(),
+                dirty_entities: Vec::new(),
             }),
         );
     }
@@ -46,21 +47,26 @@ pub(crate) struct DbRoot {
     pub(crate) uid_gen: NonZeroU64,
     pub(crate) alive_entities: NopHashMap<Entity, DbEntity>,
     pub(crate) comp_list_map: DbComponentListMap,
-    pub(crate) tag_list_map: DbArchetypeListMap,
+    pub(crate) tag_list_map: DbTagListMap,
     pub(crate) storages: FxHashMap<TypeId, &'static (dyn Any + Sync)>,
+    pub(crate) dirty_entities: Vec<Entity>,
 }
 
 #[derive(Copy, Clone)]
 pub(crate) struct DbEntity {
     pub(crate) comp_list: DbComponentListRef,
-    pub(crate) tag_list: DbArchetypeListRef,
+    pub(crate) virtual_tag_list: DbTagListRef,
+    pub(crate) layout_tag_list: DbTagListRef,
+    pub(crate) heap_index: usize,
+    pub(crate) slot_index: usize,
 }
 
 pub(crate) type DbStorage<T> = NOptRefCell<DbStorageInner<T>>;
 
 #[derive(Debug)]
 pub(crate) struct DbStorageInner<T: 'static> {
-    pub(crate) misc_block_alloc: BlockAllocator<Heap<T>>,
+    pub(crate) anon_block_alloc: BlockAllocator<Heap<T>>,
+    pub(crate) archetypes: FxHashMap<DbTagListRef, Vec<Heap<T>>>,
     pub(crate) mappings: NopHashMap<Entity, DbEntityMapping<T>>,
 }
 
@@ -72,7 +78,8 @@ pub(crate) struct DbEntityMapping<T: 'static> {
 
 #[derive(Debug)]
 pub(crate) enum DbEntityMappingHeap<T: 'static> {
-    Misc(BlockReservation<Heap<T>>),
+    Anonymous(BlockReservation<Heap<T>>),
+    External,
 }
 
 // === ComponentList === //
@@ -127,13 +134,16 @@ impl PartialEq for DbComponentType {
 pub(crate) type DbComponentListMap = SetMap<DbComponentType, (), LeakyArena>;
 pub(crate) type DbComponentListRef = SetMapPtr<DbComponentType, (), LeakyArena>;
 
-// === Archetype === //
+// === TagList === //
 
 #[derive(Default)]
-pub(crate) struct DbArchetype {}
+pub(crate) struct DbTagList {
+    pub(crate) entity_heaps: Vec<Box<[Entity]>>,
+    pub(crate) last_heap_len: usize,
+}
 
-pub(crate) type DbArchetypeListMap = SetMap<Tag, DbArchetype, FreeListArena>;
-pub(crate) type DbArchetypeListRef = SetMapPtr<Tag, DbArchetype, FreeListArena>;
+pub(crate) type DbTagListMap = SetMap<Tag, DbTagList, FreeListArena>;
+pub(crate) type DbTagListRef = SetMapPtr<Tag, DbTagList, FreeListArena>;
 
 // === Shared logic === //
 

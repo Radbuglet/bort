@@ -22,8 +22,8 @@ use crate::{
     util::{
         arena::SpecArena,
         block::BlockAllocator,
-        hash_map::NopHashMap,
-        misc::{leak, AnyDowncastExt, RawFmt},
+        hash_map::{FxHashMap, NopHashMap},
+        misc::{const_new_nz_u64, leak, AnyDowncastExt, RawFmt},
     },
 };
 
@@ -42,7 +42,8 @@ pub fn storage<T: 'static>() -> Storage<T> {
         .entry(TypeId::of::<T>())
         .or_insert_with(|| {
             leak(DbStorage::new_full(DbStorageInner::<T> {
-                misc_block_alloc: BlockAllocator::default(),
+                anon_block_alloc: BlockAllocator::default(),
+                archetypes: FxHashMap::default(),
                 mappings: NopHashMap::default(),
             }))
         });
@@ -86,6 +87,43 @@ impl<T: 'static> Storage<T> {
             }
         };
 
+        // If the entity is still in its empty layout and its virtual layout is not empty, transition
+        // it to its virtual layout.
+        if &entity_info.layout_tag_list == db.tag_list_map.root()
+            && &entity_info.virtual_tag_list != db.tag_list_map.root()
+        {
+            // Update the marked layout
+            entity_info.layout_tag_list = entity_info.virtual_tag_list;
+
+            // Assign ourselves a slot in this layout
+            let tag_list_info = db
+                .tag_list_map
+                .arena_mut()
+                .get_mut(&entity_info.layout_tag_list)
+                .value_mut();
+
+            // First, ensure that we have the capacity for it.
+            let last_heap_capacity = tag_list_info
+                .entity_heaps
+                .last()
+                .map_or(0, |heap| heap.len());
+
+            if tag_list_info.last_heap_len == last_heap_capacity {
+                tag_list_info
+                    .entity_heaps
+                    .push(Box::from_iter((0..128).map(|_| Entity::PLACEHOLDER)));
+                tag_list_info.last_heap_len = 0;
+            }
+
+            // Then, give ourself a slot
+            entity_info.heap_index = tag_list_info.entity_heaps.len() - 1;
+            entity_info.slot_index = tag_list_info.last_heap_len;
+
+            // And mark ourselves in the archetype
+            tag_list_info.entity_heaps.last_mut().unwrap()[tag_list_info.last_heap_len] = entity;
+            tag_list_info.last_heap_len += 1;
+        }
+
         // Update the value
         match inner.mappings.entry(entity) {
             hashbrown::hash_map::Entry::Occupied(entry) => {
@@ -102,20 +140,52 @@ impl<T: 'static> Storage<T> {
                     .lookup_extension(Some(&entity_info.comp_list), DbComponentType::of::<T>());
 
                 // Allocate a slot for this object
-                let resv = inner.misc_block_alloc.alloc(|sz| Heap::new(self.token, sz));
-                let slot = inner
-                    .misc_block_alloc
-                    .block_mut(&resv.block)
-                    .slot(resv.slot);
+                let (resv, slot) =
+                    if let Some(heaps) = inner.archetypes.get_mut(&entity_info.layout_tag_list) {
+                        // We need to allocate in the arena
 
-                // Write the value to the slot
-                slot.set_value_owner_pair(self.token, Some((entity, value)));
+                        // Determine our tag list
+                        let tag_list_info = db
+                            .tag_list_map
+                            .arena()
+                            .get(&entity_info.layout_tag_list)
+                            .value();
+
+                        // Ensure that we have enough heaps to process the request
+                        let min_len = entity_info.heap_index + 1;
+                        if heaps.len() < min_len {
+                            heaps.extend((heaps.len()..min_len).map(|i| {
+                                Heap::new(self.token, tag_list_info.entity_heaps[i].len())
+                            }));
+                        }
+
+                        // Fetch our slot
+                        let slot = heaps[entity_info.heap_index].slot(entity_info.slot_index);
+
+                        // Write the value to the slot
+                        slot.set_value_owner_pair(self.token, Some((entity, value)));
+
+                        let slot = slot.slot();
+                        (DbEntityMappingHeap::External, slot)
+                    } else {
+                        // We need to allocate an anonymous block
+                        let resv = inner.anon_block_alloc.alloc(|sz| Heap::new(self.token, sz));
+                        let slot = inner
+                            .anon_block_alloc
+                            .block_mut(&resv.block)
+                            .slot(resv.slot);
+
+                        // Write the value to the slot
+                        slot.set_value_owner_pair(self.token, Some((entity, value)));
+
+                        let slot = slot.slot();
+                        (DbEntityMappingHeap::Anonymous(resv), slot)
+                    };
 
                 // Insert the entry
-                let slot = slot.slot();
                 entry.insert(DbEntityMapping {
                     target: slot,
-                    heap: DbEntityMappingHeap::Misc(resv),
+                    heap: resv,
                 });
 
                 (Obj::from_raw_parts(entity, slot), None)
@@ -169,7 +239,8 @@ impl<T: 'static> Storage<T> {
 
         // Remove the reservation in the heap's allocator.
         match removed.heap {
-            DbEntityMappingHeap::Misc(resv) => inner.misc_block_alloc.dealloc(resv, drop),
+            DbEntityMappingHeap::Anonymous(resv) => inner.anon_block_alloc.dealloc(resv, drop),
+            DbEntityMappingHeap::External => { /* (left blank) */ }
         }
 
         removed_value
@@ -229,6 +300,8 @@ pub(crate) static DEBUG_ENTITY_COUNTER: atomic::AtomicU64 = atomic::AtomicU64::n
 pub struct Entity(NonZeroU64);
 
 impl Entity {
+    const PLACEHOLDER: Self = Entity(const_new_nz_u64(u64::MAX));
+
     pub fn new_unmanaged() -> Self {
         let token = MainThreadToken::acquire_fmt("fetch entity component data");
         let db = &mut *db(token);
@@ -241,7 +314,10 @@ impl Entity {
             me,
             DbEntity {
                 comp_list: *db.comp_list_map.root(),
-                tag_list: *db.tag_list_map.root(),
+                virtual_tag_list: *db.tag_list_map.root(),
+                layout_tag_list: *db.tag_list_map.root(),
+                heap_index: 0,
+                slot_index: 0,
             },
         );
 
@@ -315,38 +391,54 @@ impl Entity {
         Obj::wrap(self)
     }
 
-    pub fn tag(self, tag: Tag) {
-        let mut db_guard = db(MainThreadToken::acquire_fmt("tag an entity"));
+    fn tag_common(self, tag: Tag, is_add: bool) {
+        let mut db_guard = db(MainThreadToken::acquire_fmt("tag or untag an entity"));
         let db = &mut *db_guard;
 
+        // Fetch the entity info
         let entity_info = match db.alive_entities.get_mut(&self) {
             Some(entity_info) => entity_info,
             None => {
                 drop(db_guard);
-                panic!("attempted to tag the dead entity {self:?}");
+                panic!("attempted to tag or untag the dead entity {self:?}");
             }
         };
 
-        entity_info.tag_list = db
-            .tag_list_map
-            .lookup_extension(Some(&entity_info.tag_list), tag);
+        // Determine whether we began dirty
+        let was_dirty = entity_info.layout_tag_list != entity_info.virtual_tag_list;
+
+        // Update the list
+        entity_info.virtual_tag_list = if is_add {
+            db.tag_list_map
+                .lookup_extension(Some(&entity_info.virtual_tag_list), tag)
+        } else {
+            db.tag_list_map
+                .lookup_de_extension(&entity_info.virtual_tag_list, tag)
+        };
+
+        // Determine whether we became dirty
+        let is_dirty = entity_info.layout_tag_list != entity_info.virtual_tag_list;
+
+        // Add the entity to the dirty list if it became dirty.
+        //
+        // N.B. Yes, one could imagine a scenario where the entity becomes dirty, cleans itself, and
+        // then becomes dirty again, allowing itself to be placed twice into the dirty list. This is
+        // fine because the dirty list can support false positives and handling this rare case
+        // properly would require additional metadata we really don't want to store.
+        //
+        // Finally, we fully ignore this logic if the entity's layout is empty because those layouts
+        // will be transitioned to a non-empty layout on the first component insertion.
+        if &entity_info.layout_tag_list != db.tag_list_map.root() && is_dirty && !was_dirty {
+            db.dirty_entities.push(self);
+        }
+    }
+
+    pub fn tag(self, tag: Tag) {
+        self.tag_common(tag, true);
     }
 
     pub fn untag(self, tag: Tag) {
-        let mut db_guard = db(MainThreadToken::acquire_fmt("untag an entity"));
-        let db = &mut *db_guard;
-
-        let entity_info = match db.alive_entities.get_mut(&self) {
-            Some(entity_info) => entity_info,
-            None => {
-                drop(db_guard);
-                panic!("attempted to untag the dead entity {self:?}");
-            }
-        };
-
-        entity_info.tag_list = db
-            .tag_list_map
-            .lookup_de_extension(&entity_info.tag_list, tag);
+        self.tag_common(tag, false);
     }
 
     pub fn is_tagged(self, tag: Tag) -> bool {
@@ -363,7 +455,7 @@ impl Entity {
 
         db.tag_list_map
             .arena()
-            .get(&entity_info.tag_list)
+            .get(&entity_info.virtual_tag_list)
             .has_key(&tag)
     }
 
@@ -406,6 +498,10 @@ impl fmt::Debug for Entity {
 
                 if let Some(label) = self.try_get::<DebugLabel>() {
                     builder.field(&label);
+                }
+
+                if *self == Self::PLACEHOLDER {
+                    builder.field(&RawFmt("<possibly a placeholder>"));
                 }
 
                 builder.field(&Id(self.0));
