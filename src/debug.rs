@@ -34,6 +34,13 @@ pub fn slot_count() -> u64 {
     DEBUG_SLOT_COUNTER.load(atomic::Ordering::Relaxed)
 }
 
+pub fn dump_database_state() -> String {
+    format!(
+        "{:#?}",
+        DbRoot::get(MainThreadToken::acquire_fmt("dump the database state"))
+    )
+}
+
 #[derive(Debug, Clone)]
 pub struct DebugLabel(pub Cow<'static, str>);
 

@@ -1,5 +1,4 @@
 use std::{
-    any::TypeId,
     fmt,
     marker::PhantomData,
     mem::ManuallyDrop,
@@ -10,10 +9,11 @@ use std::{
 use derive_where::derive_where;
 
 use crate::{
+    database::InertEntity,
     entity::Entity,
     util::{
         hash_map::{FxHashBuilder, FxHashMap},
-        misc::leak,
+        misc::{leak, NamedTypeId},
     },
 };
 
@@ -28,6 +28,7 @@ pub(crate) static DEBUG_SLOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 // === ThreadedPtrMut == //
 
+#[derive_where(Debug)]
 #[derive_where(Copy, Clone)]
 struct ThreadedPtrRef<T: ?Sized>(pub *const T);
 
@@ -36,7 +37,7 @@ unsafe impl<T: ?Sized> Sync for ThreadedPtrRef<T> {}
 
 // === Indirector === //
 
-static FREE_INDIRECTORS: NOptRefCell<FxHashMap<TypeId, IndirectorSet>> =
+static FREE_INDIRECTORS: NOptRefCell<FxHashMap<NamedTypeId, IndirectorSet>> =
     NOptRefCell::new_full(FxHashMap::with_hasher(FxHashBuilder::new()));
 
 struct IndirectorSet {
@@ -45,7 +46,7 @@ struct IndirectorSet {
 }
 
 struct Indirector {
-    owner: NMainCell<Option<Entity>>,
+    owner: NMainCell<Option<InertEntity>>,
     value: NMainCell<ThreadedPtrRef<()>>,
 }
 
@@ -60,17 +61,15 @@ impl Default for Indirector {
 
 // === Heap === //
 
-#[derive(Debug)]
-struct HeapValue<T> {
-    value: NOptRefCell<T>,
-}
-
-#[derive(Debug)]
 pub struct Heap<T: 'static> {
     // N.B. mutability is not transitive through this box since indirectors will be referencing these
     // values.
     values: ManuallyDrop<Box<[HeapValue<T>]>>,
     slots: Box<[Slot<T>]>,
+}
+
+struct HeapValue<T> {
+    value: NOptRefCell<T>,
 }
 
 impl<T> Heap<T> {
@@ -82,14 +81,16 @@ impl<T> Heap<T> {
 
         // Allocate free slots
         let mut free_slots = FREE_INDIRECTORS.borrow_mut(token);
-        let free_slots = free_slots
-            .entry(TypeId::of::<T>())
-            .or_insert_with(|| IndirectorSet {
-                empty: ThreadedPtrRef(leak(HeapValue {
-                    value: NOptRefCell::new_empty(),
-                }) as *const HeapValue<T> as *const ()),
-                free_indirectors: Vec::new(),
-            });
+        let free_slots =
+            free_slots
+                .entry(NamedTypeId::of::<T>())
+                .or_insert_with(|| IndirectorSet {
+                    empty: ThreadedPtrRef(leak(HeapValue {
+                        value: NOptRefCell::new_empty(),
+                    }) as *const HeapValue<T>
+                        as *const ()),
+                    free_indirectors: Vec::new(),
+                });
 
         let free_slots = &mut free_slots.free_indirectors;
 
@@ -154,6 +155,12 @@ impl<T> Heap<T> {
     }
 }
 
+impl<T> fmt::Debug for Heap<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Heap").field("slots", &self.slots).finish()
+    }
+}
+
 impl<T> Drop for Heap<T> {
     fn drop(&mut self) {
         let token = MainThreadToken::acquire_fmt("destroy a heap");
@@ -167,7 +174,7 @@ impl<T> Drop for Heap<T> {
 
         // Free all slots from their indirector and add them to the free indirector set.
         let mut free_slots = FREE_INDIRECTORS.borrow_mut(token);
-        let entry = free_slots.get_mut(&TypeId::of::<T>()).unwrap();
+        let entry = free_slots.get_mut(&NamedTypeId::of::<T>()).unwrap();
 
         for slot in self.slots.iter() {
             slot.indirector.value.set(token, entry.empty);
@@ -197,7 +204,10 @@ impl<'a, T: 'static> DirectSlot<'a, T> {
     }
 
     pub fn set_owner(self, token: &MainThreadToken, owner: Option<Entity>) {
-        self.slot.indirector.owner.set(token, owner);
+        self.slot
+            .indirector
+            .owner
+            .set(token, owner.map(|ent| ent.inert));
     }
 
     pub fn set_value(self, token: &impl BorrowMutToken<T>, value: Option<T>) -> Option<T> {
@@ -249,7 +259,11 @@ impl<'a, T: 'static> DirectSlot<'a, T> {
     }
 
     pub fn owner(self, token: &impl Token) -> Option<Entity> {
-        self.slot.indirector.owner.get(token)
+        self.slot
+            .indirector
+            .owner
+            .get(token)
+            .map(|ent| ent.into_dangerous_entity())
     }
 
     pub fn get_or_none(self, token: &impl GetToken<T>) -> Option<&T> {
@@ -338,7 +352,10 @@ pub struct Slot<T: 'static> {
 
 impl<T> fmt::Debug for Slot<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Slot").finish_non_exhaustive()
+        f.debug_struct("Slot")
+            .field("owner", &self.indirector.owner)
+            .field("value", &self.indirector.value)
+            .finish_non_exhaustive()
     }
 }
 

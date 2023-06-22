@@ -46,7 +46,7 @@
 
 use hashbrown::hash_map::Entry as HashMapEntry;
 use std::{
-    any::{type_name, TypeId},
+    any::type_name,
     cell::Cell,
     fmt,
     marker::PhantomData,
@@ -58,7 +58,10 @@ use std::{
     thread::{self, current, Thread},
 };
 
-use crate::util::{hash_map::FxHashMap, misc::unpoison};
+use crate::util::{
+    hash_map::FxHashMap,
+    misc::{unpoison, NamedTypeId},
+};
 
 // === Access Token Traits === //
 
@@ -368,7 +371,7 @@ impl<T: ?Sized> ExclusiveTokenHint<T> for MainThreadToken {}
 const TOO_MANY_EXCLUSIVE_ERR: &str = "too many TypeExclusiveTokens!";
 const TOO_MANY_READ_ERR: &str = "too many TypeSharedTokens!";
 
-type BorrowMap = FxHashMap<(TypeId, Option<Namespace>), (isize, Option<Thread>)>;
+type BorrowMap = FxHashMap<(NamedTypeId, Option<Namespace>), (isize, Option<Thread>)>;
 
 #[derive(Debug)]
 pub struct ParallelTokenSource {
@@ -382,7 +385,7 @@ impl ParallelTokenSource {
 
     pub fn exclusive_token<T: ?Sized + 'static>(&self) -> TypeExclusiveToken<'_, T> {
         // Increment reference count
-        match self.borrows().entry((TypeId::of::<T>(), None)) {
+        match self.borrows().entry((NamedTypeId::of::<T>(), None)) {
             HashMapEntry::Occupied(mut entry) => {
                 let (rc, Some(owner)) = entry.get_mut() else {
 					unreachable!();
@@ -417,7 +420,7 @@ impl ParallelTokenSource {
 
     pub fn read_token<T: ?Sized + 'static>(&self) -> TypeSharedToken<'_, T> {
         // Increment reference count
-        match self.borrows().entry((TypeId::of::<T>(), None)) {
+        match self.borrows().entry((NamedTypeId::of::<T>(), None)) {
             HashMapEntry::Occupied(mut entry) => {
                 let (rc, owner) = entry.get_mut();
                 debug_assert!(owner.is_none());
@@ -460,7 +463,7 @@ impl<T: ?Sized + 'static> Clone for TypeExclusiveToken<'_, T> {
     fn clone(&self) -> Self {
         if let Some(session) = self.session {
             let mut borrows = session.borrows();
-            let (rc, _) = borrows.get_mut(&(TypeId::of::<T>(), None)).unwrap();
+            let (rc, _) = borrows.get_mut(&(NamedTypeId::of::<T>(), None)).unwrap();
             *rc = rc.checked_add(1).expect(TOO_MANY_EXCLUSIVE_ERR);
         }
 
@@ -476,7 +479,7 @@ impl<T: ?Sized + 'static> Drop for TypeExclusiveToken<'_, T> {
     fn drop(&mut self) {
         if let Some(session) = self.session {
             let mut borrows = session.borrows();
-            let HashMapEntry::Occupied(mut entry) = borrows.entry((TypeId::of::<T>(), None)) else {
+            let HashMapEntry::Occupied(mut entry) = borrows.entry((NamedTypeId::of::<T>(), None)) else {
 				unreachable!()
 			};
 
@@ -519,7 +522,7 @@ impl<T: ?Sized + 'static> fmt::Debug for TypeSharedToken<'_, T> {
 impl<T: ?Sized + 'static> Clone for TypeSharedToken<'_, T> {
     fn clone(&self) -> Self {
         let mut borrows = self.session.borrows();
-        let (rc, _) = borrows.get_mut(&(TypeId::of::<T>(), None)).unwrap();
+        let (rc, _) = borrows.get_mut(&(NamedTypeId::of::<T>(), None)).unwrap();
         *rc = rc.checked_sub(1).expect(TOO_MANY_READ_ERR);
 
         Self {
@@ -532,7 +535,7 @@ impl<T: ?Sized + 'static> Clone for TypeSharedToken<'_, T> {
 impl<T: ?Sized + 'static> Drop for TypeSharedToken<'_, T> {
     fn drop(&mut self) {
         let mut borrows = self.session.borrows();
-        let HashMapEntry::Occupied(mut entry) = borrows.entry((TypeId::of::<T>(), None)) else {
+        let HashMapEntry::Occupied(mut entry) = borrows.entry((NamedTypeId::of::<T>(), None)) else {
 			unreachable!()
 		};
 

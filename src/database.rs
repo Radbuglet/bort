@@ -1,5 +1,5 @@
 use std::{
-    any::{type_name, Any, TypeId},
+    any::{type_name, Any},
     fmt, hash, mem,
     num::NonZeroU64,
 };
@@ -19,24 +19,25 @@ use crate::{
         arena::{FreeListArena, LeakyArena, SpecArena},
         block::{BlockAllocator, BlockReservation},
         hash_map::{FxHashMap, FxHashSet, NopHashMap},
-        misc::{const_new_nz_u64, leak, xorshift64, AnyDowncastExt, RawFmt},
+        misc::{const_new_nz_u64, leak, xorshift64, AnyDowncastExt, NamedTypeId, RawFmt},
         set_map::{SetMap, SetMapPtr},
     },
 };
 
 // === Root === //
 
+#[derive(Debug)]
 pub struct DbRoot {
     uid_gen: NonZeroU64,
     alive_entities: NopHashMap<InertEntity, DbEntity>,
     comp_list_map: DbComponentListMap,
     tag_list_map: DbTagListMap,
-    storages: FxHashMap<TypeId, &'static (dyn Any + Sync)>,
+    storages: FxHashMap<NamedTypeId, &'static dyn DbAnyStorage>,
     dirty_entities: Vec<InertEntity>,
     debug_total_spawns: u64,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 struct DbEntity {
     comp_list: DbComponentListRef,
     virtual_tag_list: DbTagListRef,
@@ -45,21 +46,40 @@ struct DbEntity {
     slot_index: usize,
 }
 
+// === Storage === //
+
+pub trait DbAnyStorage: fmt::Debug + Sync {
+    fn as_any(&self) -> &(dyn Any + Sync);
+}
+
 pub type DbStorage<T> = NOptRefCell<DbStorageInner<T>>;
 
+#[derive_where(Debug)]
 pub struct DbStorageInner<T: 'static> {
     anon_block_alloc: BlockAllocator<Heap<T>>,
     archetype_heap_runs: FxHashMap<DbTagListRef, Vec<Heap<T>>>,
     mappings: NopHashMap<InertEntity, DbEntityMapping<T>>,
 }
 
-#[derive(Debug)]
+impl<T: 'static> DbAnyStorage for DbStorage<T> {
+    fn as_any(&self) -> &(dyn Any + Sync) {
+        self
+    }
+}
+
 struct DbEntityMapping<T: 'static> {
     target: Slot<T>,
     heap: DbEntityMappingHeap<T>,
 }
 
-#[derive(Debug)]
+impl<T> fmt::Debug for DbEntityMapping<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DbEntityMapping")
+            .field("target", &self.target)
+            .finish_non_exhaustive()
+    }
+}
+
 enum DbEntityMappingHeap<T: 'static> {
     Anonymous(BlockReservation<Heap<T>>),
     External,
@@ -69,9 +89,18 @@ enum DbEntityMappingHeap<T: 'static> {
 
 #[derive(Copy, Clone)]
 struct DbComponentType {
-    pub id: TypeId,
+    pub id: NamedTypeId,
     pub name: &'static str,
     pub dtor: fn(&MainThreadToken, &mut DbRoot, InertEntity),
+}
+
+impl fmt::Debug for DbComponentType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DbComponentType")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
 }
 
 impl DbComponentType {
@@ -83,7 +112,7 @@ impl DbComponentType {
         }
 
         Self {
-            id: TypeId::of::<T>(),
+            id: NamedTypeId::of::<T>(),
             name: type_name::<T>(),
             dtor: dtor::<T>,
         }
@@ -121,8 +150,9 @@ type DbComponentListRef = SetMapPtr<DbComponentType, (), LeakyArena>;
 
 // === TagList === //
 
+#[derive(Debug)]
 struct DbTagList {
-    managed: FxHashSet<TypeId>,
+    managed: FxHashSet<NamedTypeId>,
     entity_heaps: Vec<Box<[InertEntity]>>,
     last_heap_len: usize,
 }
@@ -130,11 +160,9 @@ struct DbTagList {
 impl DbTagList {
     fn new(tags: &[InertTag]) -> Self {
         Self {
-            managed: FxHashSet::from_iter(
-                tags.iter().filter_map(|tag| {
-                    (tag.ty != TypeId::of::<VirtualTagMarker>()).then_some(tag.ty)
-                }),
-            ),
+            managed: FxHashSet::from_iter(tags.iter().filter_map(|tag| {
+                (tag.ty != NamedTypeId::of::<VirtualTagMarker>()).then_some(tag.ty)
+            })),
             entity_heaps: Vec::new(),
             last_heap_len: 0,
         }
@@ -151,14 +179,14 @@ type DbTagListRef = SetMapPtr<InertTag, DbTagList, FreeListArena>;
 // entirely with inert objects at this layer and add all the useful but not-necessarily-idiomatic
 // features at a higher layer.
 
-#[derive(Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct InertEntity(NonZeroU64);
 
 impl InertEntity {
     pub const PLACEHOLDER: Self = Self(const_new_nz_u64(u64::MAX));
 
     pub const fn into_dangerous_entity(self) -> Entity {
-        Entity(self)
+        Entity { inert: self }
     }
 
     pub fn id(self) -> NonZeroU64 {
@@ -166,12 +194,12 @@ impl InertEntity {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 #[derive_where(Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct InertTag {
     id: NonZeroU64,
     #[derive_where(skip)]
-    ty: TypeId,
+    ty: NamedTypeId,
 }
 
 impl InertTag {
@@ -183,7 +211,7 @@ impl InertTag {
         self.id
     }
 
-    pub fn ty(self) -> TypeId {
+    pub fn ty(self) -> NamedTypeId {
         self.ty
     }
 }
@@ -265,7 +293,7 @@ impl DbRoot {
         self.alive_entities.contains_key(&entity)
     }
 
-    pub fn spawn_tag(&mut self, ty: TypeId) -> InertTag {
+    pub fn spawn_tag(&mut self, ty: NamedTypeId) -> InertTag {
         InertTag {
             id: self.new_uid(),
             ty,
@@ -361,7 +389,7 @@ impl DbRoot {
 
     pub fn get_storage<T: 'static>(&mut self) -> &'static DbStorage<T> {
         self.storages
-            .entry(TypeId::of::<T>())
+            .entry(NamedTypeId::of::<T>())
             .or_insert_with(|| {
                 leak(DbStorage::new_full(DbStorageInner::<T> {
                     anon_block_alloc: BlockAllocator::default(),
@@ -369,6 +397,7 @@ impl DbRoot {
                     mappings: NopHashMap::default(),
                 }))
             })
+            .as_any()
             .downcast_ref()
             .unwrap()
     }
@@ -463,7 +492,7 @@ impl DbRoot {
                         Some(entry_tmp_prolong.get_mut())
                     }
                     hashbrown::hash_map::Entry::Vacant(entry) => {
-                        if tag_list_info.managed.contains(&TypeId::of::<T>()) {
+                        if tag_list_info.managed.contains(&NamedTypeId::of::<T>()) {
                             Some(entry.insert(Vec::new()))
                         } else {
                             None
@@ -605,7 +634,7 @@ impl DbRoot {
             builder.field(&Id(entity.0));
 
             for v in entity_info.comp_list.direct_borrow().keys().iter() {
-                if v.id != TypeId::of::<DebugLabel>() {
+                if v.id != NamedTypeId::of::<DebugLabel>() {
                     builder.field(&RawFmt(v.name));
                 }
             }

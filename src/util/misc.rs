@@ -1,10 +1,13 @@
 use std::{
-    any::Any,
+    any::{type_name, Any, TypeId},
+    borrow::Borrow,
     error::Error,
     fmt,
     num::NonZeroU64,
     sync::{MutexGuard, PoisonError},
 };
+
+use derive_where::derive_where;
 
 // === Random IDs === //
 
@@ -54,6 +57,68 @@ pub struct RawFmt<'a>(pub &'a str);
 impl fmt::Debug for RawFmt<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.0)
+    }
+}
+
+// === NamedTypeId === //
+
+#[derive(Copy, Clone)]
+#[derive_where(Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct NamedTypeId {
+    id: TypeId,
+    #[derive_where(skip)]
+    #[cfg(debug_assertions)]
+    name: Option<&'static str>,
+}
+
+impl fmt::Debug for NamedTypeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        #[cfg(debug_assertions)]
+        if let Some(name) = self.name {
+            return write!(f, "TypeId<{name}>");
+        }
+
+        self.id.fmt(f)
+    }
+}
+
+impl NamedTypeId {
+    pub fn of<T: ?Sized + 'static>() -> Self {
+        Self {
+            id: TypeId::of::<T>(),
+            #[cfg(debug_assertions)]
+            name: Some(type_name::<T>()),
+        }
+    }
+
+    pub fn from_raw(id: TypeId) -> Self {
+        Self {
+            id,
+            #[cfg(debug_assertions)]
+            name: None,
+        }
+    }
+
+    pub fn raw(self) -> TypeId {
+        self.id
+    }
+}
+
+impl Borrow<TypeId> for NamedTypeId {
+    fn borrow(&self) -> &TypeId {
+        &self.id
+    }
+}
+
+impl From<NamedTypeId> for TypeId {
+    fn from(id: NamedTypeId) -> Self {
+        id.raw()
+    }
+}
+
+impl From<TypeId> for NamedTypeId {
+    fn from(raw: TypeId) -> Self {
+        Self::from_raw(raw)
     }
 }
 

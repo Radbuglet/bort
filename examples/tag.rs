@@ -1,7 +1,7 @@
-use bort::{entity::VirtualTag, OwnedEntity};
+use bort::{debug::dump_database_state, OwnedEntity, Tag};
 
 fn main() {
-    let foo = VirtualTag::new();
+    let foo = Tag::<i32>::new();
 
     let bar = OwnedEntity::new();
 
@@ -15,6 +15,8 @@ fn main() {
     bar.tag(foo);
     assert!(bar.is_tagged(foo));
 
+    bar.insert(1i32);
+
     println!("untagged 1");
     bar.untag(foo);
     assert!(!bar.is_tagged(foo));
@@ -22,4 +24,6 @@ fn main() {
     println!("untagged 2");
     bar.untag(foo);
     assert!(!bar.is_tagged(foo));
+
+    println!("{}", dump_database_state());
 }

@@ -1,4 +1,4 @@
-use std::{hash, iter, slice};
+use std::{fmt, hash, iter, slice};
 
 use derive_where::derive_where;
 use hashbrown::raw::RawTable;
@@ -127,15 +127,26 @@ where
     arena: Arena<SetMapEntry<K, V, A>, A>,
 }
 
-pub struct SetMapEntry<K, V, A: ArenaKind>
+impl<K, V, A: ArenaKind> fmt::Debug for SetMap<K, V, A>
 where
     SetMapEntry<K, V, A>: StorableIn<A>,
+    K: fmt::Debug,
+    V: fmt::Debug,
 {
-    self_ptr: Option<SetMapPtr<K, V, A>>,
-    keys: Box<[K]>,
-    extensions: FxHashMap<K, SetMapPtr<K, V, A>>,
-    de_extensions: FxHashMap<K, SetMapPtr<K, V, A>>,
-    value: V,
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut builder = f.debug_map();
+
+        #[allow(unsafe_code)] // TODO: Remove unsafe code
+        unsafe {
+            for ptr in self.map.iter() {
+                let (_, ptr) = ptr.as_ref();
+                let entry = self.arena.get(ptr);
+                builder.entry(&entry.keys, &entry.value);
+            }
+        }
+
+        builder.finish()
+    }
 }
 
 impl<K, V, A: ArenaKind> Default for SetMap<K, V, A>
@@ -392,6 +403,31 @@ where
 
     fn make_iter(&self, base: &'a [K], add: K) -> Self::Iter {
         (self)(base, add)
+    }
+}
+
+pub struct SetMapEntry<K, V, A: ArenaKind>
+where
+    SetMapEntry<K, V, A>: StorableIn<A>,
+{
+    self_ptr: Option<SetMapPtr<K, V, A>>,
+    keys: Box<[K]>,
+    extensions: FxHashMap<K, SetMapPtr<K, V, A>>,
+    de_extensions: FxHashMap<K, SetMapPtr<K, V, A>>,
+    value: V,
+}
+
+impl<K, V, A: ArenaKind> fmt::Debug for SetMapEntry<K, V, A>
+where
+    SetMapEntry<K, V, A>: StorableIn<A>,
+    K: fmt::Debug,
+    V: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SetMapEntry")
+            .field("keys", &self.keys)
+            .field("value", &self.value)
+            .finish()
     }
 }
 
