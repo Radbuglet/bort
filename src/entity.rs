@@ -14,7 +14,7 @@ use crate::{
         heap::Slot,
         token::MainThreadToken,
     },
-    database::{DbRoot, DbStorage, EntityDeadError},
+    database::{DbRoot, DbStorage, EntityDeadError, InertEntity, InertTag},
     debug::AsDebugLabel,
     obj::{Obj, OwnedObj},
     util::misc::RawFmt,
@@ -55,7 +55,7 @@ impl<T: 'static> Storage<T> {
         match DbRoot::get(self.token).insert_component(
             self.token,
             &mut self.inner.borrow_mut(self.token),
-            entity.into_inert_entity(),
+            entity.0,
             value,
         ) {
             Ok((replaced, slot)) => (replaced, Obj::from_raw_parts(entity, slot)),
@@ -71,7 +71,7 @@ impl<T: 'static> Storage<T> {
         match DbRoot::get(self.token).remove_component(
             self.token,
             &mut self.inner.borrow_mut(self.token),
-            entity.into_inert_entity(),
+            entity.0,
         ) {
             Ok(removed) => removed,
             Err(EntityDeadError) => {
@@ -83,7 +83,7 @@ impl<T: 'static> Storage<T> {
     // === Getters === //
 
     pub fn try_get_slot(&self, entity: Entity) -> Option<Slot<T>> {
-        DbRoot::get_component(&self.inner.borrow(self.token), entity.into_inert_entity())
+        DbRoot::get_component(&self.inner.borrow(self.token), entity.0)
     }
 
     pub fn get_slot(&self, entity: Entity) -> Slot<T> {
@@ -125,7 +125,7 @@ impl<T: 'static> Storage<T> {
 // === Entity === //
 
 #[derive(Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
-pub struct Entity(pub(crate) NonZeroU64);
+pub struct Entity(pub(crate) InertEntity);
 
 impl Entity {
     pub fn new_unmanaged() -> Self {
@@ -198,7 +198,7 @@ impl Entity {
 
     pub fn tag(self, tag: impl Into<RawTag>) {
         match DbRoot::get(MainThreadToken::acquire_fmt("tag an entity"))
-            .tag_entity(self.into_inert_entity(), tag.into().into_inert_tag())
+            .tag_entity(self.0, tag.into().0)
         {
             Ok(()) => { /* no-op */ }
             Err(EntityDeadError) => panic!("Attempted to add tag to dead entity {self:?}"),
@@ -207,7 +207,7 @@ impl Entity {
 
     pub fn untag(self, tag: impl Into<RawTag>) {
         match DbRoot::get(MainThreadToken::acquire_fmt("untag an entity"))
-            .untag_entity(self.into_inert_entity(), tag.into().into_inert_tag())
+            .untag_entity(self.0, tag.into().0)
         {
             Ok(()) => {}
             Err(EntityDeadError) => panic!("Attempted to remove tag from dead entity {self:?}"),
@@ -216,7 +216,7 @@ impl Entity {
 
     pub fn is_tagged(self, tag: impl Into<RawTag>) -> bool {
         match DbRoot::get(MainThreadToken::acquire_fmt("query entity tags"))
-            .is_entity_tagged(self.into_inert_entity(), tag.into().into_inert_tag())
+            .is_entity_tagged(self.0, tag.into().0)
         {
             Ok(result) => result,
             Err(EntityDeadError) => panic!("Attempted to query tags of dead entity {self:?}"),
@@ -227,12 +227,12 @@ impl Entity {
         DbRoot::get(MainThreadToken::acquire_fmt(
             "check the liveness state of an entity",
         ))
-        .is_entity_alive(self.into_inert_entity())
+        .is_entity_alive(self.0)
     }
 
     pub fn destroy(self) {
         let token = MainThreadToken::acquire_fmt("destroy entity");
-        match DbRoot::get(token).despawn_entity(token, self.into_inert_entity()) {
+        match DbRoot::get(token).despawn_entity(token, self.0) {
             Ok(()) => {}
             Err(_) => panic!("Attempted to destroy already dead entity {self:?}"),
         }
@@ -241,15 +241,15 @@ impl Entity {
 
 impl fmt::Debug for Entity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        #[derive(Debug)]
-        struct Id(NonZeroU64);
-
         if let Some(token) = MainThreadToken::try_acquire() {
-            DbRoot::get(token).debug_format_entity(f, token, self.into_inert_entity())
+            DbRoot::get(token).debug_format_entity(f, token, self.0)
         } else {
+            #[derive(Debug)]
+            struct Id(NonZeroU64);
+
             f.debug_tuple("Entity")
                 .field(&RawFmt("<cross-thread>"))
-                .field(&Id(self.0))
+                .field(&Id(self.0.id()))
                 .finish()
         }
     }
@@ -404,41 +404,44 @@ pub type VirtualTag = Tag<VirtualTagMarker>;
 #[derive_where(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Tag<T: 'static> {
     _ty: PhantomData<fn() -> T>,
-    id: NonZeroU64,
+    raw: RawTag,
 }
 
 impl<T> Tag<T> {
     pub fn new() -> Self {
         Self {
             _ty: PhantomData,
-            id: RawTag::new(TypeId::of::<T>()).id,
+            raw: RawTag::new(TypeId::of::<T>()),
         }
     }
 
     pub fn raw(self) -> RawTag {
-        RawTag {
-            id: self.id,
-            ty: TypeId::of::<T>(),
-        }
+        self.raw
     }
 }
 
 impl<T> Into<RawTag> for Tag<T> {
     fn into(self) -> RawTag {
-        self.raw()
+        self.raw
     }
 }
 
-#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
-pub struct RawTag {
-    pub(crate) id: NonZeroU64,
-    pub(crate) ty: TypeId,
-}
+#[derive(Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
+pub struct RawTag(pub(crate) InertTag);
 
 impl RawTag {
     pub fn new(ty: TypeId) -> Self {
         DbRoot::get(MainThreadToken::acquire_fmt("create tag"))
             .spawn_tag(ty)
             .into_dangerous_tag()
+    }
+}
+
+impl fmt::Debug for RawTag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RawTag")
+            .field("id", &self.0.id())
+            .field("ty", &self.0.ty())
+            .finish()
     }
 }

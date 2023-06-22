@@ -4,6 +4,8 @@ use std::{
     num::NonZeroU64,
 };
 
+use derive_where::derive_where;
+
 use crate::{
     core::{
         cell::OptRefMut,
@@ -142,37 +144,33 @@ impl InertEntity {
     pub const PLACEHOLDER: Self = Self(const_new_nz_u64(u64::MAX));
 
     pub const fn into_dangerous_entity(self) -> Entity {
-        Entity(self.0)
+        Entity(self)
+    }
+
+    pub fn id(self) -> NonZeroU64 {
+        self.0
     }
 }
 
-impl Entity {
-    pub(crate) fn into_inert_entity(self) -> InertEntity {
-        InertEntity(self.0)
-    }
-}
-
-#[derive(Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Copy, Clone)]
+#[derive_where(Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct InertTag {
     id: NonZeroU64,
+    #[derive_where(skip)]
     ty: TypeId,
 }
 
 impl InertTag {
     pub fn into_dangerous_tag(self) -> RawTag {
-        RawTag {
-            id: self.id,
-            ty: self.ty,
-        }
+        RawTag(self)
     }
-}
 
-impl RawTag {
-    pub(crate) fn into_inert_tag(self) -> InertTag {
-        InertTag {
-            id: self.id,
-            ty: self.ty,
-        }
+    pub fn id(self) -> NonZeroU64 {
+        self.id
+    }
+
+    pub fn ty(self) -> TypeId {
+        self.ty
     }
 }
 
@@ -277,10 +275,12 @@ impl DbRoot {
         // Update the list
         entity_info.virtual_tag_list = if is_add {
             self.tag_list_map
-                .lookup_extension(Some(&entity_info.virtual_tag_list), tag)
+                .lookup_extension(Some(&entity_info.virtual_tag_list), tag, |_| {
+                    Default::default()
+                })
         } else {
             self.tag_list_map
-                .lookup_de_extension(&entity_info.virtual_tag_list, tag)
+                .lookup_de_extension(&entity_info.virtual_tag_list, tag, |_| Default::default())
         };
 
         // Determine whether we became dirty
@@ -408,9 +408,11 @@ impl DbRoot {
             }
             hashbrown::hash_map::Entry::Vacant(entry) => {
                 // Update the component list
-                entity_info.comp_list = self
-                    .comp_list_map
-                    .lookup_extension(Some(&entity_info.comp_list), DbComponentType::of::<T>());
+                entity_info.comp_list = self.comp_list_map.lookup_extension(
+                    Some(&entity_info.comp_list),
+                    DbComponentType::of::<T>(),
+                    |_| Default::default(),
+                );
 
                 // Allocate a slot for this object
                 let (resv, slot) = if let Some(heaps) =
@@ -501,9 +503,11 @@ impl DbRoot {
         // to support removing components from logically dead entities.
         if let Some(removed_value) = removed_value {
             if let Some(entity_info) = self.alive_entities.get_mut(&entity) {
-                entity_info.comp_list = self
-                    .comp_list_map
-                    .lookup_de_extension(&entity_info.comp_list, DbComponentType::of::<T>());
+                entity_info.comp_list = self.comp_list_map.lookup_de_extension(
+                    &entity_info.comp_list,
+                    DbComponentType::of::<T>(),
+                    |_| Default::default(),
+                );
             }
 
             Ok(Some(removed_value))

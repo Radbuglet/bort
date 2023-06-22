@@ -124,7 +124,7 @@ where
     root: SetMapPtr<K, V, A>,
     map: RawTable<(u64, SetMapPtr<K, V, A>)>,
     hasher: FxHashBuilder,
-    heap: Arena<SetMapEntry<K, V, A>, A>,
+    arena: Arena<SetMapEntry<K, V, A>, A>,
 }
 
 pub struct SetMapEntry<K, V, A: ArenaKind>
@@ -145,7 +145,7 @@ where
     V: Default,
 {
     fn default() -> Self {
-        Self::new(Default::default())
+        Self::new(V::default())
     }
 }
 
@@ -153,18 +153,18 @@ impl<K, V, A: ArenaKind> SetMap<K, V, A>
 where
     SetMapEntry<K, V, A>: StorableIn<A>,
     K: 'static + Ord + hash::Hash + Copy,
-    V: Default,
 {
-    pub fn new(mut heap: Arena<SetMapEntry<K, V, A>, A>) -> Self {
+    pub fn new(root: V) -> Self {
+        let mut arena: Arena<SetMapEntry<K, V, A>, A> = Default::default();
         let mut hasher = FxHashBuilder::new();
-        let root = heap.alloc(SetMapEntry {
+        let root = arena.alloc(SetMapEntry {
             self_ptr: None,
             keys: Box::from_iter([]),
             extensions: FxHashMap::default(),
             de_extensions: FxHashMap::default(),
-            value: V::default(),
+            value: root,
         });
-        heap.get_mut(&root).self_ptr = Some(root.clone());
+        arena.get_mut(&root).self_ptr = Some(root.clone());
 
         let mut map = RawTable::default();
         let root_hash = hash_iter(&mut hasher, None::<K>);
@@ -174,7 +174,7 @@ where
             root,
             map,
             hasher,
-            heap,
+            arena,
         }
     }
 
@@ -190,9 +190,10 @@ where
         positive_getter_mut: impl Fn(&mut SetMapEntry<K, V, A>) -> &mut FxHashMap<K, SetMapPtr<K, V, A>>,
         negative_getter_mut: impl Fn(&mut SetMapEntry<K, V, A>) -> &mut FxHashMap<K, SetMapPtr<K, V, A>>,
         iter_ctor: impl for<'a> GoofyIterCtorHack<'a, K>,
+        set_ctor: impl FnOnce(&[K]) -> V,
     ) -> SetMapPtr<K, V, A> {
         let base_ptr = base_ptr.unwrap_or(&self.root);
-        let base_data = self.heap.get(base_ptr);
+        let base_data = self.arena.get(base_ptr);
 
         // Attempt to get the extension from the base element's extension edges.
         //
@@ -220,7 +221,7 @@ where
 
                     eq_iter(
                         keys.clone(),
-                        self.heap.get(candidate_ptr).keys.iter(),
+                        self.arena.get(candidate_ptr).keys.iter(),
                         |a, b| a == *b,
                     )
                 })
@@ -229,7 +230,8 @@ where
             drop(base_data);
 
             // Cache the positive-sense lookup going from base to target.
-            (positive_getter_mut)(&mut self.heap.get_mut(base_ptr)).insert(key, target_ptr.clone());
+            (positive_getter_mut)(&mut self.arena.get_mut(base_ptr))
+                .insert(key, target_ptr.clone());
 
             // Cache the negative-sense lookup going from target to base.
             //
@@ -237,7 +239,7 @@ where
             // `target_ptr` is equal to the `base_ptr`, we can't actually say that the negative sense
             // will also be a no-op (and, indeed, it certainly won't be).
             if base_ptr != target_ptr {
-                (negative_getter_mut)(&mut self.heap.get_mut(target_ptr))
+                (negative_getter_mut)(&mut self.arena.get_mut(target_ptr))
                     .insert(key, base_ptr.clone());
             }
 
@@ -249,26 +251,27 @@ where
         drop(base_data);
 
         let target_ptr = {
+            let value = set_ctor(&keys);
             let mut target_entry = SetMapEntry {
                 self_ptr: None,
                 keys,
                 extensions: FxHashMap::default(),
                 de_extensions: FxHashMap::default(),
-                value: V::default(),
+                value,
             };
 
             // target -> base
             (negative_getter_mut)(&mut target_entry).insert(key, base_ptr.clone());
 
-            self.heap.alloc(target_entry)
+            self.arena.alloc(target_entry)
         };
 
         // base -> target
-        (positive_getter_mut)(&mut self.heap.get_mut(base_ptr)).insert(key, target_ptr.clone());
+        (positive_getter_mut)(&mut self.arena.get_mut(base_ptr)).insert(key, target_ptr.clone());
 
         // self referential & self_id
         {
-            let target = &mut *self.heap.get_mut(&target_ptr);
+            let target = &mut *self.arena.get_mut(&target_ptr);
 
             for key in &*target.keys {
                 target.extensions.insert(key.clone(), target_ptr.clone());
@@ -290,6 +293,7 @@ where
         &mut self,
         base: Option<&SetMapPtr<K, V, A>>,
         key: K,
+        set_ctor: impl FnOnce(&[K]) -> V,
     ) -> SetMapPtr<K, V, A> {
         fn iter_ctor<K: Copy>(
             a: &[K],
@@ -305,10 +309,16 @@ where
             |a: &mut SetMapEntry<K, V, A>| &mut a.extensions,
             |a: &mut SetMapEntry<K, V, A>| &mut a.de_extensions,
             iter_ctor,
+            set_ctor,
         )
     }
 
-    pub fn lookup_de_extension(&mut self, base: &SetMapPtr<K, V, A>, key: K) -> SetMapPtr<K, V, A> {
+    pub fn lookup_de_extension(
+        &mut self,
+        base: &SetMapPtr<K, V, A>,
+        key: K,
+        set_ctor: impl FnOnce(&[K]) -> V,
+    ) -> SetMapPtr<K, V, A> {
         fn iter_ctor<K: Copy>(a: &[K], b: K) -> IterFilter<iter::Copied<slice::Iter<'_, K>>> {
             IterFilter(a.iter().copied(), b)
         }
@@ -320,6 +330,7 @@ where
             |a: &mut SetMapEntry<K, V, A>| &mut a.de_extensions,
             |a: &mut SetMapEntry<K, V, A>| &mut a.extensions,
             iter_ctor,
+            set_ctor,
         )
     }
 
@@ -327,7 +338,7 @@ where
     where
         A: FreeableArenaKind,
     {
-        let removed_data = self.heap.dealloc(removed_ptr.clone());
+        let removed_data = self.arena.dealloc(removed_ptr.clone());
 
         // Because every (de)extension link (besides self referential ones) is doubly linked, we can
         // iterate through each sense of the link and unlink the back-reference to fully strip the
@@ -338,7 +349,7 @@ where
                 continue;
             }
 
-            self.heap.get_mut(&referencer).extensions.remove(key);
+            self.arena.get_mut(&referencer).extensions.remove(key);
         }
 
         for (key, referencer) in &removed_data.extensions {
@@ -347,7 +358,7 @@ where
                 continue;
             }
 
-            self.heap.get_mut(&referencer).de_extensions.remove(key);
+            self.arena.get_mut(&referencer).de_extensions.remove(key);
         }
 
         // We still have to remove the entry from the primary map.
@@ -358,11 +369,11 @@ where
     }
 
     pub fn arena(&self) -> &Arena<SetMapEntry<K, V, A>, A> {
-        &self.heap
+        &self.arena
     }
 
     pub fn arena_mut(&mut self) -> &mut Arena<SetMapEntry<K, V, A>, A> {
-        &mut self.heap
+        &mut self.arena
     }
 }
 
