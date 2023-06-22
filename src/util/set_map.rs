@@ -399,7 +399,6 @@ impl<K, V, A: ArenaKind> SetMapEntry<K, V, A>
 where
     SetMapEntry<K, V, A>: StorableIn<A>,
     K: 'static + Ord + hash::Hash + Copy,
-    V: Default,
 {
     pub fn keys(&self) -> &[K] {
         &self.keys

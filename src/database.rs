@@ -14,11 +14,11 @@ use crate::{
         token_cell::NOptRefCell,
     },
     debug::DebugLabel,
-    entity::{Entity, RawTag},
+    entity::{Entity, RawTag, VirtualTagMarker},
     util::{
         arena::{FreeListArena, LeakyArena, SpecArena},
         block::{BlockAllocator, BlockReservation},
-        hash_map::{FxHashMap, NopHashMap},
+        hash_map::{FxHashMap, FxHashSet, NopHashMap},
         misc::{const_new_nz_u64, leak, xorshift64, AnyDowncastExt, RawFmt},
         set_map::{SetMap, SetMapPtr},
     },
@@ -49,7 +49,7 @@ pub type DbStorage<T> = NOptRefCell<DbStorageInner<T>>;
 
 pub struct DbStorageInner<T: 'static> {
     anon_block_alloc: BlockAllocator<Heap<T>>,
-    archetypes: FxHashMap<DbTagListRef, Vec<Heap<T>>>,
+    archetype_heap_runs: FxHashMap<DbTagListRef, Vec<Heap<T>>>,
     mappings: NopHashMap<InertEntity, DbEntityMapping<T>>,
 }
 
@@ -121,10 +121,24 @@ type DbComponentListRef = SetMapPtr<DbComponentType, (), LeakyArena>;
 
 // === TagList === //
 
-#[derive(Default)]
 struct DbTagList {
+    managed: FxHashSet<TypeId>,
     entity_heaps: Vec<Box<[InertEntity]>>,
     last_heap_len: usize,
+}
+
+impl DbTagList {
+    fn new(tags: &[InertTag]) -> Self {
+        Self {
+            managed: FxHashSet::from_iter(
+                tags.iter().filter_map(|tag| {
+                    (tag.ty != TypeId::of::<VirtualTagMarker>()).then_some(tag.ty)
+                }),
+            ),
+            entity_heaps: Vec::new(),
+            last_heap_len: 0,
+        }
+    }
 }
 
 type DbTagListMap = SetMap<InertTag, DbTagList, FreeListArena>;
@@ -187,7 +201,7 @@ impl DbRoot {
                     uid_gen: NonZeroU64::new(1).unwrap(),
                     alive_entities: NopHashMap::default(),
                     comp_list_map: SetMap::default(),
-                    tag_list_map: SetMap::default(),
+                    tag_list_map: SetMap::new(DbTagList::new(&[])),
                     storages: FxHashMap::default(),
                     dirty_entities: Vec::new(),
                     debug_total_spawns: 0,
@@ -274,13 +288,17 @@ impl DbRoot {
 
         // Update the list
         entity_info.virtual_tag_list = if is_add {
-            self.tag_list_map
-                .lookup_extension(Some(&entity_info.virtual_tag_list), tag, |_| {
-                    Default::default()
-                })
+            self.tag_list_map.lookup_extension(
+                Some(&entity_info.virtual_tag_list),
+                tag,
+                DbTagList::new,
+            )
         } else {
-            self.tag_list_map
-                .lookup_de_extension(&entity_info.virtual_tag_list, tag, |_| Default::default())
+            self.tag_list_map.lookup_de_extension(
+                &entity_info.virtual_tag_list,
+                tag,
+                DbTagList::new,
+            )
         };
 
         // Determine whether we became dirty
@@ -293,9 +311,16 @@ impl DbRoot {
         // fine because the dirty list can support false positives and handling this rare case
         // properly would require additional metadata we really don't want to store.
         //
-        // Finally, we fully ignore this logic if the entity's layout is empty because those layouts
-        // will be transitioned to a non-empty layout on the first component insertion.
-        if &entity_info.layout_tag_list != self.tag_list_map.root() && is_dirty && !was_dirty {
+        // Finally, we never mark entities which satisfy all the following conditions:
+        //
+        // - have an empty tag layout (they will be transitioned lazily at the next insertion)
+        // - hold zero components (necessary in case we mark an existing component as managed)
+        //
+        if &entity_info.layout_tag_list != self.tag_list_map.root()  // empty tag layout
+            && &entity_info.comp_list != self.comp_list_map.root()  // no components
+            && is_dirty  // changed
+            && !was_dirty
+        {
             self.dirty_entities.push(entity);
         }
 
@@ -340,7 +365,7 @@ impl DbRoot {
             .or_insert_with(|| {
                 leak(DbStorage::new_full(DbStorageInner::<T> {
                     anon_block_alloc: BlockAllocator::default(),
-                    archetypes: FxHashMap::default(),
+                    archetype_heap_runs: FxHashMap::default(),
                     mappings: NopHashMap::default(),
                 }))
             })
@@ -404,6 +429,11 @@ impl DbRoot {
                 let entry = entry.get();
                 let replaced = mem::replace(&mut *entry.target.borrow_mut(token), value);
 
+                // N.B. this code does not have to worry about preemptive packing of these old
+                // components into their appropriate archetype because one cannot have occupied
+                // mappings until after the first insertion succeeds, which is the only time
+                // when preemptive packing is expected from us.
+
                 Ok((Some(replaced), entry.target))
             }
             hashbrown::hash_map::Entry::Vacant(entry) => {
@@ -414,18 +444,36 @@ impl DbRoot {
                     |_| Default::default(),
                 );
 
-                // Allocate a slot for this object
-                let (resv, slot) = if let Some(heaps) =
-                    storage.archetypes.get_mut(&entity_info.layout_tag_list)
-                {
-                    // We need to allocate in the arena
+                // Determine our tag list
+                let tag_list_info = self
+                    .tag_list_map
+                    .arena()
+                    .get(&entity_info.layout_tag_list)
+                    .value();
 
-                    // Determine our tag list
-                    let tag_list_info = self
-                        .tag_list_map
-                        .arena()
-                        .get(&entity_info.layout_tag_list)
-                        .value();
+                // Determine whether this component type is managed
+                let mut entry_tmp_prolong;
+
+                let heaps = match storage
+                    .archetype_heap_runs
+                    .entry(entity_info.layout_tag_list)
+                {
+                    hashbrown::hash_map::Entry::Occupied(entry) => {
+                        entry_tmp_prolong = entry;
+                        Some(entry_tmp_prolong.get_mut())
+                    }
+                    hashbrown::hash_map::Entry::Vacant(entry) => {
+                        if tag_list_info.managed.contains(&TypeId::of::<T>()) {
+                            Some(entry.insert(Vec::new()))
+                        } else {
+                            None
+                        }
+                    }
+                };
+
+                // Allocate a slot for this object
+                let (resv, slot) = if let Some(heaps) = heaps {
+                    // We need to allocate in the arena
 
                     // Ensure that we have enough heaps to process the request
                     let min_len = entity_info.heap_index + 1;
