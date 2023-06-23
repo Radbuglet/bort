@@ -25,6 +25,10 @@ use crate::{
     },
 };
 
+// === Helpers === //
+
+const POSSIBLY_A_PLACEHOLDER: RawFmt = RawFmt("<possibly a placeholder>");
+
 // === Root === //
 
 #[derive(Debug)]
@@ -87,7 +91,7 @@ struct DbDirtyDeadEntity {
 
 // === Storage === //
 
-pub trait DbAnyStorage: fmt::Debug + Sync {
+trait DbAnyStorage: fmt::Debug + Sync {
     fn as_any(&self) -> &(dyn Any + Sync);
 }
 
@@ -97,12 +101,7 @@ pub type DbStorage<T> = NOptRefCell<DbStorageInner<T>>;
 pub struct DbStorageInner<T: 'static> {
     anon_block_alloc: BlockAllocator<Heap<T>>,
     mappings: NopHashMap<InertEntity, DbEntityMapping<T>>,
-}
-
-impl<T: 'static> DbAnyStorage for DbStorage<T> {
-    fn as_any(&self) -> &(dyn Any + Sync) {
-        self
-    }
+    heaps: FxHashMap<DbTagListRef, Vec<Heap<T>>>,
 }
 
 struct DbEntityMapping<T: 'static> {
@@ -217,8 +216,21 @@ type DbTagListRef = SetMapPtr<InertTag, DbTagList, FreeListArena>;
 // entirely with inert objects at this layer and add all the useful but not-necessarily-idiomatic
 // features at a higher layer.
 
-#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct InertEntity(NonZeroU64);
+
+impl fmt::Debug for InertEntity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut b = f.debug_tuple("InertEntity");
+        b.field(&self.0);
+
+        if self == &Self::PLACEHOLDER {
+            b.field(&POSSIBLY_A_PLACEHOLDER);
+        }
+
+        b.finish()
+    }
+}
 
 impl InertEntity {
     pub const PLACEHOLDER: Self = Self(const_new_nz_u64(u64::MAX));
@@ -431,7 +443,7 @@ impl DbRoot {
 
     // === Queries === //
 
-    pub fn flush_archetypes(&mut self, token: &MainThreadToken) {
+    pub fn flush_archetypes(&mut self, _token: &MainThreadToken) {
         // Throughout this process, we keep track of which entities have been moved around and they
         // archetype they currently reside.
         let mut moved = NopHashMap::default();
@@ -614,12 +626,6 @@ impl DbRoot {
             entity_info.layout_tag_list = entity_info.virtual_tag_list;
             moved.insert(entity, dest_arch_tag_list);
         }
-
-        // Now that archetype locations are settled, we can handle actual memory swaps, moving
-        // entities into their target slots.
-        println!("Moved: {:?}", moved);
-
-        // TODO!!!
     }
 
     // === Storage management === //
@@ -631,6 +637,7 @@ impl DbRoot {
                 leak(DbStorage::new_full(DbStorageInner::<T> {
                     anon_block_alloc: BlockAllocator::default(),
                     mappings: NopHashMap::default(),
+                    heaps: FxHashMap::default(),
                 }))
             })
             .as_any()
@@ -667,21 +674,59 @@ impl DbRoot {
                     |_| Default::default(),
                 );
 
-                // Allocate a slot for this object
-                let resv = storage.anon_block_alloc.alloc(|sz| Heap::new(token, sz));
-                let slot = storage
-                    .anon_block_alloc
-                    .block_mut(&resv.block)
-                    .slot(resv.slot);
+                // Allocate a slot for this component
+                let external_heaps = match storage.heaps.entry(entity_info.layout_tag_list) {
+                    hashbrown::hash_map::Entry::Occupied(entry) => Some(entry.into_mut()),
+                    hashbrown::hash_map::Entry::Vacant(entry) => self
+                        .tag_list_map
+                        .arena()
+                        .get(&entity_info.layout_tag_list)
+                        .value()
+                        .managed
+                        .contains(&NamedTypeId::of::<T>())
+                        .then(|| entry.insert(Vec::new())),
+                };
 
-                // Write the value to the slot
-                slot.set_value_owner_pair(token, Some((entity.into_dangerous_entity(), value)));
+                let (resv, slot) = if let Some(external_heaps) = external_heaps {
+                    // Ensure that we have the appropriate slot for this entity
+                    let min_heaps_len = entity_info.heap_index + 1;
+                    if external_heaps.len() < min_heaps_len {
+                        let arch = self
+                            .tag_list_map
+                            .arena()
+                            .get(&entity_info.layout_tag_list)
+                            .value();
 
-                // Insert the entry
-                let slot = slot.slot();
+                        external_heaps.extend(
+                            (external_heaps.len()..min_heaps_len)
+                                .map(|i| Heap::new(token, arch.entity_heaps[i].len())),
+                        );
+                    }
+
+                    // Write the value to the slot
+                    let slot = external_heaps[entity_info.heap_index].slot(entity_info.slot_index);
+                    slot.set_value_owner_pair(token, Some((entity.into_dangerous_entity(), value)));
+
+                    (DbEntityMappingHeap::External, slot.slot())
+                } else {
+                    // Allocate a slot for this object
+                    let resv = storage.anon_block_alloc.alloc(|sz| Heap::new(token, sz));
+                    let slot = storage
+                        .anon_block_alloc
+                        .block_mut(&resv.block)
+                        .slot(resv.slot);
+
+                    // Write the value to the slot
+                    slot.set_value_owner_pair(token, Some((entity.into_dangerous_entity(), value)));
+
+                    let slot = slot.slot();
+                    (DbEntityMappingHeap::Anonymous(resv), slot)
+                };
+
+                // Insert the mapping
                 entry.insert(DbEntityMapping {
                     target: slot,
-                    heap: DbEntityMappingHeap::Anonymous(resv),
+                    heap: resv,
                 });
 
                 Ok((None, slot))
@@ -772,7 +817,7 @@ impl DbRoot {
             }
 
             if entity == InertEntity::PLACEHOLDER {
-                builder.field(&RawFmt("<possibly a placeholder>"));
+                builder.field(&POSSIBLY_A_PLACEHOLDER);
             }
 
             builder.field(&Id(entity.0));
@@ -790,6 +835,12 @@ impl DbRoot {
                 .field(&Id(entity.0))
                 .finish()
         }
+    }
+}
+
+impl<T: 'static> DbAnyStorage for DbStorage<T> {
+    fn as_any(&self) -> &(dyn Any + Sync) {
+        self
     }
 }
 

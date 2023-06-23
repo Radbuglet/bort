@@ -15,8 +15,6 @@ fn main() {
     bar.tag(foo);
     assert!(bar.is_tagged(foo));
 
-    bar.insert(1i32);
-
     println!("{}", dump_database_state());
     flush();
     println!("{}", dump_database_state());
@@ -43,6 +41,10 @@ fn main() {
 
     println!("Flushed again");
     flush();
+
+    println!("Inserting");
+    bar.insert(1i32);
+    println!("{}", dump_database_state());
 
     println!("Destroying.");
     bar.destroy();
