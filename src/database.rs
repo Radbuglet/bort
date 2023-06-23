@@ -42,8 +42,8 @@ pub struct DbRoot {
     // A set map keeping track of all component lists present in our application.
     comp_list_map: DbComponentListMap,
 
-    // A set map keeping track of all tag lists present in our application.
-    tag_list_map: DbTagListMap,
+    // A set map keeping track of all archetypes present in our application.
+    arch_map: DbArchetypeMap,
 
     // A map from type ID to storage.
     storages: FxHashMap<NamedTypeId, &'static dyn DbAnyStorage>,
@@ -66,13 +66,13 @@ struct DbEntity {
     comp_list: DbComponentListRef,
 
     // The complete list of tags the user wants attached to this entity.
-    virtual_tag_list: DbTagListRef,
+    virtual_arch: DbArchetypeRef,
 
-    // The tag list which is currently being used to lay components out.
+    // The archetype which is currently being used to lay components out.
     //
     // All components managed by this layout must either adhere to it or be missing from the entity
     // entirely.
-    layout_tag_list: DbTagListRef,
+    physical_arch: DbArchetypeRef,
 
     // The heap containing the entity given its current tag layout.
     heap_index: usize,
@@ -84,7 +84,7 @@ struct DbEntity {
 #[derive(Debug, Copy, Clone)]
 struct DbDirtyDeadEntity {
     entity: InertEntity,
-    layout_tag_list: DbTagListRef,
+    physical_arch: DbArchetypeRef,
     heap_index: usize,
     slot_index: usize,
 }
@@ -99,7 +99,7 @@ trait DbAnyStorage: fmt::Debug + Sync {
         token: &MainThreadToken,
         entity: InertEntity,
         entity_info: &DbEntity,
-        dst_entry: &DbTagList,
+        dst_entry: &DbArchetype,
     );
 }
 
@@ -109,7 +109,7 @@ pub type DbStorage<T> = NOptRefCell<DbStorageInner<T>>;
 pub struct DbStorageInner<T: 'static> {
     anon_block_alloc: BlockAllocator<Heap<T>>,
     mappings: NopHashMap<InertEntity, DbEntityMapping<T>>,
-    heaps: FxHashMap<DbTagListRef, Vec<Heap<T>>>,
+    heaps: FxHashMap<DbArchetypeRef, Vec<Heap<T>>>,
 }
 
 struct DbEntityMapping<T: 'static> {
@@ -196,13 +196,13 @@ type DbComponentListRef = SetMapPtr<DbComponentType, (), LeakyArena>;
 // === TagList === //
 
 #[derive(Debug)]
-struct DbTagList {
+struct DbArchetype {
     managed: FxHashSet<NamedTypeId>,
     entity_heaps: Vec<Box<[InertEntity]>>,
     last_heap_len: usize,
 }
 
-impl DbTagList {
+impl DbArchetype {
     fn new(tags: &[InertTag]) -> Self {
         Self {
             managed: FxHashSet::from_iter(tags.iter().filter_map(|tag| {
@@ -214,8 +214,8 @@ impl DbTagList {
     }
 }
 
-type DbTagListMap = SetMap<InertTag, DbTagList, FreeListArena>;
-type DbTagListRef = SetMapPtr<InertTag, DbTagList, FreeListArena>;
+type DbArchetypeMap = SetMap<InertTag, DbArchetype, FreeListArena>;
+type DbArchetypeRef = SetMapPtr<InertTag, DbArchetype, FreeListArena>;
 
 // === Inert Handles === //
 
@@ -287,7 +287,7 @@ impl DbRoot {
                     uid_gen: NonZeroU64::new(1).unwrap(),
                     alive_entities: NopHashMap::default(),
                     comp_list_map: SetMap::default(),
-                    tag_list_map: SetMap::new(DbTagList::new(&[])),
+                    arch_map: SetMap::new(DbArchetype::new(&[])),
                     storages: FxHashMap::default(),
                     probably_alive_dirty_entities: Vec::new(),
                     dead_dirty_entities: Vec::new(),
@@ -315,8 +315,8 @@ impl DbRoot {
             me,
             DbEntity {
                 comp_list: *self.comp_list_map.root(),
-                virtual_tag_list: *self.tag_list_map.root(),
-                layout_tag_list: *self.tag_list_map.root(),
+                virtual_arch: *self.arch_map.root(),
+                physical_arch: *self.arch_map.root(),
                 heap_index: 0,
                 slot_index: 0,
             },
@@ -341,10 +341,10 @@ impl DbRoot {
 		};
 
         // Mark this entity for cleanup if it's not in an empty layout.
-        if &entity_info.layout_tag_list != self.tag_list_map.root() {
+        if &entity_info.physical_arch != self.arch_map.root() {
             self.dead_dirty_entities.push(DbDirtyDeadEntity {
                 entity,
-                layout_tag_list: entity_info.layout_tag_list,
+                physical_arch: entity_info.physical_arch,
                 heap_index: entity_info.heap_index,
                 slot_index: entity_info.slot_index,
             });
@@ -388,25 +388,19 @@ impl DbRoot {
         };
 
         // Determine whether we began dirty
-        let was_dirty = entity_info.layout_tag_list != entity_info.virtual_tag_list;
+        let was_dirty = entity_info.physical_arch != entity_info.virtual_arch;
 
         // Update the list
-        entity_info.virtual_tag_list = if is_add {
-            self.tag_list_map.lookup_extension(
-                Some(&entity_info.virtual_tag_list),
-                tag,
-                DbTagList::new,
-            )
+        entity_info.virtual_arch = if is_add {
+            self.arch_map
+                .lookup_extension(Some(&entity_info.virtual_arch), tag, DbArchetype::new)
         } else {
-            self.tag_list_map.lookup_de_extension(
-                &entity_info.virtual_tag_list,
-                tag,
-                DbTagList::new,
-            )
+            self.arch_map
+                .lookup_de_extension(&entity_info.virtual_arch, tag, DbArchetype::new)
         };
 
         // Determine whether we became dirty
-        let is_dirty = entity_info.layout_tag_list != entity_info.virtual_tag_list;
+        let is_dirty = entity_info.physical_arch != entity_info.virtual_arch;
 
         // Add the entity to the dirty list if it became dirty. This may happen multiple times but
         // we don't really mind since this list can accept false positives.
@@ -443,9 +437,9 @@ impl DbRoot {
         };
 
         Ok(self
-            .tag_list_map
+            .arch_map
             .arena()
-            .get(&entity_info.virtual_tag_list)
+            .get(&entity_info.virtual_arch)
             .has_key(&tag))
     }
 
@@ -458,21 +452,21 @@ impl DbRoot {
 
         #[derive(Debug, Copy, Clone)]
         struct Moved {
-            src: DbTagListRef,
-            dst: DbTagListRef,
+            src: DbArchetypeRef,
+            dst: DbArchetypeRef,
         }
 
         // Begin by removing dead entities
         'delete_dead: for info in mem::take(&mut self.dead_dirty_entities) {
             // N.B. we know this won't happen because we check for it before adding the entity to the
             // `dead_dirty_entities` list.
-            debug_assert_ne!(info.layout_tag_list, *self.tag_list_map.root());
+            debug_assert_ne!(info.physical_arch, *self.arch_map.root());
 
             // Determine the archetype we'll be working on.
             let archetype = self
-                .tag_list_map
+                .arch_map
                 .arena_mut()
-                .get_mut(&info.layout_tag_list)
+                .get_mut(&info.physical_arch)
                 .value_mut();
 
             // Determine the right candidate for the swap-remove.
@@ -534,8 +528,8 @@ impl DbRoot {
                     Moved {
                         // We know this entity came from this tag because we haven't moved entities
                         // around in archetypes yet.
-                        src: info.layout_tag_list,
-                        dst: info.layout_tag_list,
+                        src: info.physical_arch,
+                        dst: info.physical_arch,
                     },
                 );
 
@@ -565,20 +559,16 @@ impl DbRoot {
 				continue
 			};
 
-            if entity_info.layout_tag_list == entity_info.virtual_tag_list {
+            if entity_info.physical_arch == entity_info.virtual_arch {
                 continue;
             }
 
             // Now, swap-remove the entity from its source archetype.
-            let src_arch_tag_list = entity_info.layout_tag_list;
+            let src_arch_id = entity_info.physical_arch;
 
             // The root archetype doesn't manage any heaps so we ignore transitions to it.
-            if src_arch_tag_list != *self.tag_list_map.root() {
-                let arch = self
-                    .tag_list_map
-                    .arena_mut()
-                    .get_mut(&src_arch_tag_list)
-                    .value_mut();
+            if src_arch_id != *self.arch_map.root() {
+                let arch = self.arch_map.arena_mut().get_mut(&src_arch_id).value_mut();
 
                 // Determine the filler entity
                 let last_entity = arch
@@ -603,8 +593,8 @@ impl DbRoot {
                 // destination field in any useful way and b) we could clobber the src field.
                 if let hashbrown::hash_map::Entry::Vacant(entry) = moved.entry(last_entity) {
                     entry.insert(Moved {
-                        src: src_arch_tag_list,
-                        dst: src_arch_tag_list,
+                        src: src_arch_id,
+                        dst: src_arch_id,
                     });
                 }
 
@@ -622,16 +612,12 @@ impl DbRoot {
 
             // ...and push it to the back of its target archetype.
             let entity_info = self.alive_entities.get_mut(&entity).unwrap();
-            let dest_arch_tag_list = entity_info.virtual_tag_list;
+            let dest_arch_id = entity_info.virtual_arch;
 
             // The root archetype doesn't manage any heaps so we ignore transitions to it.
-            if dest_arch_tag_list != *self.tag_list_map.root() {
+            if dest_arch_id != *self.arch_map.root() {
                 // Add to the target archetype list
-                let arch = self
-                    .tag_list_map
-                    .arena_mut()
-                    .get_mut(&dest_arch_tag_list)
-                    .value_mut();
+                let arch = self.arch_map.arena_mut().get_mut(&dest_arch_id).value_mut();
 
                 if arch.last_heap_len == arch.entity_heaps.last().map_or(0, |heap| heap.len()) {
                     let mut sub_heap = Box::from_iter((0..128).map(|_| InertEntity::PLACEHOLDER));
@@ -652,14 +638,14 @@ impl DbRoot {
             // Regardless of whether we actually moved into a heap, we still have to update our layout
             // and mark ourselves as moved so storages can properly update their mapping to an
             // anonymous one.
-            entity_info.layout_tag_list = entity_info.virtual_tag_list;
+            entity_info.physical_arch = entity_info.virtual_arch;
             moved.insert(
                 entity,
                 Moved {
                     // We know this entity came from this tag because non-finalized entities are only
                     // moved into other archetypes when it's their turn to be processed.
-                    src: src_arch_tag_list,
-                    dst: dest_arch_tag_list,
+                    src: src_arch_id,
+                    dst: dest_arch_id,
                 },
             );
         }
@@ -668,8 +654,8 @@ impl DbRoot {
         for (entity, Moved { src, dst }) in moved {
             let entity_info = &self.alive_entities[&entity];
 
-            let src_entry = self.tag_list_map.arena().get(&src);
-            let dst_entry = self.tag_list_map.arena().get(&dst);
+            let src_entry = self.arch_map.arena().get(&src);
+            let dst_entry = self.arch_map.arena().get(&dst);
 
             // For every updated entity, determine the list of components which need to be updated.
             // This is just the union of `src` and `dst`.
@@ -742,12 +728,12 @@ impl DbRoot {
                 );
 
                 // Allocate a slot for this component
-                let external_heaps = match storage.heaps.entry(entity_info.layout_tag_list) {
+                let external_heaps = match storage.heaps.entry(entity_info.physical_arch) {
                     hashbrown::hash_map::Entry::Occupied(entry) => Some(entry.into_mut()),
                     hashbrown::hash_map::Entry::Vacant(entry) => self
-                        .tag_list_map
+                        .arch_map
                         .arena()
-                        .get(&entity_info.layout_tag_list)
+                        .get(&entity_info.physical_arch)
                         .value()
                         .managed
                         .contains(&NamedTypeId::of::<T>())
@@ -759,9 +745,9 @@ impl DbRoot {
                     let min_heaps_len = entity_info.heap_index + 1;
                     if external_heaps.len() < min_heaps_len {
                         let arch = self
-                            .tag_list_map
+                            .arch_map
                             .arena()
-                            .get(&entity_info.layout_tag_list)
+                            .get(&entity_info.physical_arch)
                             .value();
 
                         external_heaps.extend(
@@ -912,7 +898,7 @@ impl<T: 'static> DbAnyStorage for DbStorage<T> {
         token: &MainThreadToken,
         entity: InertEntity,
         entity_info: &DbEntity,
-        dst_arch: &DbTagList,
+        dst_arch: &DbArchetype,
     ) {
         let storage = &mut *self.borrow_mut(token);
 
@@ -922,7 +908,7 @@ impl<T: 'static> DbAnyStorage for DbStorage<T> {
 		};
 
         // Determine whether the new layout requires a managed allocation
-        let external_heaps = match storage.heaps.entry(entity_info.layout_tag_list) {
+        let external_heaps = match storage.heaps.entry(entity_info.physical_arch) {
             hashbrown::hash_map::Entry::Occupied(entry) => Some(entry.into_mut()),
             hashbrown::hash_map::Entry::Vacant(entry) => dst_arch
                 .managed
