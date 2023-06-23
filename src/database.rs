@@ -14,7 +14,8 @@ use crate::{
         token_cell::NOptRefCell,
     },
     debug::DebugLabel,
-    entity::{Entity, RawTag, VirtualTagMarker},
+    entity::Entity,
+    query::{RawTag, VirtualTagMarker},
     util::{
         arena::{FreeListArena, LeakyArena, SpecArena},
         block::{BlockAllocator, BlockReservation},
@@ -28,19 +29,57 @@ use crate::{
 
 #[derive(Debug)]
 pub struct DbRoot {
+    // The last unique ID to have been generated.
     uid_gen: NonZeroU64,
+
+    // A map from alive entity ID to its state.
     alive_entities: NopHashMap<InertEntity, DbEntity>,
+
+    // A set map keeping track of all component lists present in our application.
     comp_list_map: DbComponentListMap,
+
+    // A set map keeping track of all tag lists present in our application.
     tag_list_map: DbTagListMap,
+
+    // A map from type ID to storage.
     storages: FxHashMap<NamedTypeId, &'static dyn DbAnyStorage>,
-    dirty_entities: Vec<InertEntity>,
+
+    // A list of entities which may need to be moved around before running the next query. May contain
+    // false positives, duplicates, and even dead entities. Never contains false negatives.
+    probably_alive_dirty_entities: Vec<InertEntity>,
+
+    // An extension to `probably_alive_dirty_entities` but only contains dead entities and the
+    // necessary metadata to move them around.
+    dead_dirty_entities: Vec<DbDirtyDeadEntity>,
+
+    // The total number of entities ever created by the application.
     debug_total_spawns: u64,
 }
 
 #[derive(Debug, Copy, Clone)]
 struct DbEntity {
+    // The complete list of components attached to this entity.
     comp_list: DbComponentListRef,
+
+    // The complete list of tags the user wants attached to this entity.
     virtual_tag_list: DbTagListRef,
+
+    // The tag list which is currently being used to lay components out.
+    //
+    // All components managed by this layout must either adhere to it or be missing from the entity
+    // entirely.
+    layout_tag_list: DbTagListRef,
+
+    // The heap containing the entity given its current tag layout.
+    heap_index: usize,
+
+    // The slot containing the entity given its current tag layout.
+    slot_index: usize,
+}
+
+#[derive(Debug, Copy, Clone)]
+struct DbDirtyDeadEntity {
+    entity: InertEntity,
     layout_tag_list: DbTagListRef,
     heap_index: usize,
     slot_index: usize,
@@ -57,7 +96,6 @@ pub type DbStorage<T> = NOptRefCell<DbStorageInner<T>>;
 #[derive_where(Debug)]
 pub struct DbStorageInner<T: 'static> {
     anon_block_alloc: BlockAllocator<Heap<T>>,
-    archetype_heap_runs: FxHashMap<DbTagListRef, Vec<Heap<T>>>,
     mappings: NopHashMap<InertEntity, DbEntityMapping<T>>,
 }
 
@@ -231,7 +269,8 @@ impl DbRoot {
                     comp_list_map: SetMap::default(),
                     tag_list_map: SetMap::new(DbTagList::new(&[])),
                     storages: FxHashMap::default(),
-                    dirty_entities: Vec::new(),
+                    probably_alive_dirty_entities: Vec::new(),
+                    dead_dirty_entities: Vec::new(),
                     debug_total_spawns: 0,
                 }),
             );
@@ -244,6 +283,8 @@ impl DbRoot {
         self.uid_gen = xorshift64(self.uid_gen);
         self.uid_gen
     }
+
+    // === Entity management === //
 
     pub fn spawn_entity(&mut self) -> InertEntity {
         // Allocate a slot
@@ -271,6 +312,7 @@ impl DbRoot {
         token: &MainThreadToken,
         entity: InertEntity,
     ) -> Result<(), EntityDeadError> {
+        // Fetch the entity info
         let Some(entity_info) = self
             .alive_entities
             .remove(&entity)
@@ -278,6 +320,18 @@ impl DbRoot {
 			return Err(EntityDeadError);
 		};
 
+        // Mark this entity for cleanup if it's not in an empty layout.
+        if &entity_info.layout_tag_list != self.tag_list_map.root() {
+            self.dead_dirty_entities.push(DbDirtyDeadEntity {
+                entity,
+                layout_tag_list: entity_info.layout_tag_list,
+                heap_index: entity_info.heap_index,
+                slot_index: entity_info.slot_index,
+            });
+        }
+
+        // Remove all of the object's components
+        //
         // N.B. This `direct_borrow` operation could be dangerous since we're not just borrowing
         // they immutable component list, but also the metadata used by the set to update its
         // cache. Fortunately, the actual destructors are operating on logically dead entities and
@@ -299,6 +353,8 @@ impl DbRoot {
             ty,
         }
     }
+
+    // === Tag management === //
 
     fn tag_common(
         &mut self,
@@ -332,24 +388,10 @@ impl DbRoot {
         // Determine whether we became dirty
         let is_dirty = entity_info.layout_tag_list != entity_info.virtual_tag_list;
 
-        // Add the entity to the dirty list if it became dirty.
-        //
-        // N.B. Yes, one could imagine a scenario where the entity becomes dirty, cleans itself, and
-        // then becomes dirty again, allowing itself to be placed twice into the dirty list. This is
-        // fine because the dirty list can support false positives and handling this rare case
-        // properly would require additional metadata we really don't want to store.
-        //
-        // Finally, we never mark entities which satisfy all the following conditions:
-        //
-        // - have an empty tag layout (they will be transitioned lazily at the next insertion)
-        // - hold zero components (necessary in case we mark an existing component as managed)
-        //
-        if &entity_info.layout_tag_list != self.tag_list_map.root()  // empty tag layout
-            && &entity_info.comp_list != self.comp_list_map.root()  // no components
-            && is_dirty  // changed
-            && !was_dirty
-        {
-            self.dirty_entities.push(entity);
+        // Add the entity to the dirty list if it became dirty. This may happen multiple times but
+        // we don't really mind since this list can accept false positives.
+        if is_dirty && !was_dirty {
+            self.probably_alive_dirty_entities.push(entity);
         }
 
         Ok(())
@@ -387,13 +429,207 @@ impl DbRoot {
             .has_key(&tag))
     }
 
+    // === Queries === //
+
+    pub fn flush_archetypes(&mut self, token: &MainThreadToken) {
+        // Throughout this process, we keep track of which entities have been moved around and they
+        // archetype they currently reside.
+        let mut moved = NopHashMap::default();
+
+        // Begin by removing dead entities
+        'delete_dead: for info in mem::take(&mut self.dead_dirty_entities) {
+            // N.B. we know this won't happen because we check for it before adding the entity to the
+            // `dead_dirty_entities` list.
+            debug_assert_ne!(info.layout_tag_list, *self.tag_list_map.root());
+
+            // Determine the archetype we'll be working on.
+            let archetype = self
+                .tag_list_map
+                .arena_mut()
+                .get_mut(&info.layout_tag_list)
+                .value_mut();
+
+            // Determine the right candidate for the swap-remove.
+            let (last_entity, last_entity_info) = {
+                let Some(mut sub_heap) = archetype.entity_heaps.last() else {
+					// There are no more heaps to work with because there are no more entities in this
+					// archetype.
+					continue 'delete_dead;
+				};
+
+                loop {
+                    // Find a removal target from the back of the list.
+
+                    // We know this index will succeed because we'll never have a trailing heap whose
+                    // length is zero by invariant.
+                    let last_entity = sub_heap[archetype.last_heap_len - 1];
+
+                    // If this `last_entity` is alive, use it for the swap-remove.
+                    if let Some(last_entity_info) = self.alive_entities.get_mut(&last_entity) {
+                        break (last_entity, last_entity_info);
+                    }
+
+                    // Otherwise, remove it from the list. This action is fine because we're trying
+                    // to get rid of these anyways and it is super dangerous to move these dead
+                    // entities around.
+                    archetype.last_heap_len -= 1;
+
+                    if archetype.last_heap_len == 0 {
+                        archetype.entity_heaps.pop();
+
+                        let Some(new_sub_heap) = archetype.entity_heaps.last() else {
+							// If we managed to consume all the entities in this archetype, we know
+							// our target entity is already dead
+							continue 'delete_dead;
+						};
+
+                        archetype.last_heap_len = new_sub_heap.len();
+                        sub_heap = new_sub_heap;
+                    }
+                }
+            };
+
+            // Determine whether our target entity is still in the archetype.
+            let replace_target = archetype
+                .entity_heaps
+                .get_mut(info.heap_index)
+                .and_then(|heap| heap.get_mut(info.slot_index));
+
+            if let Some(replace_target) = replace_target {
+                // If it is, commit the swap-replace. Otherwise, ignore everything that went on here.
+
+                // The only way for dead entities to be moved around is if they were removed by the
+                // swap-remove pruning logic above.
+                debug_assert_eq!(*replace_target, info.entity);
+
+                // Mark the swap-remove "filler" as moved
+                moved.insert(last_entity, info.layout_tag_list);
+
+                // Replace the slot
+                *replace_target = last_entity;
+                last_entity_info.heap_index = info.heap_index;
+                last_entity_info.slot_index = info.slot_index;
+
+                // Pop from the list.
+                archetype.last_heap_len -= 1;
+
+                if archetype.last_heap_len == 0 {
+                    archetype.entity_heaps.pop();
+
+                    if let Some(new_last) = archetype.entity_heaps.last() {
+                        archetype.last_heap_len = new_last.len();
+                    }
+                }
+            }
+        }
+
+        // Now, move around the alive entities.
+        for entity in mem::take(&mut self.probably_alive_dirty_entities) {
+            // First, ensure that the entity is still alive and dirty since, although we've deleted
+            // all dead entities from the heap, we may still have dead entities in our queue.
+            let Some(entity_info) = self.alive_entities.get_mut(&entity) else {
+				continue
+			};
+
+            if entity_info.layout_tag_list == entity_info.virtual_tag_list {
+                continue;
+            }
+
+            // Now, swap-remove the entity from its source archetype.
+            let src_arch_tag_list = entity_info.layout_tag_list;
+
+            // The root archetype doesn't manage any heaps so we ignore transitions to it.
+            if src_arch_tag_list != *self.tag_list_map.root() {
+                let arch = self
+                    .tag_list_map
+                    .arena_mut()
+                    .get_mut(&src_arch_tag_list)
+                    .value_mut();
+
+                // Determine the filler entity
+                let last_entity = arch
+                    .entity_heaps
+                    .last_mut()
+                    // This unwrap is guaranteed to succeed because at least one entity (our `entity`)
+                    // which is known to be alive. Additionally, we know this entity will be alive
+                    // because every archetype has already been cleared of its dead entities.
+                    .unwrap()[arch.last_heap_len - 1];
+
+                // Replace the slot
+                arch.entity_heaps[entity_info.heap_index][entity_info.slot_index] = last_entity;
+
+                // Update the filler's location mirror
+                let entity_info = *entity_info;
+                let last_entity_info = self.alive_entities.get_mut(&entity).unwrap();
+                last_entity_info.heap_index = entity_info.heap_index;
+                last_entity_info.slot_index = entity_info.slot_index;
+
+                // Mark the swap-remove "filler" as moved
+                moved.insert(last_entity, src_arch_tag_list);
+
+                // Pop the end
+                arch.last_heap_len -= 1;
+
+                if arch.last_heap_len == 0 {
+                    arch.entity_heaps.pop();
+
+                    if let Some(new_last) = arch.entity_heaps.last() {
+                        arch.last_heap_len = new_last.len();
+                    }
+                }
+            }
+
+            // ...and push it to the back of its target archetype.
+            let entity_info = self.alive_entities.get_mut(&entity).unwrap();
+            let dest_arch_tag_list = entity_info.virtual_tag_list;
+
+            // The root archetype doesn't manage any heaps so we ignore transitions to it.
+            if dest_arch_tag_list != *self.tag_list_map.root() {
+                // Add to the target archetype list
+                let arch = self
+                    .tag_list_map
+                    .arena_mut()
+                    .get_mut(&dest_arch_tag_list)
+                    .value_mut();
+
+                if arch.last_heap_len == arch.entity_heaps.last().map_or(0, |heap| heap.len()) {
+                    let mut sub_heap = Box::from_iter((0..128).map(|_| InertEntity::PLACEHOLDER));
+                    sub_heap[0] = entity;
+
+                    arch.entity_heaps.push(sub_heap);
+                    arch.last_heap_len = 1;
+                } else {
+                    arch.entity_heaps.last_mut().unwrap()[arch.last_heap_len] = entity;
+                    arch.last_heap_len += 1;
+                }
+
+                // Update the entity info
+                entity_info.heap_index = arch.entity_heaps.len() - 1;
+                entity_info.slot_index = arch.last_heap_len - 1;
+            }
+
+            // Regardless of whether we actually moved into a heap, we still have to update our layout
+            // and mark ourselves as moved so storages can properly update their mapping to an
+            // anonymous one.
+            entity_info.layout_tag_list = entity_info.virtual_tag_list;
+            moved.insert(entity, dest_arch_tag_list);
+        }
+
+        // Now that archetype locations are settled, we can handle actual memory swaps, moving
+        // entities into their target slots.
+        println!("Moved: {:?}", moved);
+
+        // TODO!!!
+    }
+
+    // === Storage management === //
+
     pub fn get_storage<T: 'static>(&mut self) -> &'static DbStorage<T> {
         self.storages
             .entry(NamedTypeId::of::<T>())
             .or_insert_with(|| {
                 leak(DbStorage::new_full(DbStorageInner::<T> {
                     anon_block_alloc: BlockAllocator::default(),
-                    archetype_heap_runs: FxHashMap::default(),
                     mappings: NopHashMap::default(),
                 }))
             })
@@ -414,54 +650,12 @@ impl DbRoot {
             return Err(EntityDeadError);
         };
 
-        // If the entity is still in its empty layout and its virtual layout is not empty, transition
-        // it to its virtual layout.
-        if &entity_info.layout_tag_list == self.tag_list_map.root()
-            && &entity_info.virtual_tag_list != self.tag_list_map.root()
-        {
-            // Update the marked layout
-            entity_info.layout_tag_list = entity_info.virtual_tag_list;
-
-            // Assign ourselves a slot in this layout
-            let tag_list_info = self
-                .tag_list_map
-                .arena_mut()
-                .get_mut(&entity_info.layout_tag_list)
-                .value_mut();
-
-            // First, ensure that we have the capacity for it.
-            let last_heap_capacity = tag_list_info
-                .entity_heaps
-                .last()
-                .map_or(0, |heap| heap.len());
-
-            if tag_list_info.last_heap_len == last_heap_capacity {
-                tag_list_info
-                    .entity_heaps
-                    .push(Box::from_iter((0..128).map(|_| InertEntity::PLACEHOLDER)));
-                tag_list_info.last_heap_len = 0;
-            }
-
-            // Then, give ourself a slot
-            entity_info.heap_index = tag_list_info.entity_heaps.len() - 1;
-            entity_info.slot_index = tag_list_info.last_heap_len;
-
-            // And mark ourselves in the archetype
-            tag_list_info.entity_heaps.last_mut().unwrap()[tag_list_info.last_heap_len] = entity;
-            tag_list_info.last_heap_len += 1;
-        }
-
         // Update the value
         match storage.mappings.entry(entity) {
             hashbrown::hash_map::Entry::Occupied(entry) => {
                 // We're merely occupied so just mutate the component without any additional fuss.
                 let entry = entry.get();
                 let replaced = mem::replace(&mut *entry.target.borrow_mut(token), value);
-
-                // N.B. this code does not have to worry about preemptive packing of these old
-                // components into their appropriate archetype because one cannot have occupied
-                // mappings until after the first insertion succeeds, which is the only time
-                // when preemptive packing is expected from us.
 
                 Ok((Some(replaced), entry.target))
             }
@@ -473,73 +667,21 @@ impl DbRoot {
                     |_| Default::default(),
                 );
 
-                // Determine our tag list
-                let tag_list_info = self
-                    .tag_list_map
-                    .arena()
-                    .get(&entity_info.layout_tag_list)
-                    .value();
-
-                // Determine whether this component type is managed
-                let mut entry_tmp_prolong;
-
-                let heaps = match storage
-                    .archetype_heap_runs
-                    .entry(entity_info.layout_tag_list)
-                {
-                    hashbrown::hash_map::Entry::Occupied(entry) => {
-                        entry_tmp_prolong = entry;
-                        Some(entry_tmp_prolong.get_mut())
-                    }
-                    hashbrown::hash_map::Entry::Vacant(entry) => {
-                        if tag_list_info.managed.contains(&NamedTypeId::of::<T>()) {
-                            Some(entry.insert(Vec::new()))
-                        } else {
-                            None
-                        }
-                    }
-                };
-
                 // Allocate a slot for this object
-                let (resv, slot) = if let Some(heaps) = heaps {
-                    // We need to allocate in the arena
+                let resv = storage.anon_block_alloc.alloc(|sz| Heap::new(token, sz));
+                let slot = storage
+                    .anon_block_alloc
+                    .block_mut(&resv.block)
+                    .slot(resv.slot);
 
-                    // Ensure that we have enough heaps to process the request
-                    let min_len = entity_info.heap_index + 1;
-                    if heaps.len() < min_len {
-                        heaps.extend(
-                            (heaps.len()..min_len)
-                                .map(|i| Heap::new(token, tag_list_info.entity_heaps[i].len())),
-                        );
-                    }
-
-                    // Fetch our slot
-                    let slot = heaps[entity_info.heap_index].slot(entity_info.slot_index);
-
-                    // Write the value to the slot
-                    slot.set_value_owner_pair(token, Some((entity.into_dangerous_entity(), value)));
-
-                    let slot = slot.slot();
-                    (DbEntityMappingHeap::External, slot)
-                } else {
-                    // We need to allocate an anonymous block
-                    let resv = storage.anon_block_alloc.alloc(|sz| Heap::new(token, sz));
-                    let slot = storage
-                        .anon_block_alloc
-                        .block_mut(&resv.block)
-                        .slot(resv.slot);
-
-                    // Write the value to the slot
-                    slot.set_value_owner_pair(token, Some((entity.into_dangerous_entity(), value)));
-
-                    let slot = slot.slot();
-                    (DbEntityMappingHeap::Anonymous(resv), slot)
-                };
+                // Write the value to the slot
+                slot.set_value_owner_pair(token, Some((entity.into_dangerous_entity(), value)));
 
                 // Insert the entry
+                let slot = slot.slot();
                 entry.insert(DbEntityMapping {
                     target: slot,
-                    heap: resv,
+                    heap: DbEntityMappingHeap::Anonymous(resv),
                 });
 
                 Ok((None, slot))
@@ -599,6 +741,8 @@ impl DbRoot {
     ) -> Option<Slot<T>> {
         storage.mappings.get(&entity).map(|mapping| mapping.target)
     }
+
+    // === Debug === //
 
     pub fn debug_total_spawns(&self) -> u64 {
         self.debug_total_spawns

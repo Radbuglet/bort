@@ -1,4 +1,4 @@
-use bort::{debug::dump_database_state, OwnedEntity, Tag};
+use bort::{debug::dump_database_state, flush, OwnedEntity, Tag};
 
 fn main() {
     let foo = Tag::<i32>::new();
@@ -17,6 +17,10 @@ fn main() {
 
     bar.insert(1i32);
 
+    println!("{}", dump_database_state());
+    flush();
+    println!("{}", dump_database_state());
+
     println!("untagged 1");
     bar.untag(foo);
     assert!(!bar.is_tagged(foo));
@@ -25,5 +29,25 @@ fn main() {
     bar.untag(foo);
     assert!(!bar.is_tagged(foo));
 
+    println!("{}", dump_database_state());
+    flush();
+    println!("{}", dump_database_state());
+
+    println!("tagged 3");
+    bar.tag(foo);
+    assert!(bar.is_tagged(foo));
+
+    println!("tagged 4");
+    bar.tag(foo);
+    assert!(bar.is_tagged(foo));
+
+    println!("Flushed again");
+    flush();
+
+    println!("Destroying.");
+    bar.destroy();
+
+    println!("{}", dump_database_state());
+    flush();
     println!("{}", dump_database_state());
 }
