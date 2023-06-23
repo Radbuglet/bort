@@ -113,14 +113,14 @@ pub struct DbStorageInner<T: 'static> {
 }
 
 struct DbEntityMapping<T: 'static> {
-    target: Slot<T>,
+    slot: Slot<T>,
     heap: DbEntityMappingHeap<T>,
 }
 
 impl<T> fmt::Debug for DbEntityMapping<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DbEntityMapping")
-            .field("target", &self.target)
+            .field("target", &self.slot)
             .finish_non_exhaustive()
     }
 }
@@ -729,9 +729,9 @@ impl DbRoot {
             hashbrown::hash_map::Entry::Occupied(entry) => {
                 // We're merely occupied so just mutate the component without any additional fuss.
                 let entry = entry.get();
-                let replaced = mem::replace(&mut *entry.target.borrow_mut(token), value);
+                let replaced = mem::replace(&mut *entry.slot.borrow_mut(token), value);
 
-                Ok((Some(replaced), entry.target))
+                Ok((Some(replaced), entry.slot))
             }
             hashbrown::hash_map::Entry::Vacant(entry) => {
                 // Update the component list
@@ -791,10 +791,7 @@ impl DbRoot {
                 };
 
                 // Insert the mapping
-                entry.insert(DbEntityMapping {
-                    target: slot,
-                    heap: resv,
-                });
+                entry.insert(DbEntityMapping { slot, heap: resv });
 
                 Ok((None, slot))
             }
@@ -819,7 +816,7 @@ impl DbRoot {
 		};
 
         // Remove the value from the heap
-        let removed_value = removed.target.set_value_owner_pair(token, None);
+        let removed_value = removed.slot.set_value_owner_pair(token, None);
 
         // Remove the reservation in the heap's allocator.
         match removed.heap {
@@ -851,7 +848,7 @@ impl DbRoot {
         storage: &DbStorageInner<T>,
         entity: InertEntity,
     ) -> Option<Slot<T>> {
-        storage.mappings.get(&entity).map(|mapping| mapping.target)
+        storage.mappings.get(&entity).map(|mapping| mapping.slot)
     }
 
     // === Debug === //
@@ -915,16 +912,60 @@ impl<T: 'static> DbAnyStorage for DbStorage<T> {
         token: &MainThreadToken,
         entity: InertEntity,
         entity_info: &DbEntity,
-        dst_entry: &DbTagList,
+        dst_arch: &DbTagList,
     ) {
-        let storage = &mut self.borrow_mut(token);
+        let storage = &mut *self.borrow_mut(token);
 
         let Some(mapping) = storage.mappings.get_mut(&entity) else {
 			// This may fail if a user never inserted a component for every managed type.
 			return;
 		};
 
-        // TODO
+        // Determine whether the new layout requires a managed allocation
+        let external_heaps = match storage.heaps.entry(entity_info.layout_tag_list) {
+            hashbrown::hash_map::Entry::Occupied(entry) => Some(entry.into_mut()),
+            hashbrown::hash_map::Entry::Vacant(entry) => dst_arch
+                .managed
+                .contains(&NamedTypeId::of::<T>())
+                .then(|| entry.insert(Vec::new())),
+        };
+
+        if let Some(external_heaps) = external_heaps {
+            // Ensure that we have the appropriate slot for this entity
+            let min_heaps_len = entity_info.heap_index + 1;
+            if external_heaps.len() < min_heaps_len {
+                external_heaps.extend(
+                    (external_heaps.len()..min_heaps_len)
+                        .map(|i| Heap::new(token, dst_arch.entity_heaps[i].len())),
+                );
+            }
+
+            // Swap the values to move the other object into its appropriate heap
+            //
+            // N.B. `swap_direct` supports no-op swaps without any issues.
+            let new_slot = external_heaps[entity_info.heap_index].slot(entity_info.slot_index);
+            mapping.slot.swap_direct(token, new_slot);
+
+            // Deallocate the old anonymous reservation if applicable and mark it as external
+            if let DbEntityMappingHeap::Anonymous(resv) =
+                mem::replace(&mut mapping.heap, DbEntityMappingHeap::External)
+            {
+                storage.anon_block_alloc.dealloc(resv, drop);
+            }
+        } else {
+            // Ensure that we're not already in an anonymous reservation
+            if matches!(&mapping.heap, DbEntityMappingHeap::External) {
+                // Allocate a slot for this object
+                let resv = storage.anon_block_alloc.alloc(|sz| Heap::new(token, sz));
+                let new_slot = storage
+                    .anon_block_alloc
+                    .block_mut(&resv.block)
+                    .slot(resv.slot);
+
+                // Swap the values to move the other object into its appropriate heap
+                mapping.slot.swap_direct(token, new_slot);
+            }
+        }
     }
 }
 

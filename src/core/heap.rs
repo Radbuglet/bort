@@ -403,7 +403,17 @@ impl<T> Slot<T> {
         }
     }
 
-    pub fn swap(self, token: &MainThreadToken, other: DirectSlot<'_, T>) {
+    pub fn swap_indirect(self, token: &MainThreadToken, other: Slot<T>) {
+        unsafe {
+            // Safety: we only use the `DirectSlot` until the function returns, and we know the
+            // direct slot cannot be invalidated until then because we never call something which
+            // could potentially destroy the heap.
+            self.direct_slot(token)
+                .swap(token, other.direct_slot(token))
+        }
+    }
+
+    pub fn swap_direct(self, token: &MainThreadToken, other: DirectSlot<'_, T>) {
         unsafe {
             // Safety: we only use the `DirectSlot` until the function returns, and we know the
             // direct slot cannot be invalidated until then because we never call something which
