@@ -21,7 +21,7 @@ use crate::{
         block::{BlockAllocator, BlockReservation},
         hash_map::{FxHashMap, FxHashSet, NopHashMap},
         misc::{const_new_nz_u64, leak, xorshift64, AnyDowncastExt, NamedTypeId, RawFmt},
-        set_map::{SetMap, SetMapPtr},
+        set_map::{filter_duplicates, merge_iters, SetMap, SetMapPtr},
     },
 };
 
@@ -93,6 +93,14 @@ struct DbDirtyDeadEntity {
 
 trait DbAnyStorage: fmt::Debug + Sync {
     fn as_any(&self) -> &(dyn Any + Sync);
+
+    fn move_entity(
+        &self,
+        token: &MainThreadToken,
+        entity: InertEntity,
+        entity_info: &DbEntity,
+        dst_entry: &DbTagList,
+    );
 }
 
 pub type DbStorage<T> = NOptRefCell<DbStorageInner<T>>;
@@ -443,10 +451,16 @@ impl DbRoot {
 
     // === Queries === //
 
-    pub fn flush_archetypes(&mut self, _token: &MainThreadToken) {
+    pub fn flush_archetypes(&mut self, token: &MainThreadToken) {
         // Throughout this process, we keep track of which entities have been moved around and they
         // archetype they currently reside.
         let mut moved = NopHashMap::default();
+
+        #[derive(Debug, Copy, Clone)]
+        struct Moved {
+            src: DbTagListRef,
+            dst: DbTagListRef,
+        }
 
         // Begin by removing dead entities
         'delete_dead: for info in mem::take(&mut self.dead_dirty_entities) {
@@ -515,7 +529,15 @@ impl DbRoot {
                 debug_assert_eq!(*replace_target, info.entity);
 
                 // Mark the swap-remove "filler" as moved
-                moved.insert(last_entity, info.layout_tag_list);
+                moved.insert(
+                    last_entity,
+                    Moved {
+                        // We know this entity came from this tag because we haven't moved entities
+                        // around in archetypes yet.
+                        src: info.layout_tag_list,
+                        dst: info.layout_tag_list,
+                    },
+                );
 
                 // Replace the slot
                 *replace_target = last_entity;
@@ -576,8 +598,15 @@ impl DbRoot {
                 last_entity_info.heap_index = entity_info.heap_index;
                 last_entity_info.slot_index = entity_info.slot_index;
 
-                // Mark the swap-remove "filler" as moved
-                moved.insert(last_entity, src_arch_tag_list);
+                // Mark the swap-remove "filler" as moved. We only insert this entry if it hasn't
+                // already been marked as moving before since a) we wouldn't be updating the
+                // destination field in any useful way and b) we could clobber the src field.
+                if let hashbrown::hash_map::Entry::Vacant(entry) = moved.entry(last_entity) {
+                    entry.insert(Moved {
+                        src: src_arch_tag_list,
+                        dst: src_arch_tag_list,
+                    });
+                }
 
                 // Pop the end
                 arch.last_heap_len -= 1;
@@ -624,7 +653,45 @@ impl DbRoot {
             // and mark ourselves as moved so storages can properly update their mapping to an
             // anonymous one.
             entity_info.layout_tag_list = entity_info.virtual_tag_list;
-            moved.insert(entity, dest_arch_tag_list);
+            moved.insert(
+                entity,
+                Moved {
+                    // We know this entity came from this tag because non-finalized entities are only
+                    // moved into other archetypes when it's their turn to be processed.
+                    src: src_arch_tag_list,
+                    dst: dest_arch_tag_list,
+                },
+            );
+        }
+
+        // Finally, update storages to reflect this new template.
+        for (entity, Moved { src, dst }) in moved {
+            let entity_info = &self.alive_entities[&entity];
+
+            let src_entry = self.tag_list_map.arena().get(&src);
+            let dst_entry = self.tag_list_map.arena().get(&dst);
+
+            // For every updated entity, determine the list of components which need to be updated.
+            // This is just the union of `src` and `dst`.
+            //
+            // N.B. Yes, this could have duplicates if multiple tags decide to manage the same
+            // component. This is fine for safety as storages can handle no-op move requests and
+            // shouldn't affect performance too much since users typically won't be reusing the same
+            // type in multiple tags.
+            for managed_ty in filter_duplicates(merge_iters(
+                src_entry.keys().iter().map(|key| key.ty),
+                dst_entry.keys().iter().map(|key| key.ty),
+            )) {
+                // Now, we just have to notify the storage for it to take appropriate action.
+
+                let Some(storage) = self.storages.get(&managed_ty) else {
+					// If this fails, it merely means that we never attached this managed type to this
+					// entity.
+					continue;
+				};
+
+                storage.move_entity(token, entity, entity_info, dst_entry.value());
+            }
         }
     }
 
@@ -841,6 +908,23 @@ impl DbRoot {
 impl<T: 'static> DbAnyStorage for DbStorage<T> {
     fn as_any(&self) -> &(dyn Any + Sync) {
         self
+    }
+
+    fn move_entity(
+        &self,
+        token: &MainThreadToken,
+        entity: InertEntity,
+        entity_info: &DbEntity,
+        dst_entry: &DbTagList,
+    ) {
+        let storage = &mut self.borrow_mut(token);
+
+        let Some(mapping) = storage.mappings.get_mut(&entity) else {
+			// This may fail if a user never inserted a component for every managed type.
+			return;
+		};
+
+        // TODO
     }
 }
 

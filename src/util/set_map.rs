@@ -98,6 +98,23 @@ where
     }
 }
 
+pub fn filter_duplicates<T: PartialEq>(
+    iter: impl IntoIterator<Item = T>,
+) -> impl Iterator<Item = T> {
+    let mut iter = iter.into_iter().peekable();
+
+    iter::from_fn(move || {
+        let mut next = iter.next()?;
+
+        // Skip forward so long as our `next` element equals the element after it.
+        while Some(&next) == iter.peek() {
+            next = iter.next().unwrap();
+        }
+
+        Some(next)
+    })
+}
+
 #[derive(Clone)]
 pub struct IterFilter<I: Iterator>(pub I, pub I::Item);
 
