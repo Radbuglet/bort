@@ -32,8 +32,7 @@ pub fn storage<T: 'static>() -> Storage<T> {
     }
 }
 
-// #[derive(Debug)]  TODO
-#[derive_where(Copy, Clone)]
+#[derive_where(Debug, Copy, Clone)]
 pub struct Storage<T: 'static> {
     inner: &'static DbStorage<T>,
     token: &'static MainThreadToken,

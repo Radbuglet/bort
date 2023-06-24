@@ -439,8 +439,6 @@ impl ParallelTokenSource {
             session: self,
         }
     }
-
-    // TODO: Implement namespaced token acquisition
 }
 
 // === TypeExclusiveToken === //

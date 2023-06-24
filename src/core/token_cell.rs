@@ -109,6 +109,18 @@ impl<T> NMainCell<T> {
         }
     }
 
+    pub fn get_mut(&mut self) -> &mut T {
+        self.value.get_mut()
+    }
+
+    pub fn set_mut(&mut self, value: T) {
+        *self.get_mut() = value;
+    }
+
+    pub fn into_inner(self) -> T {
+        self.value.into_inner()
+    }
+
     pub fn set(&self, _token: &MainThreadToken, value: T) {
         self.value.set(value);
     }

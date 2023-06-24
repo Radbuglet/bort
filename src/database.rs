@@ -1,7 +1,7 @@
 use std::{
     any::{type_name, Any},
     fmt, hash, mem,
-    num::NonZeroU64,
+    num::NonZeroU64, sync::Arc,
 };
 
 use derive_where::derive_where;
@@ -11,7 +11,7 @@ use crate::{
         cell::OptRefMut,
         heap::{Heap, Slot},
         token::MainThreadToken,
-        token_cell::NOptRefCell,
+        token_cell::{NOptRefCell, NMainCell},
     },
     debug::DebugLabel,
     entity::Entity,
@@ -109,7 +109,7 @@ pub type DbStorage<T> = NOptRefCell<DbStorageInner<T>>;
 pub struct DbStorageInner<T: 'static> {
     anon_block_alloc: BlockAllocator<Heap<T>>,
     mappings: NopHashMap<InertEntity, DbEntityMapping<T>>,
-    heaps: FxHashMap<DbArchetypeRef, Vec<Heap<T>>>,
+    heaps: FxHashMap<DbArchetypeRef, Vec<Arc<Heap<T>>>>,
 }
 
 struct DbEntityMapping<T: 'static> {
@@ -198,7 +198,7 @@ type DbComponentListRef = SetMapPtr<DbComponentType, (), LeakyArena>;
 #[derive(Debug)]
 struct DbArchetype {
     managed: FxHashSet<NamedTypeId>,
-    entity_heaps: Vec<Box<[InertEntity]>>,
+    entity_heaps: Vec<Arc<[NMainCell<InertEntity>]>>,
     last_heap_len: usize,
 }
 
@@ -482,7 +482,7 @@ impl DbRoot {
 
                     // We know this index will succeed because we'll never have a trailing heap whose
                     // length is zero by invariant.
-                    let last_entity = sub_heap[archetype.last_heap_len - 1];
+                    let last_entity = sub_heap[archetype.last_heap_len - 1].get(token);
 
                     // If this `last_entity` is alive, use it for the swap-remove.
                     if let Some(last_entity_info) = self.alive_entities.get_mut(&last_entity) {
@@ -513,14 +513,14 @@ impl DbRoot {
             let replace_target = archetype
                 .entity_heaps
                 .get_mut(info.heap_index)
-                .and_then(|heap| heap.get_mut(info.slot_index));
+                .and_then(|heap| heap.get(info.slot_index));
 
             if let Some(replace_target) = replace_target {
                 // If it is, commit the swap-replace. Otherwise, ignore everything that went on here.
 
                 // The only way for dead entities to be moved around is if they were removed by the
                 // swap-remove pruning logic above.
-                debug_assert_eq!(*replace_target, info.entity);
+                debug_assert_eq!(replace_target.get(token), info.entity);
 
                 // Mark the swap-remove "filler" as moved
                 moved.insert(
@@ -534,7 +534,7 @@ impl DbRoot {
                 );
 
                 // Replace the slot
-                *replace_target = last_entity;
+                replace_target.set(token, last_entity);
                 last_entity_info.heap_index = info.heap_index;
                 last_entity_info.slot_index = info.slot_index;
 
@@ -577,10 +577,11 @@ impl DbRoot {
                     // This unwrap is guaranteed to succeed because at least one entity (our `entity`)
                     // which is known to be alive. Additionally, we know this entity will be alive
                     // because every archetype has already been cleared of its dead entities.
-                    .unwrap()[arch.last_heap_len - 1];
+                    .unwrap()[arch.last_heap_len - 1]
+                    .get(token);
 
                 // Replace the slot
-                arch.entity_heaps[entity_info.heap_index][entity_info.slot_index] = last_entity;
+                arch.entity_heaps[entity_info.heap_index][entity_info.slot_index].set(token, last_entity);
 
                 // Update the filler's location mirror
                 let entity_info = *entity_info;
@@ -620,13 +621,13 @@ impl DbRoot {
                 let arch = self.arch_map.arena_mut().get_mut(&dest_arch_id).value_mut();
 
                 if arch.last_heap_len == arch.entity_heaps.last().map_or(0, |heap| heap.len()) {
-                    let mut sub_heap = Box::from_iter((0..128).map(|_| InertEntity::PLACEHOLDER));
-                    sub_heap[0] = entity;
+                    let sub_heap = Arc::from_iter((0..128).map(|_| NMainCell::new(InertEntity::PLACEHOLDER)));
+                    sub_heap[0].set(token, entity);
 
                     arch.entity_heaps.push(sub_heap);
                     arch.last_heap_len = 1;
                 } else {
-                    arch.entity_heaps.last_mut().unwrap()[arch.last_heap_len] = entity;
+                    arch.entity_heaps.last_mut().unwrap()[arch.last_heap_len].set(token, entity);
                     arch.last_heap_len += 1;
                 }
 
@@ -752,7 +753,7 @@ impl DbRoot {
 
                         external_heaps.extend(
                             (external_heaps.len()..min_heaps_len)
-                                .map(|i| Heap::new(token, arch.entity_heaps[i].len())),
+                                .map(|i| Arc::new(Heap::new(token, arch.entity_heaps[i].len()))),
                         );
                     }
 
@@ -922,7 +923,7 @@ impl<T: 'static> DbAnyStorage for DbStorage<T> {
             if external_heaps.len() < min_heaps_len {
                 external_heaps.extend(
                     (external_heaps.len()..min_heaps_len)
-                        .map(|i| Heap::new(token, dst_arch.entity_heaps[i].len())),
+                        .map(|i| Arc::new(Heap::new(token, dst_arch.entity_heaps[i].len()))),
                 );
             }
 
