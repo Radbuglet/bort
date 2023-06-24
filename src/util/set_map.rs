@@ -132,6 +132,7 @@ where
 
 // === SetMap === //
 
+pub type SetMapArena<K, V, A> = Arena<SetMapEntry<K, V, A>, A>;
 pub type SetMapPtr<K, V, A> = ArenaPtr<SetMapEntry<K, V, A>, A>;
 
 pub struct SetMap<K, V, A: ArenaKind>
@@ -219,6 +220,7 @@ where
         negative_getter_mut: impl Fn(&mut SetMapEntry<K, V, A>) -> &mut FxHashMap<K, SetMapPtr<K, V, A>>,
         iter_ctor: impl for<'a> GoofyIterCtorHack<'a, K>,
         set_ctor: impl FnOnce(&[K]) -> V,
+        set_post_ctor: impl FnOnce(&mut SetMapArena<K, V, A>, &SetMapPtr<K, V, A>),
     ) -> SetMapPtr<K, V, A> {
         let base_ptr = base_ptr.unwrap_or(&self.root);
         let base_data = self.arena.get(base_ptr);
@@ -308,6 +310,9 @@ where
             target.self_ptr = Some(target_ptr.clone());
         }
 
+        // initialization
+        set_post_ctor(&mut self.arena, &target_ptr);
+
         self.map.insert(
             target_hash,
             (target_hash, target_ptr.clone()),
@@ -322,6 +327,7 @@ where
         base: Option<&SetMapPtr<K, V, A>>,
         key: K,
         set_ctor: impl FnOnce(&[K]) -> V,
+        set_post_ctor: impl FnOnce(&mut SetMapArena<K, V, A>, &SetMapPtr<K, V, A>),
     ) -> SetMapPtr<K, V, A> {
         fn iter_ctor<K: Copy>(
             a: &[K],
@@ -338,6 +344,7 @@ where
             |a: &mut SetMapEntry<K, V, A>| &mut a.de_extensions,
             iter_ctor,
             set_ctor,
+            set_post_ctor,
         )
     }
 
@@ -346,6 +353,7 @@ where
         base: &SetMapPtr<K, V, A>,
         key: K,
         set_ctor: impl FnOnce(&[K]) -> V,
+        set_post_ctor: impl FnOnce(&mut SetMapArena<K, V, A>, &SetMapPtr<K, V, A>),
     ) -> SetMapPtr<K, V, A> {
         fn iter_ctor<K: Copy>(a: &[K], b: K) -> IterFilter<iter::Copied<slice::Iter<'_, K>>> {
             IterFilter(a.iter().copied(), b)
@@ -359,6 +367,7 @@ where
             |a: &mut SetMapEntry<K, V, A>| &mut a.extensions,
             iter_ctor,
             set_ctor,
+            set_post_ctor,
         )
     }
 

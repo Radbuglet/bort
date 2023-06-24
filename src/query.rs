@@ -6,6 +6,7 @@ use crate::{
     core::token::MainThreadToken,
     database::{DbRoot, InertTag},
     util::misc::NamedTypeId,
+    Entity,
 };
 
 // === Tag === //
@@ -66,4 +67,11 @@ impl fmt::Debug for RawTag {
 pub fn flush() {
     let token = MainThreadToken::acquire_fmt("flush entity archetypes");
     DbRoot::get(token).flush_archetypes(token);
+}
+
+pub fn query_tagged(tag: impl Into<RawTag>) -> impl Iterator<Item = Entity> {
+    let token = MainThreadToken::acquire_fmt("query entities");
+    DbRoot::get(token)
+        .query_tagged(token, tag.into().0)
+        .map(|inert| Entity { inert })
 }

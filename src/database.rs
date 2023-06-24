@@ -1,7 +1,8 @@
 use std::{
     any::{type_name, Any},
-    fmt, hash, mem,
-    num::NonZeroU64, sync::Arc,
+    fmt, hash, iter, mem,
+    num::NonZeroU64,
+    sync::Arc,
 };
 
 use derive_where::derive_where;
@@ -11,7 +12,7 @@ use crate::{
         cell::OptRefMut,
         heap::{Heap, Slot},
         token::MainThreadToken,
-        token_cell::{NOptRefCell, NMainCell},
+        token_cell::{NMainCell, NOptRefCell},
     },
     debug::DebugLabel,
     entity::Entity,
@@ -21,7 +22,7 @@ use crate::{
         block::{BlockAllocator, BlockReservation},
         hash_map::{FxHashMap, FxHashSet, NopHashMap},
         misc::{const_new_nz_u64, leak, xorshift64, AnyDowncastExt, NamedTypeId, RawFmt},
-        set_map::{filter_duplicates, merge_iters, SetMap, SetMapPtr},
+        set_map::{filter_duplicates, merge_iters, SetMap, SetMapArena, SetMapPtr},
     },
 };
 
@@ -45,6 +46,9 @@ pub struct DbRoot {
     // A set map keeping track of all archetypes present in our application.
     arch_map: DbArchetypeMap,
 
+    // A map from tag to metadata.
+    tag_map: NopHashMap<InertTag, DbTag>,
+
     // A map from type ID to storage.
     storages: FxHashMap<NamedTypeId, &'static dyn DbAnyStorage>,
 
@@ -58,6 +62,10 @@ pub struct DbRoot {
 
     // The total number of entities ever created by the application.
     debug_total_spawns: u64,
+
+    // A guard to protect against flushing while querying. This doesn't prevent panics but it does
+    // prevent nasty concurrent modification surprises.
+    query_guard: NOptRefCell<()>,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -87,6 +95,11 @@ struct DbDirtyDeadEntity {
     physical_arch: DbArchetypeRef,
     heap_index: usize,
     slot_index: usize,
+}
+
+#[derive(Debug, Default)]
+struct DbTag {
+    contained_by: FxHashSet<DbArchetypeRef>,
 }
 
 // === Storage === //
@@ -215,6 +228,7 @@ impl DbArchetype {
 }
 
 type DbArchetypeMap = SetMap<InertTag, DbArchetype, FreeListArena>;
+type DbArchetypeArena = SetMapArena<InertTag, DbArchetype, FreeListArena>;
 type DbArchetypeRef = SetMapPtr<InertTag, DbArchetype, FreeListArena>;
 
 // === Inert Handles === //
@@ -288,10 +302,12 @@ impl DbRoot {
                     alive_entities: NopHashMap::default(),
                     comp_list_map: SetMap::default(),
                     arch_map: SetMap::new(DbArchetype::new(&[])),
+                    tag_map: NopHashMap::default(),
                     storages: FxHashMap::default(),
                     probably_alive_dirty_entities: Vec::new(),
                     dead_dirty_entities: Vec::new(),
                     debug_total_spawns: 0,
+                    query_guard: NOptRefCell::new_full(()),
                 }),
             );
         }
@@ -391,12 +407,32 @@ impl DbRoot {
         let was_dirty = entity_info.physical_arch != entity_info.virtual_arch;
 
         // Update the list
+        let post_ctor = |arena: &mut DbArchetypeArena, target_ptr: &DbArchetypeRef| {
+            let target = arena.get(target_ptr);
+
+            for tag in target.keys() {
+                self.tag_map
+                    .entry(*tag)
+                    .or_insert_with(Default::default)
+                    .contained_by
+                    .insert(*target_ptr);
+            }
+        };
+
         entity_info.virtual_arch = if is_add {
-            self.arch_map
-                .lookup_extension(Some(&entity_info.virtual_arch), tag, DbArchetype::new)
+            self.arch_map.lookup_extension(
+                Some(&entity_info.virtual_arch),
+                tag,
+                DbArchetype::new,
+                post_ctor,
+            )
         } else {
-            self.arch_map
-                .lookup_de_extension(&entity_info.virtual_arch, tag, DbArchetype::new)
+            self.arch_map.lookup_de_extension(
+                &entity_info.virtual_arch,
+                tag,
+                DbArchetype::new,
+                post_ctor,
+            )
         };
 
         // Determine whether we became dirty
@@ -445,7 +481,58 @@ impl DbRoot {
 
     // === Queries === //
 
+    pub fn query_tagged(
+        &mut self,
+        token: &'static MainThreadToken,
+        tag: InertTag,
+    ) -> impl Iterator<Item = InertEntity> {
+        let _guard = self.query_guard.borrow(token);
+
+        // Collect all heap arcs into a vector so we can return them without depending on the
+        // lifetime of self
+        let mut runs = self
+            .tag_map
+            .get(&tag)
+            .map_or(Vec::new(), |tag| {
+                tag.contained_by
+                    .iter()
+                    .flat_map(|arch_id| {
+                        let arch = self.arch_map.arena().get(&arch_id).value();
+                        arch.entity_heaps.iter().enumerate().map(|(i, arc)| {
+                            if i == arch.entity_heaps.len() - 1 {
+                                (Arc::clone(arc), arch.last_heap_len)
+                            } else {
+                                (Arc::clone(arc), arc.len())
+                            }
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .into_iter();
+
+        let mut curr_run_iter = runs.next().map(|arc| (arc, 0));
+
+        iter::from_fn(move || {
+            let ((curr_run, curr_run_len), index) = curr_run_iter.as_mut()?;
+            if *index >= *curr_run_len {
+                let next_run = runs.next()?;
+                let first = next_run.0[0].get(token); // This cannot fail because runs are always non-empty.
+                curr_run_iter = Some((next_run, 1));
+                Some(first)
+            } else {
+                let next = curr_run[*index].get(token);
+                *index += 1;
+                Some(next)
+            }
+        })
+    }
+
     pub fn flush_archetypes(&mut self, token: &MainThreadToken) {
+        let _guard = self
+            .query_guard
+            .try_borrow_mut(token)
+            .expect("cannot flush archetypes while a query is active");
+
         // Throughout this process, we keep track of which entities have been moved around and they
         // archetype they currently reside.
         let mut moved = NopHashMap::default();
@@ -581,7 +668,8 @@ impl DbRoot {
                     .get(token);
 
                 // Replace the slot
-                arch.entity_heaps[entity_info.heap_index][entity_info.slot_index].set(token, last_entity);
+                arch.entity_heaps[entity_info.heap_index][entity_info.slot_index]
+                    .set(token, last_entity);
 
                 // Update the filler's location mirror
                 let entity_info = *entity_info;
@@ -621,7 +709,8 @@ impl DbRoot {
                 let arch = self.arch_map.arena_mut().get_mut(&dest_arch_id).value_mut();
 
                 if arch.last_heap_len == arch.entity_heaps.last().map_or(0, |heap| heap.len()) {
-                    let sub_heap = Arc::from_iter((0..128).map(|_| NMainCell::new(InertEntity::PLACEHOLDER)));
+                    let sub_heap =
+                        Arc::from_iter((0..128).map(|_| NMainCell::new(InertEntity::PLACEHOLDER)));
                     sub_heap[0].set(token, entity);
 
                     arch.entity_heaps.push(sub_heap);
@@ -726,6 +815,7 @@ impl DbRoot {
                     Some(&entity_info.comp_list),
                     DbComponentType::of::<T>(),
                     |_| Default::default(),
+                    |_, _| {},
                 );
 
                 // Allocate a slot for this component
@@ -822,6 +912,7 @@ impl DbRoot {
                     &entity_info.comp_list,
                     DbComponentType::of::<T>(),
                     |_| Default::default(),
+                    |_, _| {},
                 );
             }
 
@@ -857,35 +948,32 @@ impl DbRoot {
         #[derive(Debug)]
         struct Id(NonZeroU64);
 
+        let mut builder = f.debug_tuple("Entity");
+
+        builder.field(&Id(entity.0));
+
+        if entity == InertEntity::PLACEHOLDER {
+            builder.field(&POSSIBLY_A_PLACEHOLDER);
+        }
+
         if let Some(&entity_info) = self.alive_entities.get(&entity) {
             // Format the component list
-            let mut builder = f.debug_tuple("Entity");
-
             if let Some(label) =
                 Self::get_component(&self.get_storage::<DebugLabel>().borrow(token), entity)
             {
                 builder.field(&label.borrow(token));
             }
 
-            if entity == InertEntity::PLACEHOLDER {
-                builder.field(&POSSIBLY_A_PLACEHOLDER);
-            }
-
-            builder.field(&Id(entity.0));
-
             for v in entity_info.comp_list.direct_borrow().keys().iter() {
                 if v.id != NamedTypeId::of::<DebugLabel>() {
                     builder.field(&RawFmt(v.name));
                 }
             }
-
-            builder.finish()
         } else {
-            f.debug_tuple("Entity")
-                .field(&RawFmt("<dead>"))
-                .field(&Id(entity.0))
-                .finish()
+            builder.field(&RawFmt("<dead>"));
         }
+
+        builder.finish()
     }
 }
 

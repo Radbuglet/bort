@@ -1,4 +1,4 @@
-use bort::{debug::dump_database_state, flush, OwnedEntity, Tag};
+use bort::{flush, query_tagged, OwnedEntity, Tag};
 
 fn main() {
     let foo = Tag::<i32>::new();
@@ -11,13 +11,16 @@ fn main() {
     bar.tag(foo);
     assert!(bar.is_tagged(foo));
 
+    println!("{:?}", query_tagged(foo).collect::<Vec<_>>());
+
     println!("tagged 2");
     bar.tag(foo);
     assert!(bar.is_tagged(foo));
 
-    println!("{}", dump_database_state());
+    println!("Flushed");
     flush();
-    println!("{}", dump_database_state());
+
+    println!("{:?}", query_tagged(foo).collect::<Vec<_>>());
 
     println!("untagged 1");
     bar.untag(foo);
@@ -27,9 +30,12 @@ fn main() {
     bar.untag(foo);
     assert!(!bar.is_tagged(foo));
 
-    println!("{}", dump_database_state());
+    println!("{:?}", query_tagged(foo).collect::<Vec<_>>());
+
+    println!("Flushed");
     flush();
-    println!("{}", dump_database_state());
+
+    println!("{:?}", query_tagged(foo).collect::<Vec<_>>());
 
     println!("tagged 3");
     bar.tag(foo);
@@ -39,17 +45,25 @@ fn main() {
     bar.tag(foo);
     assert!(bar.is_tagged(foo));
 
+    println!("{:?}", query_tagged(foo).collect::<Vec<_>>());
+
     println!("Flushed again");
     flush();
 
+    println!("{:?}", query_tagged(foo).collect::<Vec<_>>());
+
     println!("Inserting");
     bar.insert(1i32);
-    println!("{}", dump_database_state());
+
+    println!("{:?}", query_tagged(foo).collect::<Vec<_>>());
 
     println!("Destroying.");
     bar.destroy();
 
-    println!("{}", dump_database_state());
+    println!("{:?}", query_tagged(foo).collect::<Vec<_>>());
+
+    println!("Flushed");
     flush();
-    println!("{}", dump_database_state());
+
+    println!("{:?}", query_tagged(foo).collect::<Vec<_>>());
 }
