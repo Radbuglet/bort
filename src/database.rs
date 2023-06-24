@@ -1,6 +1,6 @@
 use std::{
     any::{type_name, Any},
-    fmt, hash, mem,
+    fmt, hash, iter, mem,
     num::NonZeroU64,
     sync::Arc,
 };
@@ -10,7 +10,7 @@ use derive_where::derive_where;
 use crate::{
     core::{
         cell::{OptRef, OptRefMut},
-        heap::{Heap, Slot},
+        heap::{DirectSlot, Heap, Slot},
         token::MainThreadToken,
         token_cell::{NMainCell, NOptRefCell},
     },
@@ -1081,6 +1081,45 @@ pub struct QueryChunk {
 }
 
 impl QueryChunk {
+    pub fn iter_storage<T: 'static, V>(
+        &self,
+        storage: &DbStorageInner<T>,
+        mut getter: impl Clone + FnMut(DirectSlot<'_, T>) -> V,
+    ) -> impl Iterator<Item = V> {
+        let last_sub_len = self.last_sub_len;
+        let mut subs_iter = storage
+            .heaps
+            .get(&self.archetype)
+            .map_or(Vec::new().into_iter(), |vec| vec.clone().into_iter());
+
+        let mut curr_sub = None::<(Arc<Heap<T>>, usize, usize)>;
+
+        iter::from_fn(move || {
+            let (curr_heap, curr_i, curr_len) = match curr_sub.as_mut() {
+                Some(curr_sub) => curr_sub,
+                None => {
+                    let next_sub = subs_iter.next()?;
+                    let sub_len = if subs_iter.len() == 0 {
+                        last_sub_len
+                    } else {
+                        next_sub.len()
+                    };
+
+                    debug_assert_ne!(sub_len, 0);
+                    curr_sub.insert((next_sub, 0, sub_len))
+                }
+            };
+
+            let generated = getter(curr_heap.slot(*curr_i));
+            *curr_i += 1;
+            if *curr_i >= *curr_len {
+                curr_sub = None;
+            }
+
+            Some(generated)
+        })
+    }
+
     pub fn into_entities(
         self,
         token: &'static MainThreadToken,

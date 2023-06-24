@@ -6,7 +6,7 @@ use crate::{
     core::token::MainThreadToken,
     database::{DbRoot, InertTag},
     util::misc::NamedTypeId,
-    Entity,
+    CompMut, Entity,
 };
 
 // === Tag === //
@@ -89,4 +89,26 @@ where
             chunk.into_entities(token)
         })
         .map(|inert| inert.into_dangerous_entity())
+}
+
+pub fn query_i32(tag: Tag<i32>) -> impl Iterator<Item = (Entity, CompMut<i32>)> {
+    let token = MainThreadToken::acquire_fmt("enumerate tagged entities");
+    let mut db = DbRoot::get(token);
+
+    let guard = db.borrow_query_guard(token);
+    let chunks = db.prepare_query(&[tag.raw.0]);
+    let storage = db.get_storage::<i32>();
+
+    chunks.into_iter().flat_map(move |chunk| {
+        let _guard_capture = &guard;
+
+        let comps = chunk.iter_storage(&mut storage.borrow_mut(token), |slot| {
+            slot.borrow_mut(token)
+        });
+        let entities = chunk
+            .into_entities(token)
+            .map(|ent| ent.into_dangerous_entity());
+
+        entities.zip(comps)
+    })
 }

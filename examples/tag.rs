@@ -1,4 +1,4 @@
-use bort::{flush, query_tagged, OwnedEntity, Tag};
+use bort::{flush, query::query_i32, query_tagged, OwnedEntity, Tag};
 
 fn main() {
     let foo = Tag::<i32>::new();
@@ -74,6 +74,11 @@ fn main() {
     ent.insert(1i32);
 
     println!("{:?}", query_tagged([foo]).collect::<Vec<_>>());
+
+    for (ent, mut val) in query_i32(foo) {
+        println!("{ent:?}: {val:?}");
+        *val += 1;
+    }
 
     println!("Destroying.");
     ent.destroy();
