@@ -65,7 +65,7 @@ pub struct DbRoot {
 
     // A guard to protect against flushing while querying. This doesn't prevent panics but it does
     // prevent nasty concurrent modification surprises.
-    query_guard: NOptRefCell<()>,
+    query_guard: &'static NOptRefCell<()>,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -307,7 +307,7 @@ impl DbRoot {
                     probably_alive_dirty_entities: Vec::new(),
                     dead_dirty_entities: Vec::new(),
                     debug_total_spawns: 0,
-                    query_guard: NOptRefCell::new_full(()),
+                    query_guard: leak(NOptRefCell::new_full(())),
                 }),
             );
         }
@@ -486,7 +486,7 @@ impl DbRoot {
         token: &'static MainThreadToken,
         tag: InertTag,
     ) -> impl Iterator<Item = InertEntity> {
-        let _guard = self.query_guard.borrow(token);
+        let guard = self.query_guard.borrow(token);
 
         // Collect all heap arcs into a vector so we can return them without depending on the
         // lifetime of self
@@ -513,6 +513,8 @@ impl DbRoot {
         let mut curr_run_iter = runs.next().map(|arc| (arc, 0));
 
         iter::from_fn(move || {
+            let _guard_capture = &guard;
+
             let ((curr_run, curr_run_len), index) = curr_run_iter.as_mut()?;
             if *index >= *curr_run_len {
                 let next_run = runs.next()?;
