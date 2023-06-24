@@ -9,7 +9,10 @@ use crate::{
         QueryChunkStorageIterConverter,
     },
     entity::{CompMut, CompRef, Entity},
-    util::misc::NamedTypeId,
+    util::{
+        iter::ZipIter,
+        misc::{impl_tuples, NamedTypeId},
+    },
 };
 
 // === Tag === //
@@ -36,6 +39,14 @@ impl<T> Tag<T> {
 
     pub fn raw(self) -> RawTag {
         self.raw
+    }
+
+    pub fn as_ref(self) -> Ref<T> {
+        Ref(self)
+    }
+
+    pub fn as_mut(self) -> Mut<T> {
+        Mut(self)
     }
 }
 
@@ -76,7 +87,7 @@ pub fn flush() {
 
 pub trait Query {
     type PreparedState;
-    type Iter: IntoIterator<Item = Self::Item>;
+    type Iter: Iterator<Item = Self::Item>;
 
     type Item;
     type Zipped;
@@ -186,6 +197,45 @@ impl<T: 'static> Query for Mut<T> {
         (entity, item)
     }
 }
+
+// Tuple
+macro_rules! impl_query_tuple {
+	($($ty:ident:$field:tt),*) => {
+		impl<$($ty: Query),*> Query for ($($ty,)*) {
+			type PreparedState = ($($ty::PreparedState,)*);
+			type Iter = ZipIter<($($ty::Iter,)*)>;
+
+			type Item = ($($ty::Item,)*);
+			type Zipped = (Entity, $($ty::Item,)*);
+
+			#[allow(unused)]
+			fn extend_tags(self, tags: &mut Vec<InertTag>) {
+				$(self.$field.extend_tags(tags);)*
+			}
+
+			#[allow(unused)]
+			fn prepare_state(db: &mut DbRoot, token: &'static MainThreadToken) -> Self::PreparedState {
+				($($ty::prepare_state(db, token),)*)
+			}
+
+			#[allow(unused)]
+			fn iter(
+				token: &'static MainThreadToken,
+				state: &mut Self::PreparedState,
+				chunk: &mut QueryChunk,
+			) -> Self::Iter {
+				ZipIter(($($ty::iter(token, &mut state.$field, chunk),)*))
+			}
+
+			#[allow(unused)]
+			fn zip(item: Self::Item, entity: Entity) -> Self::Zipped {
+				(entity, $(item.$field),*)
+			}
+		}
+	};
+}
+
+impl_tuples!(impl_query_tuple);
 
 // Driver
 pub fn query_all<Q: Query>(query: Q) -> impl Iterator<Item = Q::Zipped> {
