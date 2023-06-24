@@ -1044,6 +1044,8 @@ impl<T: 'static> DbAnyStorage for DbStorage<T> {
             //
             // N.B. `swap_direct` supports no-op swaps without any issues.
             let new_slot = external_heaps[entity_info.heap_index].slot(entity_info.slot_index);
+
+            // FIXME: This is not the correct way to implement this.
             mapping.slot.swap_direct(token, new_slot);
 
             // Deallocate the old anonymous reservation if applicable and mark it as external
@@ -1063,6 +1065,7 @@ impl<T: 'static> DbAnyStorage for DbStorage<T> {
                     .slot(resv.slot);
 
                 // Swap the values to move the other object into its appropriate heap
+                // FIXME: This is not the correct way to implement this.
                 mapping.slot.swap_direct(token, new_slot);
             }
         }

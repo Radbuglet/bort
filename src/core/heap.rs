@@ -353,6 +353,7 @@ pub struct Slot<T: 'static> {
 impl<T> fmt::Debug for Slot<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Slot")
+            .field("indirector", &(self.indirector as *const Indirector))
             .field("owner", &self.indirector.owner)
             .field("value", &self.indirector.value)
             .finish_non_exhaustive()

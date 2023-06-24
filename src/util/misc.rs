@@ -1,13 +1,11 @@
 use std::{
-    any::{type_name, Any, TypeId},
+    any::{Any, TypeId},
     borrow::Borrow,
     error::Error,
     fmt,
     num::NonZeroU64,
     sync::{MutexGuard, PoisonError},
 };
-
-use derive_where::derive_where;
 
 // === Random IDs === //
 
@@ -63,11 +61,15 @@ impl fmt::Debug for RawFmt<'_> {
 // === NamedTypeId === //
 
 #[derive(Copy, Clone)]
-#[derive_where(Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[cfg_attr(not(debug_assertions), derive(Eq, PartialEq, Ord, PartialOrd, Hash))]
+#[cfg_attr(
+    debug_assertions,
+    derive_where::derive_where(Eq, PartialEq, Ord, PartialOrd, Hash)
+)]
 pub struct NamedTypeId {
     id: TypeId,
-    #[derive_where(skip)]
     #[cfg(debug_assertions)]
+    #[derive_where(skip)]
     name: Option<&'static str>,
 }
 
@@ -87,7 +89,7 @@ impl NamedTypeId {
         Self {
             id: TypeId::of::<T>(),
             #[cfg(debug_assertions)]
-            name: Some(type_name::<T>()),
+            name: Some(std::any::type_name::<T>()),
         }
     }
 

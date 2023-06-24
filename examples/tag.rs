@@ -1,12 +1,26 @@
-use bort::{query_all, Tag};
+use bort::{debug::dump_database_state, prelude::*};
 
 fn main() {
-    let a = Tag::<i32>::new();
-    let b = Tag::<i32>::new();
-    let c = Tag::<u32>::new();
+    let pos_tag = Tag::<i32>::new();
+    let vel_tag = Tag::<u32>::new();
 
-    for (entity, a, mut b, c) in query_all((a.as_ref(), b.as_mut(), c.as_ref())) {
-        entity.get::<u32>();
-        *b += *a + *c as i32;
-    }
+    let entity_1 = OwnedEntity::new();
+    entity_1.tag(pos_tag);
+    entity_1.insert(1i32);
+    entity_1.tag(vel_tag);
+    entity_1.insert(2u32);
+
+    flush();
+
+    let entity_2 = OwnedEntity::new();
+    entity_2.tag(pos_tag);
+    entity_2.insert(1i32);
+    entity_2.tag(vel_tag);
+    entity_2.insert(2u32);
+
+    flush();
+
+    println!("{}", dump_database_state());
+
+    for (_, _, _) in query_all((pos_tag.as_ref(), vel_tag.as_ref())) {}
 }
