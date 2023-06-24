@@ -1,6 +1,6 @@
 use std::{
     any::{type_name, Any},
-    fmt, hash, iter, mem,
+    fmt, hash, mem,
     num::NonZeroU64,
     sync::Arc,
 };
@@ -9,7 +9,7 @@ use derive_where::derive_where;
 
 use crate::{
     core::{
-        cell::OptRefMut,
+        cell::{OptRef, OptRefMut},
         heap::{Heap, Slot},
         token::MainThreadToken,
         token_cell::{NMainCell, NOptRefCell},
@@ -21,8 +21,9 @@ use crate::{
         arena::{FreeListArena, LeakyArena, SpecArena},
         block::{BlockAllocator, BlockReservation},
         hash_map::{FxHashMap, FxHashSet, NopHashMap},
+        iter::{arc_into_iter, filter_duplicates, merge_iters},
         misc::{const_new_nz_u64, leak, xorshift64, AnyDowncastExt, NamedTypeId, RawFmt},
-        set_map::{filter_duplicates, merge_iters, SetMap, SetMapArena, SetMapPtr},
+        set_map::{SetMap, SetMapArena, SetMapPtr},
     },
 };
 
@@ -100,6 +101,8 @@ struct DbDirtyDeadEntity {
 #[derive(Debug, Default)]
 struct DbTag {
     contained_by: FxHashSet<DbArchetypeRef>,
+    sorted_containers: Vec<DbArchetypeRef>,
+    are_sorted_containers_sorted: bool,
 }
 
 // === Storage === //
@@ -411,11 +414,11 @@ impl DbRoot {
             let target = arena.get(target_ptr);
 
             for tag in target.keys() {
-                self.tag_map
-                    .entry(*tag)
-                    .or_insert_with(Default::default)
-                    .contained_by
-                    .insert(*target_ptr);
+                let tag_state = self.tag_map.entry(*tag).or_insert_with(Default::default);
+
+                tag_state.contained_by.insert(*target_ptr);
+                tag_state.sorted_containers.push(*target_ptr);
+                tag_state.are_sorted_containers_sorted = false;
             }
         };
 
@@ -481,52 +484,71 @@ impl DbRoot {
 
     // === Queries === //
 
-    pub fn query_tagged(
-        &mut self,
-        token: &'static MainThreadToken,
-        tag: InertTag,
-    ) -> impl Iterator<Item = InertEntity> {
-        let guard = self.query_guard.borrow(token);
+    pub fn borrow_query_guard(&self, token: &'static MainThreadToken) -> OptRef<'static, ()> {
+        self.query_guard.borrow(token)
+    }
 
-        // Collect all heap arcs into a vector so we can return them without depending on the
-        // lifetime of self
-        let mut runs = self
-            .tag_map
-            .get(&tag)
-            .map_or(Vec::new(), |tag| {
-                tag.contained_by
-                    .iter()
-                    .flat_map(|arch_id| {
-                        let arch = self.arch_map.arena().get(&arch_id).value();
-                        arch.entity_heaps.iter().enumerate().map(|(i, arc)| {
-                            if i == arch.entity_heaps.len() - 1 {
-                                (Arc::clone(arc), arch.last_heap_len)
-                            } else {
-                                (Arc::clone(arc), arc.len())
-                            }
-                        })
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .into_iter();
+    pub fn prepare_query(&mut self, tags: &[InertTag]) -> Vec<QueryChunk> {
+        if tags.is_empty() {
+            return Vec::new();
+        }
 
-        let mut curr_run_iter = runs.next().map(|arc| (arc, 0));
-
-        iter::from_fn(move || {
-            let _guard_capture = &guard;
-
-            let ((curr_run, curr_run_len), index) = curr_run_iter.as_mut()?;
-            if *index >= *curr_run_len {
-                let next_run = runs.next()?;
-                let first = next_run.0[0].get(token); // This cannot fail because runs are always non-empty.
-                curr_run_iter = Some((next_run, 1));
-                Some(first)
-            } else {
-                let next = curr_run[*index].get(token);
-                *index += 1;
-                Some(next)
+        // Ensure that all tag containers are sorted
+        for tag_id in tags {
+            let Some(tag) = self.tag_map.get_mut(tag_id) else { continue };
+            if !tag.are_sorted_containers_sorted {
+                tag.sorted_containers.sort();
+                tag.are_sorted_containers_sorted = true;
             }
-        })
+        }
+
+        // Collect a set of archetypes to include and prepare their chunks
+        let empty_iter = [].iter();
+        let mut tag_iters = tags
+            .iter()
+            .map(|tag_id| {
+                self.tag_map
+                    .get(tag_id)
+                    .map_or(empty_iter.clone(), |tag| tag.sorted_containers.iter())
+            })
+            .collect::<Vec<_>>();
+
+        let mut primary_iter = tag_iters.pop().unwrap();
+        let mut chunks = Vec::new();
+
+        'scan: loop {
+            // Determine the primary archetype we'll be scanning for.
+            let Some(primary_arch) = primary_iter.next() else { break 'scan };
+
+            // Ensure that the archetype exists in all other tags
+            for other_iter in &mut tag_iters {
+                // Consume all archetypes less than primary_arch
+                let other_arch = loop {
+                    let Some(other_arch) = other_iter.clone().next() else { break 'scan };
+
+                    if other_arch < primary_arch {
+                        let _ = other_iter.next();
+                    } else {
+                        break other_arch;
+                    }
+                };
+
+                // If `other_arch` is not equal to our searched-for `primary_arch`, try again.
+                if primary_arch != other_arch {
+                    continue 'scan;
+                }
+            }
+
+            // Otherwise, this archetype is in the intersection and we can add a chunk for it.
+            let arch = self.arch_map.arena().get(primary_arch).value();
+            chunks.push(QueryChunk {
+                archetype: *primary_arch,
+                entity_subs: arch.entity_heaps.clone(),
+                last_sub_len: arch.last_heap_len,
+            })
+        }
+
+        chunks
     }
 
     pub fn flush_archetypes(&mut self, token: &MainThreadToken) {
@@ -1046,5 +1068,36 @@ impl<T: 'static> DbAnyStorage for DbStorage<T> {
     }
 }
 
+// === Public helpers === //
+
 #[derive(Debug)]
 pub struct EntityDeadError;
+
+#[derive(Debug)]
+pub struct QueryChunk {
+    archetype: DbArchetypeRef,
+    entity_subs: Vec<Arc<[NMainCell<InertEntity>]>>,
+    last_sub_len: usize,
+}
+
+impl QueryChunk {
+    pub fn into_entities(
+        self,
+        token: &'static MainThreadToken,
+    ) -> impl Iterator<Item = InertEntity> {
+        let last_sub = self.entity_subs.len().saturating_sub(1);
+
+        self.entity_subs
+            .into_iter()
+            .enumerate()
+            .flat_map(move |(i, arc)| {
+                let len = if i == last_sub {
+                    self.last_sub_len
+                } else {
+                    arc.len()
+                };
+
+                arc_into_iter(arc, len, |slot| slot.get(token))
+            })
+    }
+}

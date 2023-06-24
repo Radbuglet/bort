@@ -2,68 +2,86 @@ use bort::{flush, query_tagged, OwnedEntity, Tag};
 
 fn main() {
     let foo = Tag::<i32>::new();
+    let bar = Tag::<u32>::new();
 
-    let bar = OwnedEntity::new();
+    let ent = OwnedEntity::new();
 
-    assert!(!bar.is_tagged(foo));
+    assert!(!ent.is_tagged(foo));
 
     println!("tagged 1");
-    bar.tag(foo);
-    assert!(bar.is_tagged(foo));
+    ent.tag(foo);
+    assert!(ent.is_tagged(foo));
 
-    println!("{:?}", query_tagged(foo).collect::<Vec<_>>());
+    println!("{:?}", query_tagged([foo]).collect::<Vec<_>>());
 
     println!("tagged 2");
-    bar.tag(foo);
-    assert!(bar.is_tagged(foo));
+    ent.tag(foo);
+    assert!(ent.is_tagged(foo));
 
     println!("Flushed");
     flush();
 
-    println!("{:?}", query_tagged(foo).collect::<Vec<_>>());
+    println!("{:?}", query_tagged([foo]).collect::<Vec<_>>());
+    println!(
+        "{:?}",
+        query_tagged([bar.raw(), foo.raw()]).collect::<Vec<_>>()
+    );
+
+    ent.tag(bar);
+    println!(
+        "{:?}",
+        query_tagged([bar.raw(), foo.raw()]).collect::<Vec<_>>()
+    );
+    flush();
+    println!(
+        "{:?}",
+        query_tagged([bar.raw(), foo.raw()]).collect::<Vec<_>>()
+    );
 
     println!("untagged 1");
-    bar.untag(foo);
-    assert!(!bar.is_tagged(foo));
+    ent.untag(foo);
+    assert!(!ent.is_tagged(foo));
 
     println!("untagged 2");
-    bar.untag(foo);
-    assert!(!bar.is_tagged(foo));
+    ent.untag(foo);
+    assert!(!ent.is_tagged(foo));
 
-    println!("{:?}", query_tagged(foo).collect::<Vec<_>>());
+    println!("{:?}", query_tagged([foo]).collect::<Vec<_>>());
+    println!("{:?}", query_tagged([bar]).collect::<Vec<_>>());
 
     println!("Flushed");
     flush();
 
-    println!("{:?}", query_tagged(foo).collect::<Vec<_>>());
+    println!("{:?}", query_tagged([foo]).collect::<Vec<_>>());
+    println!("{:?}", query_tagged([bar]).collect::<Vec<_>>());
 
     println!("tagged 3");
-    bar.tag(foo);
-    assert!(bar.is_tagged(foo));
+    ent.tag(foo);
+    assert!(ent.is_tagged(foo));
 
     println!("tagged 4");
-    bar.tag(foo);
-    assert!(bar.is_tagged(foo));
+    ent.tag(foo);
+    assert!(ent.is_tagged(foo));
 
-    println!("{:?}", query_tagged(foo).collect::<Vec<_>>());
+    println!("{:?}", query_tagged([foo]).collect::<Vec<_>>());
 
     println!("Flushed again");
     flush();
 
-    println!("{:?}", query_tagged(foo).collect::<Vec<_>>());
+    println!("{:?}", query_tagged([foo]).collect::<Vec<_>>());
 
     println!("Inserting");
-    bar.insert(1i32);
+    ent.insert(1i32);
 
-    println!("{:?}", query_tagged(foo).collect::<Vec<_>>());
+    println!("{:?}", query_tagged([foo]).collect::<Vec<_>>());
 
     println!("Destroying.");
-    bar.destroy();
+    ent.destroy();
 
-    println!("{:?}", query_tagged(foo).collect::<Vec<_>>());
+    println!("{:?}", query_tagged([foo]).collect::<Vec<_>>());
 
     println!("Flushed");
     flush();
 
-    println!("{:?}", query_tagged(foo).collect::<Vec<_>>());
+    println!("{:?}", query_tagged([foo]).collect::<Vec<_>>());
 }

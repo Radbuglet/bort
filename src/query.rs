@@ -69,9 +69,24 @@ pub fn flush() {
     DbRoot::get(token).flush_archetypes(token);
 }
 
-pub fn query_tagged(tag: impl Into<RawTag>) -> impl Iterator<Item = Entity> {
-    let token = MainThreadToken::acquire_fmt("query entities");
-    DbRoot::get(token)
-        .query_tagged(token, tag.into().0)
-        .map(|inert| Entity { inert })
+pub fn query_tagged<I>(tags: I) -> impl Iterator<Item = Entity>
+where
+    I: IntoIterator,
+    I::Item: Into<RawTag>,
+{
+    let tags = tags.into_iter().map(|tag| tag.into().0).collect::<Vec<_>>();
+
+    let token = MainThreadToken::acquire_fmt("enumerate tagged entities");
+    let mut db = DbRoot::get(token);
+
+    let guard = db.borrow_query_guard(token);
+    let chunks = db.prepare_query(&tags);
+
+    chunks
+        .into_iter()
+        .flat_map(move |chunk| {
+            let _guard_capture = &guard;
+            chunk.into_entities(token)
+        })
+        .map(|inert| inert.into_dangerous_entity())
 }
