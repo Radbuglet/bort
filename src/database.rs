@@ -1,8 +1,9 @@
 use std::{
     any::{type_name, Any},
-    fmt, hash, iter, mem,
+    fmt, hash, mem,
     num::NonZeroU64,
     sync::Arc,
+    vec,
 };
 
 use derive_where::derive_where;
@@ -1081,43 +1082,24 @@ pub struct QueryChunk {
 }
 
 impl QueryChunk {
-    pub fn iter_storage<T: 'static, V>(
+    pub fn iter_storage<T, G>(
         &self,
         storage: &DbStorageInner<T>,
-        mut getter: impl Clone + FnMut(DirectSlot<'_, T>) -> V,
-    ) -> impl Iterator<Item = V> {
-        let last_sub_len = self.last_sub_len;
-        let mut subs_iter = storage
-            .heaps
-            .get(&self.archetype)
-            .map_or(Vec::new().into_iter(), |vec| vec.clone().into_iter());
-
-        let mut curr_sub = None::<(Arc<Heap<T>>, usize, usize)>;
-
-        iter::from_fn(move || {
-            let (curr_heap, curr_i, curr_len) = match curr_sub.as_mut() {
-                Some(curr_sub) => curr_sub,
-                None => {
-                    let next_sub = subs_iter.next()?;
-                    let sub_len = if subs_iter.len() == 0 {
-                        last_sub_len
-                    } else {
-                        next_sub.len()
-                    };
-
-                    debug_assert_ne!(sub_len, 0);
-                    curr_sub.insert((next_sub, 0, sub_len))
-                }
-            };
-
-            let generated = getter(curr_heap.slot(*curr_i));
-            *curr_i += 1;
-            if *curr_i >= *curr_len {
-                curr_sub = None;
-            }
-
-            Some(generated)
-        })
+        getter: G,
+    ) -> QueryChunkStorageIter<T, G>
+    where
+        T: 'static,
+        G: QueryChunkStorageIterConverter<T>,
+    {
+        QueryChunkStorageIter {
+            last_sub_len: self.last_sub_len,
+            subs_iter: storage
+                .heaps
+                .get(&self.archetype)
+                .map_or(Vec::new().into_iter(), |v| v.clone().into_iter()),
+            curr_sub: None,
+            getter,
+        }
     }
 
     pub fn into_entities(
@@ -1138,5 +1120,62 @@ impl QueryChunk {
 
                 arc_into_iter(arc, len, |slot| slot.get(token))
             })
+    }
+}
+
+#[derive_where(Debug; G: fmt::Debug)]
+pub struct QueryChunkStorageIter<T: 'static, G> {
+    last_sub_len: usize,
+    subs_iter: vec::IntoIter<Arc<Heap<T>>>,
+    curr_sub: Option<(Arc<Heap<T>>, usize, usize)>,
+    getter: G,
+}
+
+impl<T, G> Iterator for QueryChunkStorageIter<T, G>
+where
+    G: QueryChunkStorageIterConverter<T>,
+{
+    type Item = G::Output;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (curr_heap, curr_i, curr_len) = match self.curr_sub.as_mut() {
+            Some(curr_sub) => curr_sub,
+            None => {
+                let next_sub = self.subs_iter.next()?;
+                let sub_len = if self.subs_iter.len() == 0 {
+                    self.last_sub_len
+                } else {
+                    next_sub.len()
+                };
+
+                debug_assert_ne!(sub_len, 0);
+                self.curr_sub.insert((next_sub, 0, sub_len))
+            }
+        };
+
+        let generated = self.getter.convert(curr_heap.slot(*curr_i));
+        *curr_i += 1;
+        if *curr_i >= *curr_len {
+            self.curr_sub = None;
+        }
+
+        Some(generated)
+    }
+}
+
+pub trait QueryChunkStorageIterConverter<T> {
+    type Output;
+
+    fn convert(&mut self, slot: DirectSlot<'_, T>) -> Self::Output;
+}
+
+impl<F, T, V> QueryChunkStorageIterConverter<T> for F
+where
+    F: FnMut(DirectSlot<'_, T>) -> V,
+{
+    type Output = V;
+
+    fn convert(&mut self, slot: DirectSlot<'_, T>) -> Self::Output {
+        self(slot)
     }
 }

@@ -3,10 +3,13 @@ use std::{fmt, marker::PhantomData};
 use derive_where::derive_where;
 
 use crate::{
-    core::token::MainThreadToken,
-    database::{DbRoot, InertTag},
+    core::{heap::DirectSlot, token::MainThreadToken},
+    database::{
+        DbRoot, DbStorage, InertTag, QueryChunk, QueryChunkStorageIter,
+        QueryChunkStorageIterConverter,
+    },
+    entity::{CompMut, CompRef, Entity},
     util::misc::NamedTypeId,
-    CompMut, Entity,
 };
 
 // === Tag === //
@@ -69,46 +72,150 @@ pub fn flush() {
     DbRoot::get(token).flush_archetypes(token);
 }
 
-pub fn query_tagged<I>(tags: I) -> impl Iterator<Item = Entity>
-where
-    I: IntoIterator,
-    I::Item: Into<RawTag>,
-{
-    let tags = tags.into_iter().map(|tag| tag.into().0).collect::<Vec<_>>();
+// === Queries === //
 
-    let token = MainThreadToken::acquire_fmt("enumerate tagged entities");
-    let mut db = DbRoot::get(token);
+pub trait Query {
+    type PreparedState;
+    type Iter: IntoIterator<Item = Self::Item>;
 
-    let guard = db.borrow_query_guard(token);
-    let chunks = db.prepare_query(&tags);
+    type Item;
+    type Zipped;
 
-    chunks
-        .into_iter()
-        .flat_map(move |chunk| {
-            let _guard_capture = &guard;
-            chunk.into_entities(token)
-        })
-        .map(|inert| inert.into_dangerous_entity())
+    fn extend_tags(self, tags: &mut Vec<InertTag>);
+
+    fn prepare_state(db: &mut DbRoot, token: &'static MainThreadToken) -> Self::PreparedState;
+
+    fn iter(
+        token: &'static MainThreadToken,
+        state: &mut Self::PreparedState,
+        chunk: &mut QueryChunk,
+    ) -> Self::Iter;
+
+    fn zip(item: Self::Item, entity: Entity) -> Self::Zipped;
 }
 
-pub fn query_i32(tag: Tag<i32>) -> impl Iterator<Item = (Entity, CompMut<i32>)> {
-    let token = MainThreadToken::acquire_fmt("enumerate tagged entities");
+// Converters
+mod sealed_converters {
+    use super::*;
+
+    pub struct RefConverter(pub &'static MainThreadToken);
+
+    impl<T: 'static> QueryChunkStorageIterConverter<T> for RefConverter {
+        type Output = CompRef<T>;
+
+        fn convert(&mut self, slot: DirectSlot<'_, T>) -> Self::Output {
+            slot.borrow(self.0)
+        }
+    }
+
+    pub struct MutConverter(pub &'static MainThreadToken);
+
+    impl<T: 'static> QueryChunkStorageIterConverter<T> for MutConverter {
+        type Output = CompMut<T>;
+
+        fn convert(&mut self, slot: DirectSlot<'_, T>) -> Self::Output {
+            slot.borrow_mut(self.0)
+        }
+    }
+}
+
+// Ref
+#[derive_where(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
+pub struct Ref<T: 'static>(pub Tag<T>);
+
+impl<T: 'static> Query for Ref<T> {
+    type PreparedState = &'static DbStorage<T>;
+    type Iter = QueryChunkStorageIter<T, sealed_converters::RefConverter>;
+    type Item = CompRef<T>;
+    type Zipped = (Entity, CompRef<T>);
+
+    fn extend_tags(self, tags: &mut Vec<InertTag>) {
+        tags.push(self.0.raw.0);
+    }
+
+    fn prepare_state(db: &mut DbRoot, _token: &'static MainThreadToken) -> Self::PreparedState {
+        db.get_storage()
+    }
+
+    fn iter(
+        token: &'static MainThreadToken,
+        state: &mut Self::PreparedState,
+        chunk: &mut QueryChunk,
+    ) -> Self::Iter {
+        chunk.iter_storage(
+            &mut state.borrow_mut(token),
+            sealed_converters::RefConverter(token),
+        )
+    }
+
+    fn zip(item: Self::Item, entity: Entity) -> Self::Zipped {
+        (entity, item)
+    }
+}
+
+// Mut
+#[derive_where(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
+pub struct Mut<T: 'static>(pub Tag<T>);
+
+impl<T: 'static> Query for Mut<T> {
+    type PreparedState = &'static DbStorage<T>;
+    type Iter = QueryChunkStorageIter<T, sealed_converters::MutConverter>;
+    type Item = CompMut<T>;
+    type Zipped = (Entity, CompMut<T>);
+
+    fn extend_tags(self, tags: &mut Vec<InertTag>) {
+        tags.push(self.0.raw.0);
+    }
+
+    fn prepare_state(db: &mut DbRoot, _token: &'static MainThreadToken) -> Self::PreparedState {
+        db.get_storage()
+    }
+
+    fn iter(
+        token: &'static MainThreadToken,
+        state: &mut Self::PreparedState,
+        chunk: &mut QueryChunk,
+    ) -> Self::Iter {
+        chunk.iter_storage(
+            &mut state.borrow_mut(token),
+            sealed_converters::MutConverter(token),
+        )
+    }
+
+    fn zip(item: Self::Item, entity: Entity) -> Self::Zipped {
+        (entity, item)
+    }
+}
+
+// Driver
+pub fn query_all<Q: Query>(query: Q) -> impl Iterator<Item = Q::Zipped> {
+    // Acquire guards
+    let token = MainThreadToken::acquire_fmt("query entity data");
     let mut db = DbRoot::get(token);
-
     let guard = db.borrow_query_guard(token);
-    let chunks = db.prepare_query(&[tag.raw.0]);
-    let storage = db.get_storage::<i32>();
 
-    chunks.into_iter().flat_map(move |chunk| {
-        let _guard_capture = &guard;
+    // Acquire tags
+    let mut tags = Vec::new();
+    query.extend_tags(&mut tags);
 
-        let comps = chunk.iter_storage(&mut storage.borrow_mut(token), |slot| {
-            slot.borrow_mut(token)
-        });
-        let entities = chunk
-            .into_entities(token)
-            .map(|ent| ent.into_dangerous_entity());
+    // Acquire chunks to be queried
+    let chunks = db.prepare_query(&tags);
 
-        entities.zip(comps)
+    // Prepare query state
+    let mut prepared = Q::prepare_state(&mut db, token);
+
+    chunks.into_iter().flat_map(move |mut chunk| {
+        let _guard_bind = &guard;
+
+        // Get an iterator for storage data
+        let data = Q::iter(token, &mut prepared, &mut chunk);
+
+        // Get an iterator for entity data
+        let entities = chunk.into_entities(token);
+
+        // Zip up the two iterators
+        entities
+            .zip(data)
+            .map(|(entity, item)| Q::zip(item, entity.into_dangerous_entity()))
     })
 }
