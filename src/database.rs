@@ -1194,7 +1194,9 @@ where
         let generated = self
             .getter
             .convert(self.token, curr_heap.slot(self.token, *curr_i));
+
         *curr_i += 1;
+
         if *curr_i >= *curr_len {
             self.curr_sub = None;
         }
