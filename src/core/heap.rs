@@ -65,7 +65,7 @@ pub struct Heap<T: 'static> {
     // N.B. mutability is not transitive through this box since indirectors will be referencing these
     // values.
     values: ManuallyDrop<Box<[HeapValue<T>]>>,
-    slots: Box<[Slot<T>]>,
+    slots: Box<[NMainCell<Slot<T>>]>,
 }
 
 struct HeapValue<T> {
@@ -73,7 +73,7 @@ struct HeapValue<T> {
 }
 
 impl<T> Heap<T> {
-    pub fn new(token: &MainThreadToken, len: usize) -> Self {
+    pub fn new(token: &'static MainThreadToken, len: usize) -> Self {
         // Allocate slot data
         let values = ManuallyDrop::new(Box::from_iter((0..len).map(|_| HeapValue {
             value: NOptRefCell::new_empty(),
@@ -115,10 +115,10 @@ impl<T> Heap<T> {
                         ThreadedPtrRef(&values[i] as *const HeapValue<T> as *const ()),
                     );
 
-                    Slot {
+                    NMainCell::new(Slot {
                         _ty: PhantomData,
                         indirector: data,
-                    }
+                    })
                 }),
         );
 
@@ -131,25 +131,62 @@ impl<T> Heap<T> {
         self.values.len()
     }
 
-    pub fn slot(&self, i: usize) -> DirectSlot<'_, T> {
+    pub fn slot(&self, token: &impl Token, i: usize) -> DirectSlot<'_, T> {
         DirectSlot {
-            slot: self.slots[i],
+            slot: self.slots[i].get(token),
             heap_value: &self.values[i],
         }
     }
 
-    pub fn slots(&self) -> (impl ExactSizeIterator<Item = DirectSlot<'_, T>> + Clone) {
+    pub fn swap_slots(
+        &self,
+        token: &'static MainThreadToken,
+        my_index: usize,
+        other: &Heap<T>,
+        other_index: usize,
+    ) {
+        // Swap the values contained by both slots
+        self.values[my_index]
+            .value
+            .swap(token, &other.values[other_index].value);
+
+        // Get the relevant slots
+        let my_slot_ref = &self.slots[my_index];
+        let other_slot_ref = &other.slots[other_index];
+        let my_slot = my_slot_ref.get(token);
+        let other_slot = other_slot_ref.get(token);
+
+        // Swap which heap owns which slot
+        my_slot_ref.swap(token, other_slot_ref);
+
+        // Swap which slot points to which value
+        my_slot
+            .indirector
+            .value
+            .swap(token, &other_slot.indirector.value);
+
+        // Swap which slot owns which value
+        my_slot
+            .indirector
+            .owner
+            .swap(token, &other_slot.indirector.owner);
+    }
+
+    pub fn slots<'a>(
+        &'a self,
+        token: &'a impl Token,
+    ) -> (impl ExactSizeIterator<Item = DirectSlot<'a, T>> + Clone + 'a) {
         self.slots
             .iter()
             .zip(self.values.iter())
             .map(|(slot, heap_value)| DirectSlot {
-                slot: *slot,
+                slot: slot.get(token),
                 heap_value,
             })
     }
 
-    pub fn clear_slots(&self, token: &MainThreadToken) {
-        for slot in self.slots() {
+    pub fn clear_slots(&self, token: &'static MainThreadToken) {
+        for slot in self.slots(token) {
             slot.set_value_owner_pair(token, None);
         }
     }
@@ -177,6 +214,7 @@ impl<T> Drop for Heap<T> {
         let entry = free_slots.get_mut(&NamedTypeId::of::<T>()).unwrap();
 
         for slot in self.slots.iter() {
+            let slot = slot.get(token);
             slot.indirector.value.set(token, entry.empty);
             entry.free_indirectors.push(slot.indirector);
         }
@@ -203,7 +241,7 @@ impl<'a, T: 'static> DirectSlot<'a, T> {
         self.slot
     }
 
-    pub fn set_owner(self, token: &MainThreadToken, owner: Option<Entity>) {
+    pub fn set_owner(self, token: &'static MainThreadToken, owner: Option<Entity>) {
         self.slot
             .indirector
             .owner
@@ -229,7 +267,7 @@ impl<'a, T: 'static> DirectSlot<'a, T> {
 
     pub fn set_value_owner_pair(
         self,
-        token: &MainThreadToken,
+        token: &'static MainThreadToken,
         value: Option<(Entity, T)>,
     ) -> Option<T> {
         if let Some((owner, value)) = value {
@@ -239,23 +277,6 @@ impl<'a, T: 'static> DirectSlot<'a, T> {
             self.set_owner(token, None);
             self.set_value(token, None)
         }
-    }
-
-    pub fn swap(self, token: &MainThreadToken, other: DirectSlot<'_, T>) {
-        // Swap the values
-        self.heap_value.value.swap(token, &other.heap_value.value);
-
-        // Swap the owners
-        self.slot
-            .indirector
-            .owner
-            .swap(token, &other.slot.indirector.owner);
-
-        // Swap the indirector pointees
-        self.slot
-            .indirector
-            .value
-            .swap(token, &other.slot.indirector.value);
     }
 
     pub fn owner(self, token: &impl Token) -> Option<Entity> {
@@ -373,7 +394,7 @@ impl<T> Slot<T> {
         }
     }
 
-    pub fn set_owner(self, token: &MainThreadToken, owner: Option<Entity>) {
+    pub fn set_owner(self, token: &'static MainThreadToken, owner: Option<Entity>) {
         unsafe {
             // Safety: we only use the `DirectSlot` until the function returns, and we know the
             // direct slot cannot be invalidated until then because we never call something which
@@ -393,7 +414,7 @@ impl<T> Slot<T> {
 
     pub fn set_value_owner_pair(
         self,
-        token: &MainThreadToken,
+        token: &'static MainThreadToken,
         value: Option<(Entity, T)>,
     ) -> Option<T> {
         unsafe {
@@ -401,25 +422,6 @@ impl<T> Slot<T> {
             // direct slot cannot be invalidated until then because we never call something which
             // could potentially destroy the heap.
             self.direct_slot(token).set_value_owner_pair(token, value)
-        }
-    }
-
-    pub fn swap_indirect(self, token: &MainThreadToken, other: Slot<T>) {
-        unsafe {
-            // Safety: we only use the `DirectSlot` until the function returns, and we know the
-            // direct slot cannot be invalidated until then because we never call something which
-            // could potentially destroy the heap.
-            self.direct_slot(token)
-                .swap(token, other.direct_slot(token))
-        }
-    }
-
-    pub fn swap_direct(self, token: &MainThreadToken, other: DirectSlot<'_, T>) {
-        unsafe {
-            // Safety: we only use the `DirectSlot` until the function returns, and we know the
-            // direct slot cannot be invalidated until then because we never call something which
-            // could potentially destroy the heap.
-            self.direct_slot(token).swap(token, other)
         }
     }
 

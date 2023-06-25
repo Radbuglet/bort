@@ -113,9 +113,10 @@ trait DbAnyStorage: fmt::Debug + Sync {
 
     fn move_entity(
         &self,
-        token: &MainThreadToken,
+        token: &'static MainThreadToken,
         entity: InertEntity,
         entity_info: &DbEntity,
+        src_arch: DbArchetypeRef,
         dst_entry: &DbArchetype,
     );
 }
@@ -144,7 +145,7 @@ impl<T> fmt::Debug for DbEntityMapping<T> {
 
 enum DbEntityMappingHeap<T: 'static> {
     Anonymous(BlockReservation<Heap<T>>),
-    External,
+    External { heap: usize, slot: usize },
 }
 
 // === ComponentList === //
@@ -153,7 +154,7 @@ enum DbEntityMappingHeap<T: 'static> {
 struct DbComponentType {
     pub id: NamedTypeId,
     pub name: &'static str,
-    pub dtor: fn(&MainThreadToken, &mut DbRoot, InertEntity),
+    pub dtor: fn(&'static MainThreadToken, &mut DbRoot, InertEntity),
 }
 
 impl fmt::Debug for DbComponentType {
@@ -167,7 +168,7 @@ impl fmt::Debug for DbComponentType {
 
 impl DbComponentType {
     fn of<T: 'static>() -> Self {
-        fn dtor<T: 'static>(token: &MainThreadToken, db: &mut DbRoot, entity: InertEntity) {
+        fn dtor<T: 'static>(token: &'static MainThreadToken, db: &mut DbRoot, entity: InertEntity) {
             let storage = db.get_storage::<T>();
             let comp = db.remove_component(token, &mut storage.borrow_mut(token), entity);
             debug_assert!(comp.is_ok());
@@ -349,7 +350,7 @@ impl DbRoot {
     }
     pub fn despawn_entity(
         &mut self,
-        token: &MainThreadToken,
+        token: &'static MainThreadToken,
         entity: InertEntity,
     ) -> Result<(), EntityDeadError> {
         // Fetch the entity info
@@ -552,7 +553,7 @@ impl DbRoot {
         chunks
     }
 
-    pub fn flush_archetypes(&mut self, token: &MainThreadToken) {
+    pub fn flush_archetypes(&mut self, token: &'static MainThreadToken) {
         let _guard = self
             .query_guard
             .try_borrow_mut(token)
@@ -791,7 +792,7 @@ impl DbRoot {
 					continue;
 				};
 
-                storage.move_entity(token, entity, entity_info, dst_entry.value());
+                storage.move_entity(token, entity, entity_info, src, dst_entry.value());
             }
         }
     }
@@ -815,7 +816,7 @@ impl DbRoot {
 
     pub fn insert_component<T: 'static>(
         &mut self,
-        token: &MainThreadToken,
+        token: &'static MainThreadToken,
         storage: &mut DbStorageInner<T>,
         entity: InertEntity,
         value: T,
@@ -873,17 +874,24 @@ impl DbRoot {
                     }
 
                     // Write the value to the slot
-                    let slot = external_heaps[entity_info.heap_index].slot(entity_info.slot_index);
+                    let slot =
+                        external_heaps[entity_info.heap_index].slot(token, entity_info.slot_index);
                     slot.set_value_owner_pair(token, Some((entity.into_dangerous_entity(), value)));
 
-                    (DbEntityMappingHeap::External, slot.slot())
+                    (
+                        DbEntityMappingHeap::External {
+                            heap: entity_info.heap_index,
+                            slot: entity_info.slot_index,
+                        },
+                        slot.slot(),
+                    )
                 } else {
                     // Allocate a slot for this object
                     let resv = storage.anon_block_alloc.alloc(|sz| Heap::new(token, sz));
                     let slot = storage
                         .anon_block_alloc
                         .block_mut(&resv.block)
-                        .slot(resv.slot);
+                        .slot(token, resv.slot);
 
                     // Write the value to the slot
                     slot.set_value_owner_pair(token, Some((entity.into_dangerous_entity(), value)));
@@ -902,7 +910,7 @@ impl DbRoot {
 
     pub fn remove_component<T: 'static>(
         &mut self,
-        token: &MainThreadToken,
+        token: &'static MainThreadToken,
         storage: &mut DbStorageInner<T>,
         entity: InertEntity,
     ) -> Result<Option<T>, EntityDeadError> {
@@ -923,7 +931,7 @@ impl DbRoot {
         // Remove the reservation in the heap's allocator.
         match removed.heap {
             DbEntityMappingHeap::Anonymous(resv) => storage.anon_block_alloc.dealloc(resv, drop),
-            DbEntityMappingHeap::External => { /* (left blank) */ }
+            DbEntityMappingHeap::External { .. } => { /* (left blank) */ }
         }
 
         // If we actually removed something, update the component list. Otherwise, ignore it.
@@ -967,7 +975,7 @@ impl DbRoot {
     pub fn debug_format_entity(
         &mut self,
         f: &mut fmt::Formatter,
-        token: &MainThreadToken,
+        token: &'static MainThreadToken,
         entity: InertEntity,
     ) -> fmt::Result {
         #[derive(Debug)]
@@ -1009,9 +1017,10 @@ impl<T: 'static> DbAnyStorage for DbStorage<T> {
 
     fn move_entity(
         &self,
-        token: &MainThreadToken,
+        token: &'static MainThreadToken,
         entity: InertEntity,
         entity_info: &DbEntity,
+        src_arch: DbArchetypeRef,
         dst_arch: &DbArchetype,
     ) {
         let storage = &mut *self.borrow_mut(token);
@@ -1040,33 +1049,56 @@ impl<T: 'static> DbAnyStorage for DbStorage<T> {
                 );
             }
 
-            // Swap the values to move the other object into its appropriate heap
-            //
-            // N.B. `swap_direct` supports no-op swaps without any issues.
-            let new_slot = external_heaps[entity_info.heap_index].slot(entity_info.slot_index);
+            // Swap value from the old slot. Deallocate the old anonymous reservation if applicable
+            // and mark it as external
+            let external_heaps = &storage.heaps[&entity_info.physical_arch];
+            let target_heap = &external_heaps[entity_info.heap_index];
 
-            // FIXME: This is not the correct way to implement this.
-            mapping.slot.swap_direct(token, new_slot);
-
-            // Deallocate the old anonymous reservation if applicable and mark it as external
-            if let DbEntityMappingHeap::Anonymous(resv) =
-                mem::replace(&mut mapping.heap, DbEntityMappingHeap::External)
-            {
-                storage.anon_block_alloc.dealloc(resv, drop);
+            match mem::replace(
+                &mut mapping.heap,
+                DbEntityMappingHeap::External {
+                    heap: entity_info.heap_index,
+                    slot: entity_info.slot_index,
+                },
+            ) {
+                DbEntityMappingHeap::Anonymous(resv) => {
+                    storage.anon_block_alloc.block(&resv.block).swap_slots(
+                        token,
+                        resv.slot,
+                        target_heap,
+                        entity_info.slot_index,
+                    );
+                    storage.anon_block_alloc.dealloc(resv, drop);
+                }
+                DbEntityMappingHeap::External {
+                    heap: old_heap,
+                    slot: old_slot,
+                } => {
+                    storage.heaps[&src_arch][old_heap].swap_slots(
+                        token,
+                        old_slot,
+                        target_heap,
+                        entity_info.slot_index,
+                    );
+                }
             }
         } else {
             // Ensure that we're not already in an anonymous reservation
-            if matches!(&mapping.heap, DbEntityMappingHeap::External) {
+            if let DbEntityMappingHeap::External {
+                heap: old_heap,
+                slot: old_slot,
+            } = &mapping.heap
+            {
                 // Allocate a slot for this object
                 let resv = storage.anon_block_alloc.alloc(|sz| Heap::new(token, sz));
-                let new_slot = storage
-                    .anon_block_alloc
-                    .block_mut(&resv.block)
-                    .slot(resv.slot);
+                let new_heap = storage.anon_block_alloc.block_mut(&resv.block);
 
                 // Swap the values to move the other object into its appropriate heap
-                // FIXME: This is not the correct way to implement this.
-                mapping.slot.swap_direct(token, new_slot);
+                storage.heaps[&src_arch][*old_heap]
+                    .swap_slots(token, *old_slot, new_heap, resv.slot);
+
+                // Mark the heap as anonymous
+                mapping.heap = DbEntityMappingHeap::Anonymous(resv);
             }
         }
     }
@@ -1087,6 +1119,7 @@ pub struct QueryChunk {
 impl QueryChunk {
     pub fn iter_storage<T, G>(
         &self,
+        token: &'static MainThreadToken,
         storage: &DbStorageInner<T>,
         getter: G,
     ) -> QueryChunkStorageIter<T, G>
@@ -1095,6 +1128,7 @@ impl QueryChunk {
         G: QueryChunkStorageIterConverter<T>,
     {
         QueryChunkStorageIter {
+            token,
             last_sub_len: self.last_sub_len,
             subs_iter: storage
                 .heaps
@@ -1128,6 +1162,7 @@ impl QueryChunk {
 
 #[derive_where(Debug; G: fmt::Debug)]
 pub struct QueryChunkStorageIter<T: 'static, G> {
+    token: &'static MainThreadToken,
     last_sub_len: usize,
     subs_iter: vec::IntoIter<Arc<Heap<T>>>,
     curr_sub: Option<(Arc<Heap<T>>, usize, usize)>,
@@ -1156,7 +1191,9 @@ where
             }
         };
 
-        let generated = self.getter.convert(curr_heap.slot(*curr_i));
+        let generated = self
+            .getter
+            .convert(self.token, curr_heap.slot(self.token, *curr_i));
         *curr_i += 1;
         if *curr_i >= *curr_len {
             self.curr_sub = None;
@@ -1169,16 +1206,21 @@ where
 pub trait QueryChunkStorageIterConverter<T> {
     type Output;
 
-    fn convert(&mut self, slot: DirectSlot<'_, T>) -> Self::Output;
+    fn convert(&mut self, token: &'static MainThreadToken, slot: DirectSlot<'_, T>)
+        -> Self::Output;
 }
 
 impl<F, T, V> QueryChunkStorageIterConverter<T> for F
 where
-    F: FnMut(DirectSlot<'_, T>) -> V,
+    F: FnMut(&'static MainThreadToken, DirectSlot<'_, T>) -> V,
 {
     type Output = V;
 
-    fn convert(&mut self, slot: DirectSlot<'_, T>) -> Self::Output {
-        self(slot)
+    fn convert(
+        &mut self,
+        token: &'static MainThreadToken,
+        slot: DirectSlot<'_, T>,
+    ) -> Self::Output {
+        self(token, slot)
     }
 }

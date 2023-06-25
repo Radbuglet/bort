@@ -109,23 +109,31 @@ pub trait Query {
 mod sealed_converters {
     use super::*;
 
-    pub struct RefConverter(pub &'static MainThreadToken);
+    pub struct RefConverter;
 
     impl<T: 'static> QueryChunkStorageIterConverter<T> for RefConverter {
         type Output = CompRef<T>;
 
-        fn convert(&mut self, slot: DirectSlot<'_, T>) -> Self::Output {
-            slot.borrow(self.0)
+        fn convert(
+            &mut self,
+            token: &'static MainThreadToken,
+            slot: DirectSlot<'_, T>,
+        ) -> Self::Output {
+            slot.borrow(token)
         }
     }
 
-    pub struct MutConverter(pub &'static MainThreadToken);
+    pub struct MutConverter;
 
     impl<T: 'static> QueryChunkStorageIterConverter<T> for MutConverter {
         type Output = CompMut<T>;
 
-        fn convert(&mut self, slot: DirectSlot<'_, T>) -> Self::Output {
-            slot.borrow_mut(self.0)
+        fn convert(
+            &mut self,
+            token: &'static MainThreadToken,
+            slot: DirectSlot<'_, T>,
+        ) -> Self::Output {
+            slot.borrow_mut(token)
         }
     }
 }
@@ -154,8 +162,9 @@ impl<T: 'static> Query for Ref<T> {
         chunk: &mut QueryChunk,
     ) -> Self::Iter {
         chunk.iter_storage(
+            token,
             &mut state.borrow_mut(token),
-            sealed_converters::RefConverter(token),
+            sealed_converters::RefConverter,
         )
     }
 
@@ -188,8 +197,9 @@ impl<T: 'static> Query for Mut<T> {
         chunk: &mut QueryChunk,
     ) -> Self::Iter {
         chunk.iter_storage(
+            token,
             &mut state.borrow_mut(token),
-            sealed_converters::MutConverter(token),
+            sealed_converters::MutConverter,
         )
     }
 

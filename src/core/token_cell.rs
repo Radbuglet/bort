@@ -121,15 +121,15 @@ impl<T> NMainCell<T> {
         self.value.into_inner()
     }
 
-    pub fn set(&self, _token: &MainThreadToken, value: T) {
+    pub fn set(&self, _token: &'static MainThreadToken, value: T) {
         self.value.set(value);
     }
 
-    pub fn replace(&self, _token: &MainThreadToken, value: T) -> T {
+    pub fn replace(&self, _token: &'static MainThreadToken, value: T) -> T {
         self.value.replace(value)
     }
 
-    pub fn swap(&self, _token: &MainThreadToken, other: &NMainCell<T>) {
+    pub fn swap(&self, _token: &'static MainThreadToken, other: &NMainCell<T>) {
         self.value.swap(&other.value)
     }
 

@@ -73,7 +73,7 @@ fn access_tests() {
         let positions = Heap::new(token, 10_000);
         let velocities = Heap::new(token, 10_000);
 
-        for (pos, vel) in positions.slots().zip(velocities.slots()) {
+        for (pos, vel) in positions.slots(token).zip(velocities.slots(token)) {
             pos.set_value_owner_pair(
                 token,
                 Some((
@@ -92,7 +92,7 @@ fn access_tests() {
         }
 
         c.iter(|| {
-            for (pos, vel) in positions.slots().zip(velocities.slots()) {
+            for (pos, vel) in positions.slots(token).zip(velocities.slots(token)) {
                 *pos.borrow_mut(token) += *vel.borrow(token);
             }
         });
