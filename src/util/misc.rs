@@ -58,6 +58,33 @@ impl fmt::Debug for RawFmt<'_> {
     }
 }
 
+#[derive(Copy, Clone)]
+pub struct ListFmt<I>(pub I);
+
+impl<I> fmt::Debug for ListFmt<I>
+where
+    I: Clone + IntoIterator,
+    I::Item: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.0.clone().into_iter()).finish()
+    }
+}
+
+#[derive(Copy, Clone)]
+pub struct MapFmt<I>(pub I);
+
+impl<I, A, B> fmt::Debug for MapFmt<I>
+where
+    I: Clone + IntoIterator<Item = (A, B)>,
+    A: fmt::Debug,
+    B: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_map().entries(self.0.clone().into_iter()).finish()
+    }
+}
+
 // === NamedTypeId === //
 
 #[derive(Copy, Clone)]

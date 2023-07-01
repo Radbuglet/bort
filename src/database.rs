@@ -23,7 +23,10 @@ use crate::{
         block::{BlockAllocator, BlockReservation},
         hash_map::{FxHashMap, FxHashSet, NopHashMap},
         iter::{arc_into_iter, filter_duplicates, merge_iters},
-        misc::{const_new_nz_u64, leak, xorshift64, AnyDowncastExt, NamedTypeId, RawFmt},
+        misc::{
+            const_new_nz_u64, leak, xorshift64, AnyDowncastExt, ListFmt, MapFmt, NamedTypeId,
+            RawFmt,
+        },
         set_map::{SetMap, SetMapArena, SetMapPtr},
     },
 };
@@ -53,6 +56,9 @@ pub struct DbRoot {
 
     // A map from type ID to storage.
     storages: FxHashMap<NamedTypeId, &'static dyn DbAnyStorage>,
+
+    // A map from type ID to event.
+    events: FxHashMap<NamedTypeId, &'static dyn DbAnyEventSet>,
 
     // A list of entities which may need to be moved around before running the next query. May contain
     // false positives, duplicates, and even dead entities. Never contains false negatives.
@@ -236,6 +242,41 @@ type DbArchetypeMap = SetMap<InertTag, DbArchetype, FreeListArena>;
 type DbArchetypeArena = SetMapArena<InertTag, DbArchetype, FreeListArena>;
 type DbArchetypeRef = SetMapPtr<InertTag, DbArchetype, FreeListArena>;
 
+// === Event === //
+
+trait DbAnyEventSet: fmt::Debug + Sync {
+    fn as_any(&self) -> &(dyn Any + Sync);
+}
+
+pub type DbEventSet<T> = NOptRefCell<DbEventSetInner<T>>;
+
+type DbEventSetGroup<T> = FxHashMap<DbArchetypeRef, Vec<(InertEntity, T)>>;
+
+#[derive_where(Default)]
+pub struct DbEventSetInner<T> {
+    current_events: DbEventSetGroup<T>,
+    old_events: Vec<Arc<DbEventSetGroup<T>>>,
+}
+
+impl<T> fmt::Debug for DbEventSetInner<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DbEventInner")
+            .field(
+                "events",
+                &MapFmt(self.current_events.iter().map(|(arch, values)| {
+                    (arch, ListFmt(values.iter().map(|(entity, _)| entity)))
+                })),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T: 'static> DbAnyEventSet for DbEventSet<T> {
+    fn as_any(&self) -> &(dyn Any + Sync) {
+        self
+    }
+}
+
 // === Inert Handles === //
 
 // N.B. it is all too easy to accidentally call `Entity`s debug handler while issuing an error,
@@ -309,6 +350,7 @@ impl DbRoot {
                     arch_map: SetMap::new(DbArchetype::new(&[])),
                     tag_map: NopHashMap::default(),
                     storages: FxHashMap::default(),
+                    events: FxHashMap::default(),
                     probably_alive_dirty_entities: Vec::new(),
                     dead_dirty_entities: Vec::new(),
                     debug_total_spawns: 0,
@@ -490,9 +532,13 @@ impl DbRoot {
         self.query_guard.borrow(token)
     }
 
-    pub fn prepare_query(&mut self, tags: &[InertTag]) -> Vec<QueryChunk> {
+    fn prepare_query_common(
+        &mut self,
+        tags: &[InertTag],
+        mut f: impl FnMut(&mut DbArchetypeArena, DbArchetypeRef),
+    ) {
         if tags.is_empty() {
-            return Vec::new();
+            return;
         }
 
         // Ensure that all tag containers are sorted
@@ -505,18 +551,17 @@ impl DbRoot {
         }
 
         // Collect a set of archetypes to include and prepare their chunks
-        let empty_iter = [].iter();
         let mut tag_iters = tags
             .iter()
             .map(|tag_id| {
                 self.tag_map
                     .get(tag_id)
-                    .map_or(empty_iter.clone(), |tag| tag.sorted_containers.iter())
+                    .map_or(&[][..], |tag| tag.sorted_containers.as_slice())
+                    .iter()
             })
             .collect::<Vec<_>>();
 
         let mut primary_iter = tag_iters.pop().unwrap();
-        let mut chunks = Vec::new();
 
         'scan: loop {
             // Determine the primary archetype we'll be scanning for.
@@ -542,13 +587,21 @@ impl DbRoot {
             }
 
             // Otherwise, this archetype is in the intersection and we can add a chunk for it.
-            let arch = self.arch_map.arena().get(primary_arch).value();
+            f(self.arch_map.arena_mut(), *primary_arch);
+        }
+    }
+
+    pub fn prepare_entity_query(&mut self, tags: &[InertTag]) -> Vec<QueryChunk> {
+        let mut chunks = Vec::new();
+
+        self.prepare_query_common(tags, |arena, arch_id| {
+            let arch = arena.get(&arch_id).value();
             chunks.push(QueryChunk {
-                archetype: *primary_arch,
+                archetype: arch_id,
                 entity_subs: arch.entity_heaps.clone(),
                 last_sub_len: arch.last_heap_len,
             })
-        }
+        });
 
         chunks
     }
@@ -962,6 +1015,50 @@ impl DbRoot {
         storage.mappings.get(&entity).map(|mapping| mapping.slot)
     }
 
+    // === Event management === //
+
+    pub fn get_event_set<T: 'static>(&mut self) -> &'static DbEventSet<T> {
+        self.events
+            .entry(NamedTypeId::of::<T>())
+            .or_insert_with(|| leak(DbEventSet::<T>::default()))
+            .as_any()
+            .downcast_ref()
+            .unwrap()
+    }
+
+    pub fn fire_event<T: 'static>(
+        &self,
+        event_set: &mut DbEventSetInner<T>,
+        entity: InertEntity,
+        value: T,
+    ) -> Result<(), EntityDeadError> {
+        let Some(entity_info) = self.alive_entities.get(&entity) else {
+			return Err(EntityDeadError);
+		};
+
+        event_set
+            .current_events
+            .entry(entity_info.physical_arch)
+            .or_default()
+            .push((entity, value));
+
+        Ok(())
+    }
+
+    pub fn get_event_snapshot<T: 'static>(
+        event_set: &mut DbEventSetInner<T>,
+    ) -> DbEventSetSnapshot<T> {
+        let current_events = mem::take(&mut event_set.current_events);
+        if !current_events.is_empty() {
+            event_set.old_events.push(Arc::new(current_events));
+        }
+
+        DbEventSetSnapshot {
+            runs: event_set.old_events.clone(),
+            archetypes: FxHashSet::default(),
+        }
+    }
+
     // === Debug === //
 
     pub fn debug_total_spawns(&self) -> u64 {
@@ -1224,5 +1321,39 @@ where
         slot: DirectSlot<'_, T>,
     ) -> Self::Output {
         self(token, slot)
+    }
+}
+
+pub struct DbEventSetSnapshot<T> {
+    runs: Vec<Arc<DbEventSetGroup<T>>>,
+    archetypes: FxHashSet<DbArchetypeRef>,
+}
+
+impl<T> DbEventSetSnapshot<T> {
+    pub fn include_archetypes(&mut self, db: &mut DbRoot, tags: &[InertTag]) {
+        for run in &self.runs {
+            for arch in run.keys() {
+                if self.archetypes.contains(arch) {
+                    continue;
+                }
+
+                let arch_data = db.arch_map.arena().get(arch);
+                if tags.iter().all(|tag| arch_data.has_key(tag)) {
+                    self.archetypes.insert(*arch);
+                }
+            }
+        }
+    }
+
+    pub fn query(&self) -> impl Iterator<Item = (InertEntity, &T)> + '_ {
+        self.runs.iter().flat_map(|run| {
+            run.iter()
+                .filter_map(|(arch, arch_data)| {
+                    self.archetypes
+                        .contains(arch)
+                        .then(|| arch_data.iter().map(|(entity, value)| (*entity, value)))
+                })
+                .flatten()
+        })
     }
 }

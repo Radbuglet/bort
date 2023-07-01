@@ -13,7 +13,7 @@ pub mod prelude {
         core::cell::{OptRef, OptRefMut},
         entity::{storage, CompMut, CompRef, Entity, OwnedEntity, Storage},
         obj::{Obj, OwnedObj},
-        query::{flush, query_all, RawTag, Tag},
+        query::{flush, query_all, query_all_anon, RawTag, Tag},
     };
 }
 

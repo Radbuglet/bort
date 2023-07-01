@@ -259,7 +259,7 @@ pub fn query_all<Q: Query>(query: Q) -> impl Iterator<Item = Q::Zipped> {
     query.extend_tags(&mut tags);
 
     // Acquire chunks to be queried
-    let chunks = db.prepare_query(&tags);
+    let chunks = db.prepare_entity_query(&tags);
 
     // Prepare query state
     let mut prepared = Q::prepare_state(&mut db, token);
@@ -277,5 +277,29 @@ pub fn query_all<Q: Query>(query: Q) -> impl Iterator<Item = Q::Zipped> {
         entities
             .zip(data)
             .map(|(entity, item)| Q::zip(item, entity.into_dangerous_entity()))
+    })
+}
+
+pub fn query_all_anon<Q: Query>(query: Q) -> impl Iterator<Item = Q::Item> {
+    // Acquire guards
+    let token = MainThreadToken::acquire_fmt("query entity data");
+    let mut db = DbRoot::get(token);
+    let guard = db.borrow_query_guard(token);
+
+    // Acquire tags
+    let mut tags = Vec::new();
+    query.extend_tags(&mut tags);
+
+    // Acquire chunks to be queried
+    let chunks = db.prepare_entity_query(&tags);
+
+    // Prepare query state
+    let mut prepared = Q::prepare_state(&mut db, token);
+
+    chunks.into_iter().flat_map(move |mut chunk| {
+        let _guard_bind = &guard;
+
+        // Get an iterator for storage data
+        Q::iter(token, &mut prepared, &mut chunk)
     })
 }
