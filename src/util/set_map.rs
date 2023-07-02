@@ -1,12 +1,10 @@
 use std::{fmt, hash, iter, slice};
 
-use hashbrown::raw::RawTable;
-
 use crate::util::iter::{merge_iters, IterFilter, IterMerger};
 
 use super::{
     arena::{Arena, ArenaKind, ArenaPtr, FreeableArenaKind, SpecArena, StorableIn},
-    hash_map::{FxHashBuilder, FxHashMap},
+    hash_map::FxHashMap,
     iter::{eq_iter, hash_iter},
 };
 
@@ -20,8 +18,7 @@ where
     SetMapEntry<K, V, A>: StorableIn<A>,
 {
     root: SetMapPtr<K, V, A>,
-    map: RawTable<(u64, SetMapPtr<K, V, A>)>,
-    hasher: FxHashBuilder,
+    map: FxHashMap<(u64, SetMapPtr<K, V, A>), ()>,
     arena: Arena<SetMapEntry<K, V, A>, A>,
 }
 
@@ -34,13 +31,9 @@ where
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut builder = f.debug_map();
 
-        #[allow(unsafe_code)] // TODO: Remove unsafe code
-        unsafe {
-            for ptr in self.map.iter() {
-                let (_, ptr) = ptr.as_ref();
-                let entry = self.arena.get(ptr);
-                builder.entry(&entry.keys, &entry.value);
-            }
+        for (_, ptr) in self.map.keys() {
+            let entry = self.arena.get(ptr);
+            builder.entry(&entry.keys, &entry.value);
         }
 
         builder.finish()
@@ -65,7 +58,6 @@ where
 {
     pub fn new(root: V) -> Self {
         let mut arena: Arena<SetMapEntry<K, V, A>, A> = Default::default();
-        let mut hasher = FxHashBuilder::new();
         let root = arena.alloc(SetMapEntry {
             self_ptr: None,
             keys: Box::from_iter([]),
@@ -75,16 +67,15 @@ where
         });
         arena.get_mut(&root).self_ptr = Some(root.clone());
 
-        let mut map = RawTable::default();
-        let root_hash = hash_iter(&mut hasher, None::<K>);
-        map.insert(root_hash, (root_hash, root.clone()), |(hash, _)| *hash);
+        let mut map = FxHashMap::default();
+        let root_hash = hash_iter(map.hasher(), None::<K>);
+        map.raw_table_mut().insert(
+            root_hash,
+            ((root_hash, root.clone()), ()),
+            |((hash, _), _)| *hash,
+        );
 
-        Self {
-            root,
-            map,
-            hasher,
-            arena,
-        }
+        Self { root, map, arena }
     }
 
     pub fn root(&self) -> &SetMapPtr<K, V, A> {
@@ -120,11 +111,12 @@ where
 
         // Otherwise, fetch the target set from the primary map and cache the edge.
         let keys = iter_ctor.make_iter(&base_data.keys, key);
-        let target_hash = hash_iter(&mut self.hasher, keys.clone());
+        let target_hash = hash_iter(self.map.hasher(), keys.clone());
 
-        if let Some((_, target_ptr)) =
+        if let Some(((_, target_ptr), _)) =
             self.map
-                .get(target_hash, |(candidate_hash, candidate_ptr)| {
+                .raw_table()
+                .get(target_hash, |((candidate_hash, candidate_ptr), _)| {
                     if target_hash != *candidate_hash {
                         return false;
                     }
@@ -193,10 +185,10 @@ where
         // initialization
         set_post_ctor(&mut self.arena, &target_ptr);
 
-        self.map.insert(
+        self.map.raw_table_mut().insert(
             target_hash,
-            (target_hash, target_ptr.clone()),
-            |(hash, _)| *hash,
+            ((target_hash, target_ptr.clone()), ()),
+            |((hash, _), _)| *hash,
         );
 
         target_ptr
@@ -279,10 +271,12 @@ where
         }
 
         // We still have to remove the entry from the primary map.
-        let removed_hash = hash_iter(&mut self.hasher, removed_data.keys.iter());
-        self.map.remove_entry(removed_hash, |(_, candidate_ptr)| {
-            &removed_ptr == candidate_ptr
-        });
+        let removed_hash = hash_iter(self.map.hasher(), removed_data.keys.iter());
+        self.map
+            .raw_table_mut()
+            .remove_entry(removed_hash, |((_, candidate_ptr), _)| {
+                &removed_ptr == candidate_ptr
+            });
     }
 
     pub fn arena(&self) -> &Arena<SetMapEntry<K, V, A>, A> {

@@ -1055,7 +1055,7 @@ impl DbRoot {
 
         DbEventSetSnapshot {
             runs: event_set.old_events.clone(),
-            archetypes: FxHashSet::default(),
+            inclusion_cache: FxHashMap::default(),
         }
     }
 
@@ -1326,21 +1326,22 @@ where
 
 pub struct DbEventSetSnapshot<T> {
     runs: Vec<Arc<DbEventSetGroup<T>>>,
-    archetypes: FxHashSet<DbArchetypeRef>,
+    inclusion_cache: FxHashMap<DbArchetypeRef, bool>,
 }
 
 impl<T> DbEventSetSnapshot<T> {
-    pub fn include_archetypes(&mut self, db: &mut DbRoot, tags: &[InertTag]) {
+    pub fn set_archetypes(&mut self, db: &mut DbRoot, tags: &[InertTag]) {
+        self.inclusion_cache.clear();
+
         for run in &self.runs {
             for arch in run.keys() {
-                if self.archetypes.contains(arch) {
+                if self.inclusion_cache.contains_key(arch) {
                     continue;
                 }
 
                 let arch_data = db.arch_map.arena().get(arch);
-                if tags.iter().all(|tag| arch_data.has_key(tag)) {
-                    self.archetypes.insert(*arch);
-                }
+                self.inclusion_cache
+                    .insert(*arch, tags.iter().all(|tag| arch_data.has_key(tag)));
             }
         }
     }
@@ -1349,8 +1350,9 @@ impl<T> DbEventSetSnapshot<T> {
         self.runs.iter().flat_map(|run| {
             run.iter()
                 .filter_map(|(arch, arch_data)| {
-                    self.archetypes
-                        .contains(arch)
+                    self.inclusion_cache
+                        .get(arch)
+                        .is_some_and(|&v| v)
                         .then(|| arch_data.iter().map(|(entity, value)| (*entity, value)))
                 })
                 .flatten()

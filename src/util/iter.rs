@@ -4,7 +4,7 @@ use derive_where::derive_where;
 
 use super::misc::impl_tuples;
 
-pub fn hash_iter<H, E, I>(hasher: &mut H, iter: I) -> u64
+pub fn hash_iter<H, E, I>(hasher: &H, iter: I) -> u64
 where
     H: hash::BuildHasher,
     E: hash::Hash,
