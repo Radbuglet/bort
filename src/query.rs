@@ -303,3 +303,28 @@ pub fn query_all_anon<Q: Query>(query: Q) -> impl Iterator<Item = Q::Item> {
         Q::iter(token, &mut prepared, &mut chunk)
     })
 }
+
+pub fn query_one<T>(tag: Tag<T>, mut f: impl FnMut(&mut T)) {
+    // Acquire guards
+    let token = MainThreadToken::acquire_fmt("query entity data");
+    let mut db = DbRoot::get(token);
+    let _guard = db.borrow_query_guard(token);
+
+    // Acquire chunks to be queried
+    let chunks = db.prepare_entity_query(&[tag.raw.0]);
+
+    // Prepare query state
+    let storage = db.get_storage::<T>();
+    drop(db);
+
+    // Iterate over our data
+    for chunk in chunks {
+        if chunk.is_empty() {
+            continue;
+        }
+
+        chunk.iter_storage_fn(token, storage, |slot| {
+            f(&mut slot.borrow_mut(token));
+        });
+    }
+}

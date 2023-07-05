@@ -571,7 +571,7 @@ impl DbRoot {
             for other_iter in &mut tag_iters {
                 // Consume all archetypes less than primary_arch
                 let other_arch = loop {
-                    let Some(other_arch) = other_iter.clone().next() else { break 'scan };
+                    let Some(other_arch) = other_iter.as_slice().first() else { break 'scan };
 
                     if other_arch < primary_arch {
                         let _ = other_iter.next();
@@ -1214,6 +1214,10 @@ pub struct QueryChunk {
 }
 
 impl QueryChunk {
+    pub fn is_empty(&self) -> bool {
+        self.entity_subs.is_empty()
+    }
+
     pub fn iter_storage<T, G>(
         &self,
         token: &'static MainThreadToken,
@@ -1233,6 +1237,33 @@ impl QueryChunk {
                 .map_or(Vec::new().into_iter(), |v| v.clone().into_iter()),
             heap_iter: ArcHeapValueIter::default(),
             getter,
+        }
+    }
+
+    pub fn iter_storage_fn<T>(
+        &self,
+        token: &'static MainThreadToken,
+        storage: &DbStorage<T>,
+        mut f: impl FnMut(DirectSlot<'_, T>),
+    ) where
+        T: 'static,
+    {
+        let mut heaps = storage
+            .borrow(token)
+            .heaps
+            .get(&self.archetype)
+            .map_or(Vec::new(), |v| v.clone());
+
+        if let Some(last) = heaps.pop() {
+            for slot in last.slots(token).take(self.last_sub_len) {
+                f(slot);
+            }
+        }
+
+        for heap in heaps {
+            for slot in heap.slots(token) {
+                f(slot);
+            }
         }
     }
 
@@ -1281,8 +1312,8 @@ where
             let next_sub = self.subs_iter.next()?;
             let len = self
                 .subs_iter
-                .clone()
-                .next()
+                .as_slice()
+                .first()
                 .map_or(self.last_sub_len, |heap| heap.len());
 
             self.heap_iter = ArcHeapValueIter::new(next_sub, len);
