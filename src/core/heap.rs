@@ -1,9 +1,11 @@
 use std::{
     fmt,
     marker::PhantomData,
-    mem::ManuallyDrop,
-    ptr::null_mut,
-    sync::atomic::{AtomicU64, Ordering::Relaxed},
+    ptr::{self, null_mut, NonNull},
+    sync::{
+        atomic::{AtomicU64, Ordering::Relaxed},
+        Arc,
+    },
 };
 
 use derive_where::derive_where;
@@ -62,9 +64,7 @@ impl Default for Indirector {
 // === Heap === //
 
 pub struct Heap<T: 'static> {
-    // N.B. mutability is not transitive through this box since indirectors will be referencing these
-    // values.
-    values: ManuallyDrop<Box<[HeapValue<T>]>>,
+    values: NonNull<[HeapValue<T>]>,
     slots: Box<[NMainCell<Slot<T>>]>,
 }
 
@@ -75,9 +75,9 @@ struct HeapValue<T> {
 impl<T> Heap<T> {
     pub fn new(token: &'static MainThreadToken, len: usize) -> Self {
         // Allocate slot data
-        let values = ManuallyDrop::new(Box::from_iter((0..len).map(|_| HeapValue {
+        let values = Box::from_iter((0..len).map(|_| HeapValue {
             value: NOptRefCell::new_empty(),
-        })));
+        }));
 
         // Allocate free slots
         let mut free_slots = FREE_INDIRECTORS.borrow_mut(token);
@@ -105,8 +105,12 @@ impl<T> Heap<T> {
         }
 
         // Construct our slot vector
-        let slots = Box::from_iter(
+        let mut slots = Vec::with_capacity(len);
+        let values = &*Box::leak(values);
+        slots.extend(
             free_slots
+                // We avoid the need for a guard here by allocating the necessary capacity ahead of
+                // time.
                 .drain((free_slots.len() - len)..)
                 .enumerate()
                 .map(|(i, data)| {
@@ -121,6 +125,13 @@ impl<T> Heap<T> {
                     })
                 }),
         );
+        let slots = slots.into_boxed_slice(); // len == cap
+
+        // Transform slots into a raw pointer.
+        //
+        // N.B. we use raw pointers here because references would construct protectors at function
+        // boundaries but we can drop this structure in the middle of a function call.
+        let values = NonNull::from(values);
 
         DEBUG_HEAP_COUNTER.fetch_add(1, Relaxed);
 
@@ -131,10 +142,14 @@ impl<T> Heap<T> {
         self.values.len()
     }
 
+    fn values(&self) -> &[HeapValue<T>] {
+        unsafe { self.values.as_ref() }
+    }
+
     pub fn slot(&self, token: &impl Token, i: usize) -> DirectSlot<'_, T> {
         DirectSlot {
             slot: self.slots[i].get(token),
-            heap_value: &self.values[i],
+            heap_value: &unsafe { self.values.as_ref() }[i],
         }
     }
 
@@ -146,9 +161,9 @@ impl<T> Heap<T> {
         other_index: usize,
     ) {
         // Swap the values contained by both slots
-        self.values[my_index]
+        self.values()[my_index]
             .value
-            .swap(token, &other.values[other_index].value);
+            .swap(token, &other.values()[other_index].value);
 
         // Get the relevant slots
         let my_slot_ref = &self.slots[my_index];
@@ -178,7 +193,7 @@ impl<T> Heap<T> {
     ) -> (impl ExactSizeIterator<Item = DirectSlot<'a, T>> + Clone + 'a) {
         self.slots
             .iter()
-            .zip(self.values.iter())
+            .zip(self.values().iter())
             .map(|(slot, heap_value)| DirectSlot {
                 slot: slot.get(token),
                 heap_value,
@@ -220,7 +235,56 @@ impl<T> Drop for Heap<T> {
         }
 
         // Drop the boxed slice of heap values.
-        unsafe { ManuallyDrop::drop(&mut self.values) };
+        unsafe { Box::from_raw(self.values.as_ptr()) };
+    }
+}
+
+#[derive_where(Debug)]
+pub(crate) struct ArcHeapValueIter<T: 'static> {
+    _guard: Option<Arc<Heap<T>>>,
+    finger: *const HeapValue<T>,
+    finger_end: *const HeapValue<T>,
+    slot: *const NMainCell<Slot<T>>,
+}
+
+impl<T: 'static> Default for ArcHeapValueIter<T> {
+    fn default() -> Self {
+        Self {
+            _guard: None,
+            finger: ptr::null(),
+            finger_end: ptr::null(),
+            slot: ptr::null(),
+        }
+    }
+}
+
+impl<T: 'static> ArcHeapValueIter<T> {
+    pub fn new(heap: Arc<Heap<T>>, len: usize) -> Self {
+        assert!(len <= heap.len());
+        let finger = heap.values().as_ptr();
+        let finger_end = unsafe { finger.add(len) };
+        let slot = heap.slots.as_ptr();
+
+        Self {
+            _guard: Some(heap),
+            finger,
+            finger_end,
+            slot,
+        }
+    }
+
+    #[inline(always)] // TODO: We shouldn't have to return `DirectSlot`s
+    pub fn next(&mut self, token: &impl Token) -> Option<DirectSlot<'_, T>> {
+        if self.finger < self.finger_end {
+            let slot = unsafe { &*self.slot }.get(token);
+            let heap_value = unsafe { &*self.finger };
+            self.slot = unsafe { self.slot.add(1) };
+            self.finger = unsafe { self.finger.add(1) };
+
+            Some(DirectSlot { slot, heap_value })
+        } else {
+            None
+        }
     }
 }
 

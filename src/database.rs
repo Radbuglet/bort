@@ -11,7 +11,7 @@ use derive_where::derive_where;
 use crate::{
     core::{
         cell::{OptRef, OptRefMut},
-        heap::{DirectSlot, Heap, Slot},
+        heap::{ArcHeapValueIter, DirectSlot, Heap, Slot},
         token::MainThreadToken,
         token_cell::{NMainCell, NOptRefCell},
     },
@@ -1231,7 +1231,7 @@ impl QueryChunk {
                 .heaps
                 .get(&self.archetype)
                 .map_or(Vec::new().into_iter(), |v| v.clone().into_iter()),
-            curr_sub: None,
+            heap_iter: ArcHeapValueIter::default(),
             getter,
         }
     }
@@ -1262,7 +1262,7 @@ pub struct QueryChunkStorageIter<T: 'static, G> {
     token: &'static MainThreadToken,
     last_sub_len: usize,
     subs_iter: vec::IntoIter<Arc<Heap<T>>>,
-    curr_sub: Option<(Arc<Heap<T>>, usize, usize)>,
+    heap_iter: ArcHeapValueIter<T>,
     getter: G,
 }
 
@@ -1273,32 +1273,20 @@ where
     type Item = G::Output;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let (curr_heap, curr_i, curr_len) = match self.curr_sub.as_mut() {
-            Some(curr_sub) => curr_sub,
-            None => {
-                let next_sub = self.subs_iter.next()?;
-                let sub_len = if self.subs_iter.len() == 0 {
-                    self.last_sub_len
-                } else {
-                    next_sub.len()
-                };
-
-                debug_assert_ne!(sub_len, 0);
-                self.curr_sub.insert((next_sub, 0, sub_len))
+        loop {
+            if let Some(slot) = self.heap_iter.next(self.token) {
+                break Some(self.getter.convert(self.token, slot));
             }
-        };
 
-        let generated = self
-            .getter
-            .convert(self.token, curr_heap.slot(self.token, *curr_i));
+            let next_sub = self.subs_iter.next()?;
+            let len = self
+                .subs_iter
+                .clone()
+                .next()
+                .map_or(self.last_sub_len, |heap| heap.len());
 
-        *curr_i += 1;
-
-        if *curr_i >= *curr_len {
-            self.curr_sub = None;
+            self.heap_iter = ArcHeapValueIter::new(next_sub, len);
         }
-
-        Some(generated)
     }
 }
 

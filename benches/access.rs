@@ -2,7 +2,7 @@ use std::{cell::RefCell, time::Duration};
 
 use bort::{
     core::{cell::OptRefCell, heap::Heap, token::MainThreadToken},
-    flush, query_all, storage, Entity, OwnedEntity, OwnedObj, Tag,
+    flush, query_all_anon, storage, OwnedEntity, OwnedObj, Tag,
 };
 use criterion::{criterion_main, Criterion};
 use glam::Vec3;
@@ -105,26 +105,29 @@ fn access_tests() {
         let pos_tag = Tag::<Pos>::new();
         let vel_tag = Tag::<Vel>::new();
 
-        for _ in 0..10_000 {
-            let entity = Entity::new_unmanaged();
-            entity.tag(pos_tag);
-            entity.tag(vel_tag);
-            entity.insert(Pos(Vec3::new(
-                fastrand::f32(),
-                fastrand::f32(),
-                fastrand::f32(),
-            )));
-            entity.insert(Vel(Vec3::new(
-                fastrand::f32(),
-                fastrand::f32(),
-                fastrand::f32(),
-            )));
-        }
+        let _entities = (0..10_000)
+            .map(|_| {
+                let entity = OwnedEntity::new();
+                entity.tag(pos_tag);
+                entity.tag(vel_tag);
+                entity.insert(Pos(Vec3::new(
+                    fastrand::f32(),
+                    fastrand::f32(),
+                    fastrand::f32(),
+                )));
+                entity.insert(Vel(Vec3::new(
+                    fastrand::f32(),
+                    fastrand::f32(),
+                    fastrand::f32(),
+                )));
+                entity
+            })
+            .collect::<Vec<_>>();
 
         flush();
 
         c.iter(|| {
-            for (_, mut pos, vel) in query_all((pos_tag.as_mut(), vel_tag.as_ref())) {
+            for (mut pos, vel) in query_all_anon((pos_tag.as_mut(), vel_tag.as_ref())) {
                 pos.0 += vel.0;
             }
         });
