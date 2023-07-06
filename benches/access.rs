@@ -2,9 +2,7 @@ use std::{cell::RefCell, time::Duration};
 
 use bort::{
     core::{cell::OptRefCell, heap::Heap, token::MainThreadToken},
-    flush,
-    query::query_one,
-    query_all_anon, storage, OwnedEntity, OwnedObj, Tag,
+    flush, query, storage, OwnedEntity, OwnedObj, Tag,
 };
 use criterion::{criterion_main, Criterion};
 use glam::Vec3;
@@ -94,8 +92,8 @@ fn access_tests() {
         }
 
         c.iter(|| {
-            for pos in positions.slots(token) {
-                *pos.borrow_mut(token) += Vec3::Y;
+            for (pos, vel) in positions.slots(token).zip(velocities.slots(token)) {
+                *pos.borrow_mut(token) += *vel.borrow(token);
             }
         });
     });
@@ -129,44 +127,11 @@ fn access_tests() {
         flush();
 
         c.iter(|| {
-            for mut pos in query_all_anon(pos_tag.as_mut()) {
-                pos.0 += Vec3::Y;
+            query! {
+                for (mut pos in pos_tag, ref vel in vel_tag) {
+                    pos.0 += vel.0;
+                }
             }
-        });
-    });
-
-    c.bench_function("query-simplified", |c| {
-        struct Pos(Vec3);
-        struct Vel(Vec3);
-
-        let pos_tag = Tag::<Pos>::new();
-        let vel_tag = Tag::<Vel>::new();
-
-        let _entities = (0..10_000)
-            .map(|_| {
-                let entity = OwnedEntity::new();
-                entity.tag(pos_tag);
-                entity.tag(vel_tag);
-                entity.insert(Pos(Vec3::new(
-                    fastrand::f32(),
-                    fastrand::f32(),
-                    fastrand::f32(),
-                )));
-                entity.insert(Vel(Vec3::new(
-                    fastrand::f32(),
-                    fastrand::f32(),
-                    fastrand::f32(),
-                )));
-                entity
-            })
-            .collect::<Vec<_>>();
-
-        flush();
-
-        c.iter(|| {
-            query_one(pos_tag, |pos| {
-                pos.0 += Vec3::Y;
-            });
         });
     });
 

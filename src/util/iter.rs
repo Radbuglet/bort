@@ -2,8 +2,6 @@ use std::{hash, iter, sync::Arc};
 
 use derive_where::derive_where;
 
-use super::misc::impl_tuples;
-
 pub fn hash_iter<H, E, I>(hasher: &H, iter: I) -> u64
 where
     H: hash::BuildHasher,
@@ -134,20 +132,3 @@ pub fn arc_into_iter<T, V>(
         }
     })
 }
-
-#[derive(Debug, Clone)]
-pub struct ZipIter<T>(pub T);
-
-macro_rules! impl_zip_iter {
-	($($ty:ident:$field:tt),*) => {
-		impl<$($ty: Iterator),*> Iterator for ZipIter<($($ty,)*)> {
-			type Item = ($($ty::Item,)*);
-
-			fn next(&mut self) -> Option<Self::Item> {
-				Some(($(self.0.$field.next()?,)*))
-			}
-		}
-	};
-}
-
-impl_tuples!(impl_zip_iter);

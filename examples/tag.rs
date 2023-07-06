@@ -21,6 +21,4 @@ fn main() {
     flush();
 
     println!("{}", dump_database_state());
-
-    for (_, _, _) in query_all((pos_tag.as_ref(), vel_tag.as_ref())) {}
 }

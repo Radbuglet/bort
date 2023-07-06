@@ -3,7 +3,6 @@ use std::{
     fmt, hash, mem,
     num::NonZeroU64,
     sync::Arc,
-    vec,
 };
 
 use derive_where::derive_where;
@@ -11,7 +10,7 @@ use derive_where::derive_where;
 use crate::{
     core::{
         cell::{OptRef, OptRefMut},
-        heap::{ArcHeapValueIter, DirectSlot, Heap, Slot},
+        heap::{Heap, Slot},
         token::MainThreadToken,
         token_cell::{NMainCell, NOptRefCell},
     },
@@ -599,7 +598,7 @@ impl DbRoot {
             chunks.push(QueryChunk {
                 archetype: arch_id,
                 entity_subs: arch.entity_heaps.clone(),
-                last_sub_len: arch.last_heap_len,
+                last_heap_len: arch.last_heap_len,
             })
         });
 
@@ -1047,13 +1046,13 @@ impl DbRoot {
 
     pub fn get_event_snapshot<T: 'static>(
         event_set: &mut DbEventSetInner<T>,
-    ) -> DbEventSetSnapshot<T> {
+    ) -> EventSetSnapshot<T> {
         let current_events = mem::take(&mut event_set.current_events);
         if !current_events.is_empty() {
             event_set.old_events.push(Arc::new(current_events));
         }
 
-        DbEventSetSnapshot {
+        EventSetSnapshot {
             runs: event_set.old_events.clone(),
             inclusion_cache: FxHashMap::default(),
         }
@@ -1210,7 +1209,7 @@ pub struct EntityDeadError;
 pub struct QueryChunk {
     archetype: DbArchetypeRef,
     entity_subs: Vec<Arc<[NMainCell<InertEntity>]>>,
-    last_sub_len: usize,
+    last_heap_len: usize,
 }
 
 impl QueryChunk {
@@ -1218,53 +1217,19 @@ impl QueryChunk {
         self.entity_subs.is_empty()
     }
 
-    pub fn iter_storage<T, G>(
-        &self,
-        token: &'static MainThreadToken,
-        storage: &DbStorageInner<T>,
-        getter: G,
-    ) -> QueryChunkStorageIter<T, G>
-    where
-        T: 'static,
-        G: QueryChunkStorageIterConverter<T>,
-    {
-        QueryChunkStorageIter {
-            token,
-            last_sub_len: self.last_sub_len,
-            subs_iter: storage
-                .heaps
-                .get(&self.archetype)
-                .map_or(Vec::new().into_iter(), |v| v.clone().into_iter()),
-            heap_iter: ArcHeapValueIter::default(),
-            getter,
-        }
+    pub fn last_heap_len(&self) -> usize {
+        self.last_heap_len
     }
 
-    pub fn iter_storage_fn<T>(
-        &self,
-        token: &'static MainThreadToken,
-        storage: &DbStorage<T>,
-        mut f: impl FnMut(DirectSlot<'_, T>),
-    ) where
-        T: 'static,
-    {
-        let mut heaps = storage
-            .borrow(token)
+    pub fn heap_count(&self) -> usize {
+        self.entity_subs.len()
+    }
+
+    pub fn heaps<T: 'static>(&self, storage: &DbStorageInner<T>) -> Vec<Arc<Heap<T>>> {
+        storage
             .heaps
             .get(&self.archetype)
-            .map_or(Vec::new(), |v| v.clone());
-
-        if let Some(last) = heaps.pop() {
-            for slot in last.slots(token).take(self.last_sub_len) {
-                f(slot);
-            }
-        }
-
-        for heap in heaps {
-            for slot in heap.slots(token) {
-                f(slot);
-            }
-        }
+            .map_or(Vec::new(), |v| v.clone())
     }
 
     pub fn into_entities(
@@ -1278,7 +1243,7 @@ impl QueryChunk {
             .enumerate()
             .flat_map(move |(i, arc)| {
                 let len = if i == last_sub {
-                    self.last_sub_len
+                    self.last_heap_len
                 } else {
                     arc.len()
                 };
@@ -1288,67 +1253,12 @@ impl QueryChunk {
     }
 }
 
-#[derive_where(Debug; G: fmt::Debug)]
-pub struct QueryChunkStorageIter<T: 'static, G> {
-    token: &'static MainThreadToken,
-    last_sub_len: usize,
-    subs_iter: vec::IntoIter<Arc<Heap<T>>>,
-    heap_iter: ArcHeapValueIter<T>,
-    getter: G,
-}
-
-impl<T, G> Iterator for QueryChunkStorageIter<T, G>
-where
-    G: QueryChunkStorageIterConverter<T>,
-{
-    type Item = G::Output;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if let Some(slot) = self.heap_iter.next(self.token) {
-                break Some(self.getter.convert(self.token, slot));
-            }
-
-            let next_sub = self.subs_iter.next()?;
-            let len = self
-                .subs_iter
-                .as_slice()
-                .first()
-                .map_or(self.last_sub_len, |heap| heap.len());
-
-            self.heap_iter = ArcHeapValueIter::new(next_sub, len);
-        }
-    }
-}
-
-pub trait QueryChunkStorageIterConverter<T> {
-    type Output;
-
-    fn convert(&mut self, token: &'static MainThreadToken, slot: DirectSlot<'_, T>)
-        -> Self::Output;
-}
-
-impl<F, T, V> QueryChunkStorageIterConverter<T> for F
-where
-    F: FnMut(&'static MainThreadToken, DirectSlot<'_, T>) -> V,
-{
-    type Output = V;
-
-    fn convert(
-        &mut self,
-        token: &'static MainThreadToken,
-        slot: DirectSlot<'_, T>,
-    ) -> Self::Output {
-        self(token, slot)
-    }
-}
-
-pub struct DbEventSetSnapshot<T> {
+pub struct EventSetSnapshot<T> {
     runs: Vec<Arc<DbEventSetGroup<T>>>,
     inclusion_cache: FxHashMap<DbArchetypeRef, bool>,
 }
 
-impl<T> DbEventSetSnapshot<T> {
+impl<T> EventSetSnapshot<T> {
     pub fn set_archetypes(&mut self, db: &mut DbRoot, tags: &[InertTag]) {
         self.inclusion_cache.clear();
 

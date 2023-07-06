@@ -1,11 +1,8 @@
 use std::{
     fmt,
     marker::PhantomData,
-    ptr::{self, null_mut, NonNull},
-    sync::{
-        atomic::{AtomicU64, Ordering::Relaxed},
-        Arc,
-    },
+    ptr::{null_mut, NonNull},
+    sync::atomic::{AtomicU64, Ordering::Relaxed},
 };
 
 use derive_where::derive_where;
@@ -236,55 +233,6 @@ impl<T> Drop for Heap<T> {
 
         // Drop the boxed slice of heap values.
         unsafe { Box::from_raw(self.values.as_ptr()) };
-    }
-}
-
-#[derive_where(Debug)]
-pub(crate) struct ArcHeapValueIter<T: 'static> {
-    _guard: Option<Arc<Heap<T>>>,
-    finger: *const HeapValue<T>,
-    finger_end: *const HeapValue<T>,
-    slot: *const NMainCell<Slot<T>>,
-}
-
-impl<T: 'static> Default for ArcHeapValueIter<T> {
-    fn default() -> Self {
-        Self {
-            _guard: None,
-            finger: ptr::null(),
-            finger_end: ptr::null(),
-            slot: ptr::null(),
-        }
-    }
-}
-
-impl<T: 'static> ArcHeapValueIter<T> {
-    pub fn new(heap: Arc<Heap<T>>, len: usize) -> Self {
-        assert!(len <= heap.len());
-        let finger = heap.values().as_ptr();
-        let finger_end = unsafe { finger.add(len) };
-        let slot = heap.slots.as_ptr();
-
-        Self {
-            _guard: Some(heap),
-            finger,
-            finger_end,
-            slot,
-        }
-    }
-
-    #[inline(always)] // TODO: We shouldn't have to return `DirectSlot`s
-    pub fn next(&mut self, token: &impl Token) -> Option<DirectSlot<'_, T>> {
-        if self.finger < self.finger_end {
-            let slot = unsafe { &*self.slot }.get(token);
-            let heap_value = unsafe { &*self.finger };
-            self.slot = unsafe { self.slot.add(1) };
-            self.finger = unsafe { self.finger.add(1) };
-
-            Some(DirectSlot { slot, heap_value })
-        } else {
-            None
-        }
     }
 }
 
