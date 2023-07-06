@@ -160,7 +160,7 @@ pub mod query_internals {
 #[macro_export]
 macro_rules! query {
     (
-		for ($(@$entity:ident;)? $($prefix:ident $name:ident in $tag:expr),+$(,)?) $(+ [$($vtag:expr),*$(,)?])? {$($body:tt)*}
+		for ($(@$entity:ident;)? $($prefix:ident $name:ident in $tag:expr),*$(,)?) $(+ [$($vtag:expr),*$(,)?])? {$($body:tt)*}
 	) => {'__query: {
 		// Evaluate our tag expressions
 		$( let $name = $crate::query::query_internals::get_tag($tag); )*

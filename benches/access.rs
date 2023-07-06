@@ -108,21 +108,16 @@ fn access_tests() {
 
         let _entities = (0..10_000)
             .map(|_| {
-                let entity = OwnedEntity::new();
-                entity.tag(pos_tag);
-                entity.tag(vel_tag);
-                entity.tag(virtual_tag);
-                entity.insert(Pos(Vec3::new(
-                    fastrand::f32(),
-                    fastrand::f32(),
-                    fastrand::f32(),
-                )));
-                entity.insert(Vel(Vec3::new(
-                    fastrand::f32(),
-                    fastrand::f32(),
-                    fastrand::f32(),
-                )));
-                entity
+                OwnedEntity::new()
+                    .with_tag(virtual_tag)
+                    .with_tagged(
+                        pos_tag,
+                        Pos(Vec3::new(fastrand::f32(), fastrand::f32(), fastrand::f32())),
+                    )
+                    .with_tagged(
+                        vel_tag,
+                        Vel(Vec3::new(fastrand::f32(), fastrand::f32(), fastrand::f32())),
+                    )
             })
             .collect::<Vec<_>>();
 

@@ -13,6 +13,7 @@ use crate::{
     obj::{Obj, OwnedObj},
     query::RawTag,
     util::misc::RawFmt,
+    Tag,
 };
 
 // === Storage === //
@@ -210,6 +211,17 @@ impl Entity {
         }
     }
 
+    pub fn with_tag(self, tag: impl Into<RawTag>) -> Self {
+        self.tag(tag);
+        self
+    }
+
+    pub fn with_tagged<T: 'static>(self, tag: impl Into<Tag<T>>, comp: T) -> Self {
+        self.insert(comp);
+        self.tag(tag.into());
+        self
+    }
+
     pub fn is_tagged(self, tag: impl Into<RawTag>) -> bool {
         match DbRoot::get(MainThreadToken::acquire_fmt("query entity tags"))
             .is_entity_tagged(self.inert, tag.into().0)
@@ -351,15 +363,22 @@ impl OwnedEntity {
     }
 
     pub fn tag(&self, tag: impl Into<RawTag>) {
-        self.entity().tag(tag)
+        self.entity.tag(tag)
     }
 
     pub fn untag(&self, tag: impl Into<RawTag>) {
-        self.entity().untag(tag)
+        self.entity.untag(tag)
     }
 
-    pub fn is_tagged(&self, tag: impl Into<RawTag>) -> bool {
-        self.entity().is_tagged(tag)
+    pub fn with_tag(self, tag: impl Into<RawTag>) -> Self {
+        self.entity.tag(tag);
+        self
+    }
+
+    pub fn with_tagged<T: 'static>(self, tag: impl Into<Tag<T>>, comp: T) -> Self {
+        self.insert(comp);
+        self.tag(tag.into());
+        self
     }
 
     pub fn is_alive(&self) -> bool {
