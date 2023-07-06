@@ -103,6 +103,7 @@ pub mod query_internals {
             database::{DbRoot, InertTag},
         },
         std::{
+            hint::unreachable_unchecked,
             iter::{empty, Iterator},
             option::Option,
             vec::Vec,
@@ -159,7 +160,7 @@ pub mod query_internals {
 #[macro_export]
 macro_rules! query {
     (
-		for ($($prefix:ident $name:ident in $tag:expr),+$(,)?) $(+ [$($vtag:expr),*$(,)?])? {$($body:tt)*}
+		for ($(@$entity:ident;)? $($prefix:ident $name:ident in $tag:expr),+$(,)?) $(+ [$($vtag:expr),*$(,)?])? {$($body:tt)*}
 	) => {'__query: {
 		// Evaluate our tag expressions
 		$( let $name = $crate::query::query_internals::get_tag($tag); )*
@@ -184,33 +185,74 @@ macro_rules! query {
         let _guard = db.borrow_query_guard(token);
 
         // Acquire a chunk iterator
-        let chunks = db.prepare_entity_query(&virtual_tags_static, &virtual_tags_dyn);
+        let chunks = $crate::query::query!(
+			@__internal_switch;
+			cond: {$(@$entity)?}
+			true: {
+				db.prepare_named_entity_query(&virtual_tags_static, &virtual_tags_dyn)
+			}
+			false: {
+				db.prepare_anonymous_entity_query(&virtual_tags_static, &virtual_tags_dyn)
+			}
+		);
 
         // Drop the database to allow safe userland code involving Bort to run
 		drop(db);
 
 		// For each chunk...
 		for chunk in chunks {
+			// Fetch the entity iter if it was requested
+			$(
+				let (chunk, $entity) = chunk.split();
+				let mut $entity = $entity.into_iter();
+			)?
+
 			// Collect the heaps for each storage
 			$( let mut $name = chunk.heaps(&$name.borrow(token)).into_iter(); )*
 
 			// Handle all our heaps
 			let mut i = chunk.heap_count();
 
-			while let ($($crate::query::query_internals::Option::Some($name),)*) =
-				($($crate::query::query_internals::Iterator::next(&mut $name),)*)
+			while let (
+				$($crate::query::query_internals::Option::Some($name),)*
+				$($crate::query::query_internals::Option::Some($entity),)?
+			) = (
+				$($crate::query::query_internals::Iterator::next(&mut $name),)*
+				$($crate::query::query_internals::Iterator::next(&mut $entity),)?
+			)
 			{
+				// Determine whether we're the last heap of the chunk
 				i -= 1;
 				let is_last = i == 0;
 
+				// Construct iterators
 				$(
-					let mut $name = $name.slots(token).take(if is_last { chunk.last_heap_len() } else { $name.len() });
+					let mut $name = $name.slots(token)
+					.take(if is_last { chunk.last_heap_len() } else { $name.len() });
 				)*
 
-				while let ($($crate::query::query_internals::Option::Some($name),)*) = (
+				$(
+					let mut $entity = if is_last {
+						&$entity[..chunk.last_heap_len()]
+					} else {
+						&$entity
+					}
+					.iter();
+				)?
+
+				// Iterate through every element in this heap
+				while let (
+					$($crate::query::query_internals::Option::Some($name),)*
+					$($crate::query::query_internals::Option::Some($entity),)?
+				) = (
 					$($crate::query::query_internals::Iterator::next(&mut $name),)*
+					$($crate::query::query_internals::Iterator::next(&mut $entity),)?
 				) {
+					// Convert the residuals to their target form
 					$( $crate::query::query!(@__internal_xform $prefix $name token); )*
+					$( let $entity = $entity.get(token).into_dangerous_entity(); )?
+
+					// Run userland code, absorbing their attempt at an early return.
 					let mut did_complete = false;
 					loop {
 						$($body)*
@@ -225,8 +267,26 @@ macro_rules! query {
 			}
 		}
     }};
+	(
+		@__internal_switch;
+		cond: {}
+		true: {$($true:tt)*}
+		false: {$($false:tt)*}
+	) => {
+		$($false)*
+	};
+	(
+		@__internal_switch;
+		cond: {$($there:tt)+}
+		true: {$($true:tt)*}
+		false: {$($false:tt)*}
+	) => {
+		$($true)*
+	};
 	(@__internal_xform ref $name:ident $token:ident) => { let $name = $name.borrow($token); };
 	(@__internal_xform mut $name:ident $token:ident) => { let mut $name = $name.borrow_mut($token); };
+	(@__internal_xform oref $name:ident $token:ident) => { let $name = &*$name.borrow($token); };
+	(@__internal_xform omut $name:ident $token:ident) => { let $name = &mut *$name.borrow_mut($token); };
 	(@__internal_xform slot $name:ident $token:ident) => {};
 }
 

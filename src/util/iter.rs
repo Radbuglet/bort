@@ -1,4 +1,4 @@
-use std::{hash, iter, sync::Arc};
+use std::{hash, iter};
 
 use derive_where::derive_where;
 
@@ -111,24 +111,4 @@ where
     fn next(&mut self) -> Option<Self::Item> {
         (&mut self.0).find(|v| v != &self.1)
     }
-}
-
-pub fn arc_into_iter<T, V>(
-    arc: Arc<[T]>,
-    len: usize,
-    mut f: impl FnMut(&T) -> V,
-) -> impl Iterator<Item = V> {
-    debug_assert!(len <= arc.len());
-
-    let mut index = 0;
-
-    iter::from_fn(move || {
-        if index < len {
-            let element = f(&arc[index]);
-            index += 1;
-            Some(element)
-        } else {
-            None
-        }
-    })
 }

@@ -21,7 +21,7 @@ use crate::{
         arena::{FreeListArena, LeakyArena, SpecArena},
         block::{BlockAllocator, BlockReservation},
         hash_map::{FxHashMap, FxHashSet, NopHashMap},
-        iter::{arc_into_iter, filter_duplicates, merge_iters},
+        iter::{filter_duplicates, merge_iters},
         misc::{
             const_new_nz_u64, leak, xorshift64, AnyDowncastExt, ListFmt, MapFmt, NamedTypeId,
             RawFmt,
@@ -594,7 +594,26 @@ impl DbRoot {
         }
     }
 
-    pub fn prepare_entity_query(
+    pub fn prepare_named_entity_query(
+        &mut self,
+        static_tags: &[Option<InertTag>],
+        dyn_tags: &[InertTag],
+    ) -> Vec<QueryChunkWithEntities> {
+        let mut chunks = Vec::new();
+
+        self.prepare_query_common(static_tags, dyn_tags, |arena, arch_id| {
+            let arch = arena.get(&arch_id).value();
+            chunks.push(QueryChunkWithEntities {
+                archetype: arch_id,
+                entity_subs: arch.entity_heaps.clone(),
+                last_heap_len: arch.last_heap_len,
+            })
+        });
+
+        chunks
+    }
+
+    pub fn prepare_anonymous_entity_query(
         &mut self,
         static_tags: &[Option<InertTag>],
         dyn_tags: &[InertTag],
@@ -605,7 +624,7 @@ impl DbRoot {
             let arch = arena.get(&arch_id).value();
             chunks.push(QueryChunk {
                 archetype: arch_id,
-                entity_subs: arch.entity_heaps.clone(),
+                heap_count: arch.entity_heaps.len(),
                 last_heap_len: arch.last_heap_len,
             })
         });
@@ -1213,16 +1232,41 @@ impl<T: 'static> DbAnyStorage for DbStorage<T> {
 #[derive(Debug)]
 pub struct EntityDeadError;
 
-#[derive(Debug)]
-pub struct QueryChunk {
+#[derive(Debug, Clone)]
+pub struct QueryChunkWithEntities {
     archetype: DbArchetypeRef,
     entity_subs: Vec<Arc<[NMainCell<InertEntity>]>>,
     last_heap_len: usize,
 }
 
+impl QueryChunkWithEntities {
+    pub fn split(self) -> (QueryChunk, Vec<Arc<[NMainCell<InertEntity>]>>) {
+        (self.query_chunk(), self.into_entities())
+    }
+
+    pub fn query_chunk(&self) -> QueryChunk {
+        QueryChunk {
+            archetype: self.archetype,
+            heap_count: self.entity_subs.len(),
+            last_heap_len: self.last_heap_len,
+        }
+    }
+
+    pub fn into_entities(self) -> Vec<Arc<[NMainCell<InertEntity>]>> {
+        self.entity_subs
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct QueryChunk {
+    archetype: DbArchetypeRef,
+    heap_count: usize,
+    last_heap_len: usize,
+}
+
 impl QueryChunk {
     pub fn is_empty(&self) -> bool {
-        self.entity_subs.is_empty()
+        self.heap_count == 0
     }
 
     pub fn last_heap_len(&self) -> usize {
@@ -1230,7 +1274,7 @@ impl QueryChunk {
     }
 
     pub fn heap_count(&self) -> usize {
-        self.entity_subs.len()
+        self.heap_count
     }
 
     pub fn heaps<T: 'static>(&self, storage: &DbStorageInner<T>) -> Vec<Arc<Heap<T>>> {
@@ -1238,26 +1282,6 @@ impl QueryChunk {
             .heaps
             .get(&self.archetype)
             .map_or(Vec::new(), |v| v.clone())
-    }
-
-    pub fn into_entities(
-        self,
-        token: &'static MainThreadToken,
-    ) -> impl Iterator<Item = InertEntity> {
-        let last_sub = self.entity_subs.len().saturating_sub(1);
-
-        self.entity_subs
-            .into_iter()
-            .enumerate()
-            .flat_map(move |(i, arc)| {
-                let len = if i == last_sub {
-                    self.last_heap_len
-                } else {
-                    arc.len()
-                };
-
-                arc_into_iter(arc, len, |slot| slot.get(token))
-            })
     }
 }
 
