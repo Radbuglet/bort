@@ -241,7 +241,7 @@ macro_rules! query {
 				)?
 
 				// Iterate through every element in this heap
-				while let (
+				'__query_ent: while let (
 					$($crate::query::query_internals::Option::Some($name),)*
 					$($crate::query::query_internals::Option::Some($entity),)?
 				) = (
@@ -253,14 +253,26 @@ macro_rules! query {
 					$( let $entity = $entity.get(token).into_dangerous_entity(); )?
 
 					// Run userland code, absorbing their attempt at an early return.
-					let mut did_complete = false;
+					let mut did_run = false;
 					loop {
+						if did_run {
+							// The user must have used `continue`.
+							continue '__query_ent;
+						}
+						did_run = true;
+
 						$($body)*
-						did_complete = true;
-						break;
+
+						// The user completed the loop.
+						#[allow(unreachable_code)]
+						{
+							continue '__query_ent;
+						}
 					}
 
-					if !did_complete {
+					// The user broke out of the loop.
+					#[allow(unreachable_code)]
+					{
 						break '__query;
 					}
 				}
