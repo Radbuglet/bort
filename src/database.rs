@@ -533,15 +533,20 @@ impl DbRoot {
 
     fn prepare_query_common(
         &mut self,
-        tags: &[InertTag],
+        static_tags: &[Option<InertTag>],
+        dyn_tags: &[InertTag],
         mut f: impl FnMut(&mut DbArchetypeArena, DbArchetypeRef),
     ) {
-        if tags.is_empty() {
+        let all_tags = static_tags
+            .iter()
+            .filter_map(|v| v.as_ref())
+            .chain(dyn_tags.iter());
+        if all_tags.clone().next().is_none() {
             return;
         }
 
         // Ensure that all tag containers are sorted
-        for tag_id in tags {
+        for tag_id in all_tags.clone() {
             let Some(tag) = self.tag_map.get_mut(tag_id) else { continue };
             if !tag.are_sorted_containers_sorted {
                 tag.sorted_containers.sort();
@@ -550,8 +555,7 @@ impl DbRoot {
         }
 
         // Collect a set of archetypes to include and prepare their chunks
-        let mut tag_iters = tags
-            .iter()
+        let mut tag_iters = all_tags
             .map(|tag_id| {
                 self.tag_map
                     .get(tag_id)
@@ -590,10 +594,14 @@ impl DbRoot {
         }
     }
 
-    pub fn prepare_entity_query(&mut self, tags: &[InertTag]) -> Vec<QueryChunk> {
+    pub fn prepare_entity_query(
+        &mut self,
+        static_tags: &[Option<InertTag>],
+        dyn_tags: &[InertTag],
+    ) -> Vec<QueryChunk> {
         let mut chunks = Vec::new();
 
-        self.prepare_query_common(tags, |arena, arch_id| {
+        self.prepare_query_common(static_tags, dyn_tags, |arena, arch_id| {
             let arch = arena.get(&arch_id).value();
             chunks.push(QueryChunk {
                 archetype: arch_id,

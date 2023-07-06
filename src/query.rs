@@ -10,11 +10,9 @@ use crate::{
 
 // === Tag === //
 
-pub struct VirtualTagMarker {
+pub(crate) struct VirtualTagMarker {
     _never: (),
 }
-
-pub type VirtualTag = Tag<VirtualTagMarker>;
 
 #[derive_where(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Tag<T: 'static> {
@@ -36,6 +34,29 @@ impl<T> Tag<T> {
 }
 
 impl<T> Into<RawTag> for Tag<T> {
+    fn into(self) -> RawTag {
+        self.raw
+    }
+}
+
+#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
+pub struct VirtualTag {
+    raw: RawTag,
+}
+
+impl VirtualTag {
+    pub fn new() -> Self {
+        Self {
+            raw: RawTag::new(NamedTypeId::of::<VirtualTagMarker>()),
+        }
+    }
+
+    pub fn raw(self) -> RawTag {
+        self.raw
+    }
+}
+
+impl Into<RawTag> for VirtualTag {
     fn into(self) -> RawTag {
         self.raw
     }
@@ -81,34 +102,74 @@ pub mod query_internals {
             core::token::MainThreadToken,
             database::{DbRoot, InertTag},
         },
-        std::{iter::Iterator, option::Option, vec::Vec},
+        std::{
+            iter::{empty, Iterator},
+            option::Option,
+            vec::Vec,
+        },
     };
 
     // === Helpers === //
 
-    pub fn get_tag<T: 'static>(tag: impl Into<Tag<T>>) -> Tag<T> {
-        tag.into()
+    pub fn get_tag<T: 'static>(tag: impl Into<Tag<T>>) -> (Tag<T>, InertTag) {
+        let tag = tag.into();
+        (tag, tag.raw.0)
     }
 
-    pub fn get_inert_and_storage<T: 'static>(
+    pub fn get_storage<T: 'static>(
         db: &mut DbRoot,
-        tag: Tag<T>,
-    ) -> (InertTag, Option<&'static DbStorage<T>>) {
-        (
-            tag.raw().0,
-            (NamedTypeId::of::<T>() != NamedTypeId::of::<VirtualTagMarker>())
-                .then(|| db.get_storage::<T>()),
-        )
+        _infer: (Tag<T>, InertTag),
+    ) -> &'static DbStorage<T> {
+        db.get_storage::<T>()
+    }
+
+    pub trait ExtraTagConverter {
+        fn into_single(self, extra: &mut Vec<InertTag>) -> Option<InertTag>;
+    }
+
+    impl ExtraTagConverter for VirtualTag {
+        fn into_single(self, _extra: &mut Vec<InertTag>) -> Option<InertTag> {
+            Some(self.raw.0)
+        }
+    }
+
+    impl<T: 'static> ExtraTagConverter for Tag<T> {
+        fn into_single(self, _extra: &mut Vec<InertTag>) -> Option<InertTag> {
+            Some(self.raw.0)
+        }
+    }
+
+    impl ExtraTagConverter for RawTag {
+        fn into_single(self, _extra: &mut Vec<InertTag>) -> Option<InertTag> {
+            Some(self.0)
+        }
+    }
+
+    impl<I: IntoIterator> ExtraTagConverter for I
+    where
+        I::Item: Into<RawTag>,
+    {
+        fn into_single(self, extra: &mut Vec<InertTag>) -> Option<InertTag> {
+            extra.extend(self.into_iter().map(|v| v.into().0));
+            None
+        }
     }
 }
 
 #[macro_export]
 macro_rules! query {
     (
-		for ($($prefix:ident $name:ident in $tag:expr),+$(,)?) {$($body:tt)*}
+		for ($($prefix:ident $name:ident in $tag:expr),+$(,)?) $(+ [$($vtag:expr),*$(,)?])? {$($body:tt)*}
 	) => {'__query: {
 		// Evaluate our tag expressions
 		$( let $name = $crate::query::query_internals::get_tag($tag); )*
+
+		// Determine tag list
+		let mut virtual_tags_dyn = Vec::<$crate::query::query_internals::InertTag>::new();
+		let virtual_tags_static = [
+			$($crate::query::query_internals::Option::Some($name.1),)*
+			$($($crate::query::query_internals::ExtraTagConverter::into_single($vtag, &mut virtual_tags_dyn),)*)?
+		];
 
         // Acquire the main thread token used for our query
         let token = $crate::query::query_internals::MainThreadToken::acquire_fmt("query entities");
@@ -117,13 +178,13 @@ macro_rules! query {
         let mut db = $crate::query::query_internals::DbRoot::get(token);
 
         // Collect the necessary storages and tags
-        $( let $name = $crate::query::query_internals::get_inert_and_storage(&mut db, $name); )*
+        $( let $name = $crate::query::query_internals::get_storage(&mut db, $name); )*
 
         // Acquire a query guard to prevent flushing
         let _guard = db.borrow_query_guard(token);
 
         // Acquire a chunk iterator
-        let chunks = db.prepare_entity_query(&[$($name.0),*]);
+        let chunks = db.prepare_entity_query(&virtual_tags_static, &virtual_tags_dyn);
 
         // Drop the database to allow safe userland code involving Bort to run
 		drop(db);
@@ -131,11 +192,7 @@ macro_rules! query {
 		// For each chunk...
 		for chunk in chunks {
 			// Collect the heaps for each storage
-			$(
-				let mut $name = $name.1
-					.map_or($crate::query::query_internals::Vec::new(), |storage| chunk.heaps(&storage.borrow(token)))
-					.into_iter();
-			)*
+			$( let mut $name = chunk.heaps(&$name.borrow(token)).into_iter(); )*
 
 			// Handle all our heaps
 			let mut i = chunk.heap_count();

@@ -2,7 +2,7 @@ use std::{cell::RefCell, time::Duration};
 
 use bort::{
     core::{cell::OptRefCell, heap::Heap, token::MainThreadToken},
-    flush, query, storage, OwnedEntity, OwnedObj, Tag,
+    flush, query, storage, OwnedEntity, OwnedObj, Tag, VirtualTag,
 };
 use criterion::{criterion_main, Criterion};
 use glam::Vec3;
@@ -104,12 +104,14 @@ fn access_tests() {
 
         let pos_tag = Tag::<Pos>::new();
         let vel_tag = Tag::<Vel>::new();
+        let virtual_tag = VirtualTag::new();
 
         let _entities = (0..10_000)
             .map(|_| {
                 let entity = OwnedEntity::new();
                 entity.tag(pos_tag);
                 entity.tag(vel_tag);
+                entity.tag(virtual_tag);
                 entity.insert(Pos(Vec3::new(
                     fastrand::f32(),
                     fastrand::f32(),
@@ -128,7 +130,7 @@ fn access_tests() {
 
         c.iter(|| {
             query! {
-                for (mut pos in pos_tag, ref vel in vel_tag) {
+                for (mut pos in pos_tag, ref vel in vel_tag) + [virtual_tag] {
                     pos.0 += vel.0;
                 }
             }
