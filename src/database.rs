@@ -245,6 +245,8 @@ type DbArchetypeRef = SetMapPtr<InertTag, DbArchetype, FreeListArena>;
 
 trait DbAnyEventSet: fmt::Debug + Sync {
     fn as_any(&self) -> &(dyn Any + Sync);
+
+    fn clear(&self, token: &MainThreadToken);
 }
 
 pub type DbEventSet<T> = NOptRefCell<DbEventSetInner<T>>;
@@ -273,6 +275,12 @@ impl<T> fmt::Debug for DbEventSetInner<T> {
 impl<T: 'static> DbAnyEventSet for DbEventSet<T> {
     fn as_any(&self) -> &(dyn Any + Sync) {
         self
+    }
+
+    fn clear(&self, token: &MainThreadToken) {
+        let mut me = self.borrow_mut(token);
+        me.current_events.clear();
+        me.old_events.clear();
     }
 }
 
@@ -625,6 +633,11 @@ impl DbRoot {
             .query_guard
             .try_borrow_mut(token)
             .expect("cannot flush archetypes while a query is active");
+
+        // Clear all events
+        for event in self.events.values() {
+            event.clear(token);
+        }
 
         // Throughout this process, we keep track of which entities have been moved around and they
         // archetype they currently reside.

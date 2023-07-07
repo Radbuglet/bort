@@ -8,7 +8,7 @@ use crate::{
         heap::Slot,
         token::MainThreadToken,
     },
-    database::{DbRoot, DbStorage, EntityDeadError, InertEntity},
+    database::{DbEventSet, DbRoot, DbStorage, EntityDeadError, InertEntity},
     debug::AsDebugLabel,
     obj::{Obj, OwnedObj},
     query::RawTag,
@@ -29,14 +29,14 @@ pub fn storage<T: 'static>() -> Storage<T> {
 
     Storage {
         inner: DbRoot::get(token).get_storage::<T>(),
-        token,
+        token: *token,
     }
 }
 
 #[derive_where(Debug, Copy, Clone)]
 pub struct Storage<T: 'static> {
     inner: &'static DbStorage<T>,
-    token: &'static MainThreadToken,
+    token: MainThreadToken,
 }
 
 impl<T: 'static> Storage<T> {
@@ -47,9 +47,9 @@ impl<T: 'static> Storage<T> {
     // === Management === //
 
     pub fn insert_with_obj(&self, entity: Entity, value: T) -> (Option<T>, Obj<T>) {
-        match DbRoot::get(self.token).insert_component(
-            self.token,
-            &mut self.inner.borrow_mut(self.token),
+        match DbRoot::get(self.token.as_ref()).insert_component(
+            self.token.as_ref(),
+            &mut self.inner.borrow_mut(self.token.as_ref()),
             entity.inert,
             value,
         ) {
@@ -63,9 +63,9 @@ impl<T: 'static> Storage<T> {
     }
 
     pub fn remove(&self, entity: Entity) -> Option<T> {
-        match DbRoot::get(self.token).remove_component(
-            self.token,
-            &mut self.inner.borrow_mut(self.token),
+        match DbRoot::get(self.token.as_ref()).remove_component(
+            self.token.as_ref(),
+            &mut self.inner.borrow_mut(self.token.as_ref()),
             entity.inert,
         ) {
             Ok(removed) => removed,
@@ -78,7 +78,7 @@ impl<T: 'static> Storage<T> {
     // === Getters === //
 
     pub fn try_get_slot(&self, entity: Entity) -> Option<Slot<T>> {
-        DbRoot::get_component(&self.inner.borrow(self.token), entity.inert)
+        DbRoot::get_component(&self.inner.borrow(self.token.as_ref()), entity.inert)
     }
 
     pub fn get_slot(&self, entity: Entity) -> Slot<T> {
@@ -89,31 +89,65 @@ impl<T: 'static> Storage<T> {
                 entity,
             )
         });
-        debug_assert_eq!(slot.owner(self.token), Some(entity));
+        debug_assert_eq!(slot.owner(self.token.as_ref()), Some(entity));
 
         slot
     }
 
     pub fn try_get(&self, entity: Entity) -> Option<CompRef<T>> {
         self.try_get_slot(entity)
-            .map(|slot| slot.borrow(self.token))
+            .map(|slot| slot.borrow(self.token.as_ref()))
     }
 
     pub fn try_get_mut(&self, entity: Entity) -> Option<CompMut<T>> {
         self.try_get_slot(entity)
-            .map(|slot| slot.borrow_mut(self.token))
+            .map(|slot| slot.borrow_mut(self.token.as_ref()))
     }
 
     pub fn get(&self, entity: Entity) -> CompRef<T> {
-        self.get_slot(entity).borrow(self.token)
+        self.get_slot(entity).borrow(self.token.as_ref())
     }
 
     pub fn get_mut(&self, entity: Entity) -> CompMut<T> {
-        self.get_slot(entity).borrow_mut(self.token)
+        self.get_slot(entity).borrow_mut(self.token.as_ref())
     }
 
     pub fn has(&self, entity: Entity) -> bool {
         self.try_get_slot(entity).is_some()
+    }
+}
+
+// === EventSet === //
+
+pub fn event_set<T: 'static>() -> EventSet<T> {
+    let token = MainThreadToken::acquire_fmt("update events");
+    let mut db = DbRoot::get(token);
+
+    EventSet {
+        token: *token,
+        inner: db.get_event_set(),
+    }
+}
+
+pub struct EventSet<T: 'static> {
+    token: MainThreadToken,
+    inner: &'static DbEventSet<T>,
+}
+
+impl<T> EventSet<T> {
+    pub fn acquire() -> Self {
+        event_set::<T>()
+    }
+
+    pub fn fire(&mut self, entity: Entity, value: T) {
+        match DbRoot::get(self.token.as_ref()).fire_event(
+            &mut self.inner.borrow_mut(self.token.as_ref()),
+            entity.inert,
+            value,
+        ) {
+            Ok(()) => {}
+            Err(EntityDeadError) => panic!("Attempted to fire event on dead entity {entity:?}"),
+        }
     }
 }
 
@@ -229,6 +263,10 @@ impl Entity {
             Ok(result) => result,
             Err(EntityDeadError) => panic!("Attempted to query tags of dead entity {self:?}"),
         }
+    }
+
+    pub fn fire<E: 'static>(self, event: E) {
+        event_set::<E>().fire(self, event);
     }
 
     pub fn is_alive(self) -> bool {
@@ -379,6 +417,10 @@ impl OwnedEntity {
         self.insert(comp);
         self.tag(tag.into());
         self
+    }
+
+    pub fn fire<E: 'static>(&self, event: E) {
+        self.entity.fire(event);
     }
 
     pub fn is_alive(&self) -> bool {

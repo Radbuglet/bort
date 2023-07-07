@@ -352,6 +352,13 @@ impl MainThreadToken {
 
         result.unwrap()
     }
+
+    #[inline(always)]
+    pub fn as_ref(self) -> &'static Self {
+        &Self {
+            _no_send_or_sync: PhantomData,
+        }
+    }
 }
 
 unsafe impl Token for MainThreadToken {
