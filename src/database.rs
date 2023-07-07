@@ -533,20 +533,15 @@ impl DbRoot {
 
     fn prepare_query_common(
         &mut self,
-        static_tags: &[Option<InertTag>],
-        dyn_tags: &[InertTag],
+        tags: TagList,
         mut f: impl FnMut(&mut DbArchetypeArena, DbArchetypeRef),
     ) {
-        let all_tags = static_tags
-            .iter()
-            .filter_map(|v| v.as_ref())
-            .chain(dyn_tags.iter());
-        if all_tags.clone().next().is_none() {
+        if tags.iter().next().is_none() {
             return;
         }
 
         // Ensure that all tag containers are sorted
-        for tag_id in all_tags.clone() {
+        for tag_id in tags.iter() {
             let Some(tag) = self.tag_map.get_mut(tag_id) else { continue };
             if !tag.are_sorted_containers_sorted {
                 tag.sorted_containers.sort();
@@ -555,7 +550,8 @@ impl DbRoot {
         }
 
         // Collect a set of archetypes to include and prepare their chunks
-        let mut tag_iters = all_tags
+        let mut tag_iters = tags
+            .iter()
             .map(|tag_id| {
                 self.tag_map
                     .get(tag_id)
@@ -594,14 +590,10 @@ impl DbRoot {
         }
     }
 
-    pub fn prepare_named_entity_query(
-        &mut self,
-        static_tags: &[Option<InertTag>],
-        dyn_tags: &[InertTag],
-    ) -> Vec<QueryChunkWithEntities> {
+    pub fn prepare_named_entity_query(&mut self, tags: TagList) -> Vec<QueryChunkWithEntities> {
         let mut chunks = Vec::new();
 
-        self.prepare_query_common(static_tags, dyn_tags, |arena, arch_id| {
+        self.prepare_query_common(tags, |arena, arch_id| {
             let arch = arena.get(&arch_id).value();
             chunks.push(QueryChunkWithEntities {
                 archetype: arch_id,
@@ -613,14 +605,10 @@ impl DbRoot {
         chunks
     }
 
-    pub fn prepare_anonymous_entity_query(
-        &mut self,
-        static_tags: &[Option<InertTag>],
-        dyn_tags: &[InertTag],
-    ) -> Vec<QueryChunk> {
+    pub fn prepare_anonymous_entity_query(&mut self, tags: TagList) -> Vec<QueryChunk> {
         let mut chunks = Vec::new();
 
-        self.prepare_query_common(static_tags, dyn_tags, |arena, arch_id| {
+        self.prepare_query_common(tags, |arena, arch_id| {
             let arch = arena.get(&arch_id).value();
             chunks.push(QueryChunk {
                 archetype: arch_id,
@@ -1291,7 +1279,7 @@ pub struct EventSetSnapshot<T> {
 }
 
 impl<T> EventSetSnapshot<T> {
-    pub fn set_archetypes(&mut self, db: &mut DbRoot, tags: &[InertTag]) {
+    pub fn set_archetypes(&mut self, db: &mut DbRoot, tag_list: TagList) {
         self.inclusion_cache.clear();
 
         for run in &self.runs {
@@ -1302,7 +1290,7 @@ impl<T> EventSetSnapshot<T> {
 
                 let arch_data = db.arch_map.arena().get(arch);
                 self.inclusion_cache
-                    .insert(*arch, tags.iter().all(|tag| arch_data.has_key(tag)));
+                    .insert(*arch, tag_list.iter().all(|tag| arch_data.has_key(tag)));
             }
         }
     }
@@ -1318,5 +1306,20 @@ impl<T> EventSetSnapshot<T> {
                 })
                 .flatten()
         })
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct TagList<'a> {
+    pub static_tags: &'a [Option<InertTag>],
+    pub dynamic_tags: &'a [InertTag],
+}
+
+impl<'a> TagList<'a> {
+    pub fn iter(self) -> impl Iterator<Item = &'a InertTag> + Clone + 'a {
+        self.static_tags
+            .iter()
+            .filter_map(|v| v.as_ref())
+            .chain(self.dynamic_tags.iter())
     }
 }

@@ -100,11 +100,12 @@ pub mod query_internals {
     pub use {
         crate::{
             core::token::MainThreadToken,
-            database::{DbRoot, InertTag},
+            database::{DbRoot, InertTag, TagList},
         },
         std::{
             hint::unreachable_unchecked,
             iter::{empty, Iterator},
+            mem::drop,
             option::Option,
             vec::Vec,
         },
@@ -159,8 +160,104 @@ pub mod query_internals {
 
 #[macro_export]
 macro_rules! query {
+	// === Event query === //
+	(
+		for (
+			$event_name:ident:$event_ty:ty
+			;
+			@$entity:ident
+			$(,$prefix:ident $name:ident in $tag:expr)*
+			$(,)?
+		)
+		$(+ [$($vtag:expr),*$(,)?])?
+		{
+			$($body:tt)*
+		}
+	) => {'__query: {
+		// Evaluate our tag expressions
+		$( let $name = $crate::query::query_internals::get_tag($tag); )*
+
+		// Determine tag list
+		let mut virtual_tags_dyn = Vec::<$crate::query::query_internals::InertTag>::new();
+		let virtual_tags_static = [
+			$($crate::query::query_internals::Option::Some($name.1),)*
+			$($($crate::query::query_internals::ExtraTagConverter::into_single($vtag, &mut virtual_tags_dyn),)*)?
+		];
+
+		// Acquire the main thread token used for our query
+        let token = $crate::query::query_internals::MainThreadToken::acquire_fmt("query entities");
+
+        // Acquire the database
+        let mut db = $crate::query::query_internals::DbRoot::get(token);
+
+		// Get an event snapshot
+		let mut event_snapshot = $crate::query::query_internals::DbRoot::get_event_snapshot(
+			&mut db.get_event_set::<$event_ty>().borrow_mut(token)
+		);
+		event_snapshot.set_archetypes(&mut db, $crate::query::query_internals::TagList {
+			static_tags: &virtual_tags_static,
+			dynamic_tags: &virtual_tags_dyn,
+		});
+
+        // Collect the necessary storages and tags
+        $( let $name = $crate::query::query_internals::get_storage(&mut db, $name); )*
+
+		// Acquire a query guard to prevent flushing
+        let _guard = db.borrow_query_guard(token);
+
+		// Drop the database to allow safe userland code involving Bort to run
+		$crate::query::query_internals::drop(db);
+
+		// Iterate through the events
+		'__query_ent: for ($entity, $event_name) in event_snapshot.query() {
+			// Convert the residuals to their target form
+			$(
+				let $name = $crate::query::query_internals::DbRoot::get_component(
+					&$name.borrow(token),
+					$entity
+				)
+				.unwrap();
+				$crate::query::query!(@__internal_xform $prefix $name token);
+			)*
+			let $entity = $entity.into_dangerous_entity();
+
+			// Run userland code, absorbing their attempt at an early return.
+			let mut did_run = false;
+			loop {
+				if did_run {
+					// The user must have used `continue`.
+					continue '__query_ent;
+				}
+				did_run = true;
+
+				$($body)*
+
+				// The user completed the loop.
+				#[allow(unreachable_code)]
+				{
+					continue '__query_ent;
+				}
+			}
+
+			// The user broke out of the loop.
+			#[allow(unreachable_code)]
+			{
+				break '__query;
+			}
+		}
+	}};
+
+	// === Global query === //
     (
-		for ($(@$entity:ident;)? $($prefix:ident $name:ident in $tag:expr),*$(,)?) $(+ [$($vtag:expr),*$(,)?])? {$($body:tt)*}
+		for (
+			$(@$entity:ident $(,)?)?
+			$($prefix:ident $name:ident in $tag:expr),*
+			$(,)?
+		)
+		$(+ [$($vtag:expr),*$(,)?])?
+		{
+			$($body:tt)*
+		}
 	) => {'__query: {
 		// Evaluate our tag expressions
 		$( let $name = $crate::query::query_internals::get_tag($tag); )*
@@ -181,23 +278,29 @@ macro_rules! query {
         // Collect the necessary storages and tags
         $( let $name = $crate::query::query_internals::get_storage(&mut db, $name); )*
 
-        // Acquire a query guard to prevent flushing
-        let _guard = db.borrow_query_guard(token);
-
         // Acquire a chunk iterator
         let chunks = $crate::query::query!(
 			@__internal_switch;
 			cond: {$(@$entity)?}
 			true: {
-				db.prepare_named_entity_query(&virtual_tags_static, &virtual_tags_dyn)
+				db.prepare_named_entity_query($crate::query::query_internals::TagList {
+					static_tags: &virtual_tags_static,
+					dynamic_tags: &virtual_tags_dyn,
+				})
 			}
 			false: {
-				db.prepare_anonymous_entity_query(&virtual_tags_static, &virtual_tags_dyn)
+				db.prepare_anonymous_entity_query($crate::query::query_internals::TagList {
+					static_tags: &virtual_tags_static,
+					dynamic_tags: &virtual_tags_dyn,
+				})
 			}
 		);
 
+		// Acquire a query guard to prevent flushing
+        let _guard = db.borrow_query_guard(token);
+
         // Drop the database to allow safe userland code involving Bort to run
-		drop(db);
+		$crate::query::query_internals::drop(db);
 
 		// For each chunk...
 		for chunk in chunks {
@@ -279,6 +382,8 @@ macro_rules! query {
 			}
 		}
     }};
+
+	// === Helpers === //
 	(
 		@__internal_switch;
 		cond: {}
@@ -295,10 +400,12 @@ macro_rules! query {
 	) => {
 		$($true)*
 	};
-	(@__internal_xform ref $name:ident $token:ident) => { let $name = $name.borrow($token); };
-	(@__internal_xform mut $name:ident $token:ident) => { let mut $name = $name.borrow_mut($token); };
-	(@__internal_xform oref $name:ident $token:ident) => { let $name = &*$name.borrow($token); };
-	(@__internal_xform omut $name:ident $token:ident) => { let $name = &mut *$name.borrow_mut($token); };
+
+	// N.B. these work on both `Slot`s and `DirectSlot`s
+	(@__internal_xform ref $name:ident $token:ident) => { let $name = &*$name.borrow($token); };
+	(@__internal_xform mut $name:ident $token:ident) => { let $name = &mut *$name.borrow_mut($token); };
+	(@__internal_xform oref $name:ident $token:ident) => { let $name = $name.borrow($token); };
+	(@__internal_xform omut $name:ident $token:ident) => { let mut $name =  $name.borrow_mut($token); };
 	(@__internal_xform slot $name:ident $token:ident) => {};
 }
 
