@@ -11,7 +11,7 @@ mod util;
 pub mod prelude {
     pub use crate::{
         core::cell::{OptRef, OptRefMut},
-        entity::{storage, CompMut, CompRef, Entity, OwnedEntity, Storage},
+        entity::{event_set, storage, CompMut, CompRef, Entity, EventSet, OwnedEntity, Storage},
         obj::{Obj, OwnedObj},
         query::{flush, query, RawTag, Tag, VirtualTag},
     };

@@ -230,7 +230,9 @@ macro_rules! query {
 				}
 				did_run = true;
 
-				$($body)*
+				let _: () = {
+					$($body)*
+				};
 
 				// The user completed the loop.
 				#[allow(unreachable_code)]
@@ -364,7 +366,9 @@ macro_rules! query {
 						}
 						did_run = true;
 
-						$($body)*
+						let _: () = {
+							$($body)*
+						};
 
 						// The user completed the loop.
 						#[allow(unreachable_code)]
