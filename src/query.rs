@@ -1,4 +1,4 @@
-use std::{fmt, marker::PhantomData};
+use std::{any::TypeId, fmt, marker::PhantomData};
 
 use derive_where::derive_where;
 
@@ -70,6 +70,17 @@ impl RawTag {
         DbRoot::get(MainThreadToken::acquire_fmt("create tag"))
             .spawn_tag(ty)
             .into_dangerous_tag()
+    }
+
+    pub fn ty(self) -> TypeId {
+        self.0.ty().raw()
+    }
+
+    pub fn unerase<T: 'static>(self) -> Option<Tag<T>> {
+        (self.0.ty() == NamedTypeId::of::<T>()).then(|| Tag {
+            _ty: PhantomData,
+            raw: self,
+        })
     }
 }
 

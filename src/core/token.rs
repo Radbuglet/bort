@@ -44,6 +44,7 @@
 //! consume a blank [`Token`] which seemingly affords no guarantees but, in actuality, affords the
 //! guarantee that the token is belongs to either a worker or a main thread.
 
+use derive_where::derive_where;
 use hashbrown::hash_map::Entry as HashMapEntry;
 use std::{
     any::type_name,
@@ -122,7 +123,7 @@ pub enum ThreadAccess {
 /// ## Safety
 ///
 /// - If `Kind` is specified as [`MainThreadTokenKind`], this token may only exist on the main
-/// thread.
+///   thread.
 ///
 /// - If `Kind` is specified as [`WorkerOrMainThreadTokenKind`], this token is either a main thread
 ///   token or the main thread has been suspended and this is a *real* worker thread.
@@ -251,6 +252,55 @@ impl<T: ?Sized + ExclusiveTokenHint<V> + UnJailMutToken<V>, V: ?Sized> BorrowMut
 pub trait GetToken<T: ?Sized>: SharedTokenHint<T> + UnJailRefToken<T> {}
 
 impl<T: ?Sized + SharedTokenHint<V> + UnJailRefToken<V>, V: ?Sized> GetToken<V> for T {}
+
+// === AccessPolicies === //
+
+// Core
+pub trait AccessPolicy: fmt::Debug + Clone + Send + Sync {}
+
+pub unsafe trait AccessPolicyFor<T: Token>: AccessPolicy {
+    fn check_access(&self, token: &T) -> Option<ThreadAccess>;
+}
+
+pub trait RefAccessPolicyFor<T: Token>: AccessPolicyFor<T> {}
+
+pub trait MutAccessPolicyFor<T: Token>: AccessPolicyFor<T> {}
+
+// TyAccessPolicy
+#[derive_where(Debug, Copy, Clone, Default)]
+pub struct TyAccessPolicy<T: ?Sized>(PhantomData<fn() -> T>);
+
+impl<T: ?Sized> TyAccessPolicy<T> {
+    pub const fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<T: ?Sized> AccessPolicy for TyAccessPolicy<T> {}
+
+unsafe impl<T, K> AccessPolicyFor<K> for TyAccessPolicy<T>
+where
+    T: ?Sized,
+    K: TokenFor<T>,
+{
+    fn check_access(&self, token: &K) -> Option<ThreadAccess> {
+        token.check_access(None)
+    }
+}
+
+impl<T, K> MutAccessPolicyFor<K> for TyAccessPolicy<T>
+where
+    T: ?Sized,
+    K: ExclusiveTokenHint<T>,
+{
+}
+
+impl<T, K> RefAccessPolicyFor<K> for TyAccessPolicy<T>
+where
+    T: ?Sized,
+    K: SharedTokenHint<T>,
+{
+}
 
 // === Blessing === //
 

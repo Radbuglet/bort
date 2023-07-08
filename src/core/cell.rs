@@ -11,10 +11,6 @@
 //!    (remember: every single component access has to go through this process so even small
 //!    optimizations here are worthwhile!)
 //!
-//! 3. Mapping an `OptRefCell` to a readonly zeroed page will still let it be safely borrowable as an
-//!    empty cell. This aspect is critical to implementing indirection-less [`Slot`](super::heap::Slot)s
-//!    on platforms supporting manual memory mapping management.
-//!
 //! This code was largely copied from the Rust standard library's implementation of `RefCell` with
 //! some very minor tweaks. Thanks, Rust standard library team!
 

@@ -397,6 +397,7 @@ impl DbRoot {
 
         me
     }
+
     pub fn despawn_entity(
         &mut self,
         token: &'static MainThreadToken,
