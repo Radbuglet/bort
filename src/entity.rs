@@ -4,8 +4,7 @@ use derive_where::derive_where;
 
 use crate::{
     core::{
-        cell::{OptRef, OptRefMut},
-        heap::Slot,
+        heap::{HeapMut, HeapRef, Slot},
         token::MainThreadToken,
     },
     database::{DbEventSet, DbRoot, DbStorage, EntityDeadError, InertEntity},
@@ -19,9 +18,9 @@ use crate::{
 // === Storage === //
 
 // Aliases
-pub type CompRef<T> = OptRef<'static, T>;
+pub type CompRef<T> = HeapRef<'static, T>;
 
-pub type CompMut<T> = OptRefMut<'static, T>;
+pub type CompMut<T> = HeapMut<'static, T>;
 
 // Storage API
 pub fn storage<T: 'static>() -> Storage<T> {
