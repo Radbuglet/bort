@@ -4,6 +4,7 @@ pub mod core;
 mod database;
 pub mod debug;
 pub mod entity;
+pub mod event;
 pub mod obj;
 pub mod query;
 mod util;

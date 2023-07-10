@@ -1,6 +1,19 @@
-use std::{hash, iter};
+use std::{
+    hash::{self, Hasher},
+    iter,
+};
 
 use derive_where::derive_where;
+
+pub fn hash_one<H, E>(hasher: &H, elem: &E) -> u64
+where
+    H: hash::BuildHasher,
+    E: ?Sized + hash::Hash,
+{
+    let mut state = hasher.build_hasher();
+    elem.hash(&mut state);
+    state.finish()
+}
 
 pub fn hash_iter<H, E, I>(hasher: &H, iter: I) -> u64
 where
@@ -12,7 +25,7 @@ where
     for item in iter {
         item.hash(&mut state);
     }
-    hash::Hasher::finish(&state)
+    state.finish()
 }
 
 pub fn eq_iter<A, B, F>(a: A, b: B, mut f: F) -> bool
