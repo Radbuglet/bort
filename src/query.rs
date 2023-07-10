@@ -95,9 +95,17 @@ impl fmt::Debug for RawTag {
 
 // === Flushing === //
 
-pub fn flush() {
+#[must_use]
+pub fn try_flush() -> bool {
     let token = MainThreadToken::acquire_fmt("flush entity archetypes");
-    DbRoot::get(token).flush_archetypes(token);
+    DbRoot::get(token).flush_archetypes(token).is_ok()
+}
+
+pub fn flush() {
+    assert!(
+        try_flush(),
+        "attempted to flush the entity database while a query was active"
+    );
 }
 
 // === Queries === //
@@ -112,8 +120,10 @@ pub mod query_internals {
         crate::{
             core::token::MainThreadToken,
             database::{DbRoot, InertTag, TagList},
+            query::try_flush,
         },
         std::{
+            assert,
             hint::unreachable_unchecked,
             iter::{empty, Iterator},
             mem::drop,
@@ -171,98 +181,38 @@ pub mod query_internals {
 
 #[macro_export]
 macro_rules! query {
-	// === Event query === //
+	// === Global query === //
 	(
 		for (
-			$event_name:ident:$event_ty:ty
-			;
-			@$entity:ident
-			$(,$prefix:ident $name:ident in $tag:expr)*
+			$(@$entity:ident $(,)?)?
+			$($prefix:ident $name:ident in $tag:expr),*
 			$(,)?
 		)
 		$(+ [$($vtag:expr),*$(,)?])?
 		{
 			$($body:tt)*
 		}
-	) => {'__query: {
-		// Evaluate our tag expressions
-		$( let $name = $crate::query::query_internals::get_tag($tag); )*
+	) => {
+		{
+			$crate::query::query_internals::assert!(
+				$crate::query::query_internals::try_flush(),
+				"Attempted to run a query inside another query, which is forbidden by default. \
+				 If this behavior is intended, use the `recursive for` syntax instead of the `for` syntax."
+			);
 
-		// Determine tag list
-		let mut virtual_tags_dyn = Vec::<$crate::query::query_internals::InertTag>::new();
-		let virtual_tags_static = [
-			$($crate::query::query_internals::Option::Some($name.1),)*
-			$($($crate::query::query_internals::ExtraTagConverter::into_single($vtag, &mut virtual_tags_dyn),)*)?
-		];
-
-		// Acquire the main thread token used for our query
-        let token = $crate::query::query_internals::MainThreadToken::acquire_fmt("query entities");
-
-        // Acquire the database
-        let mut db = $crate::query::query_internals::DbRoot::get(token);
-
-		// Get an event snapshot
-		let mut event_snapshot = $crate::query::query_internals::DbRoot::get_event_snapshot(
-			&mut db.get_event_set::<$event_ty>().borrow_mut(token)
-		);
-		event_snapshot.set_archetypes(&mut db, $crate::query::query_internals::TagList {
-			static_tags: &virtual_tags_static,
-			dynamic_tags: &virtual_tags_dyn,
-		});
-
-        // Collect the necessary storages and tags
-        $( let $name = $crate::query::query_internals::get_storage(&mut db, $name); )*
-
-		// Acquire a query guard to prevent flushing
-        let _guard = db.borrow_query_guard(token);
-
-		// Drop the database to allow safe userland code involving Bort to run
-		$crate::query::query_internals::drop(db);
-
-		// Iterate through the events
-		'__query_ent: for ($entity, $event_name) in event_snapshot.query() {
-			// Convert the residuals to their target form
-			$(
-				let $name = $crate::query::query_internals::DbRoot::get_component(
-					&$name.borrow(token),
-					$entity
-				)
-				.unwrap();
-				$crate::query::query!(@__internal_xform $prefix $name token);
-			)*
-			let $entity = $entity.into_dangerous_entity();
-
-			// Run userland code, absorbing their attempt at an early return.
-			let mut did_run = false;
-			loop {
-				if did_run {
-					// The user must have used `continue`.
-					continue '__query_ent;
-				}
-				did_run = true;
-
-				let _: () = {
-					$($body)*
-				};
-
-				// The user completed the loop.
-				#[allow(unreachable_code)]
+			$crate::query! {
+				recursive for (
+					$(@$entity)?
+					$($prefix $name in $tag,)*
+				) $(+ [$($vtag,)*])?
 				{
-					continue '__query_ent;
+					$($body)*
 				}
-			}
-
-			// The user broke out of the loop.
-			#[allow(unreachable_code)]
-			{
-				break '__query;
 			}
 		}
-	}};
-
-	// === Global query === //
+	};
     (
-		for (
+		recursive for (
 			$(@$entity:ident $(,)?)?
 			$($prefix:ident $name:ident in $tag:expr),*
 			$(,)?

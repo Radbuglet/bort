@@ -1,17 +1,14 @@
-use std::{cell::RefCell, time::Duration};
+use std::cell::RefCell;
 
 use bort::{
     core::{cell::OptRefCell, heap::Heap, token::MainThreadToken},
-    flush, query, storage, OwnedEntity, OwnedObj, Tag, VirtualTag,
+    query, storage, OwnedEntity, OwnedObj, Tag, VirtualTag,
 };
 use criterion::{criterion_main, Criterion};
 use glam::Vec3;
 
 fn access_tests() {
-    let mut c = Criterion::default()
-        .warm_up_time(Duration::from_millis(100))
-        .measurement_time(Duration::from_millis(900))
-        .configure_from_args();
+    let mut c = Criterion::default().configure_from_args();
 
     c.bench_function("storage", |c| {
         c.iter(|| storage::<i32>());
@@ -120,8 +117,6 @@ fn access_tests() {
                     )
             })
             .collect::<Vec<_>>();
-
-        flush();
 
         c.iter(|| {
             query! {

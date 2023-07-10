@@ -7,7 +7,7 @@ use crate::{
         heap::{HeapMut, HeapRef, Slot},
         token::MainThreadToken,
     },
-    database::{DbEventSet, DbRoot, DbStorage, EntityDeadError, InertEntity},
+    database::{DbRoot, DbStorage, EntityDeadError, InertEntity},
     debug::AsDebugLabel,
     obj::{Obj, OwnedObj},
     query::RawTag,
@@ -113,40 +113,6 @@ impl<T: 'static> Storage<T> {
 
     pub fn has(&self, entity: Entity) -> bool {
         self.try_get_slot(entity).is_some()
-    }
-}
-
-// === EventSet === //
-
-pub fn event_set<T: 'static>() -> EventSet<T> {
-    let token = MainThreadToken::acquire_fmt("update events");
-    let mut db = DbRoot::get(token);
-
-    EventSet {
-        token: *token,
-        inner: db.get_event_set(),
-    }
-}
-
-pub struct EventSet<T: 'static> {
-    token: MainThreadToken,
-    inner: &'static DbEventSet<T>,
-}
-
-impl<T> EventSet<T> {
-    pub fn acquire() -> Self {
-        event_set::<T>()
-    }
-
-    pub fn fire(&mut self, entity: Entity, value: T) {
-        match DbRoot::get(self.token.as_ref()).fire_event(
-            &mut self.inner.borrow_mut(self.token.as_ref()),
-            entity.inert,
-            value,
-        ) {
-            Ok(()) => {}
-            Err(EntityDeadError) => panic!("Attempted to fire event on dead entity {entity:?}"),
-        }
     }
 }
 
@@ -262,10 +228,6 @@ impl Entity {
             Ok(result) => result,
             Err(EntityDeadError) => panic!("Attempted to query tags of dead entity {self:?}"),
         }
-    }
-
-    pub fn fire<E: 'static>(self, event: E) {
-        event_set::<E>().fire(self, event);
     }
 
     pub fn is_alive(self) -> bool {
@@ -416,10 +378,6 @@ impl OwnedEntity {
         self.insert(comp);
         self.tag(tag.into());
         self
-    }
-
-    pub fn fire<E: 'static>(&self, event: E) {
-        self.entity.fire(event);
     }
 
     pub fn is_alive(&self) -> bool {

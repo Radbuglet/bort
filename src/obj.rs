@@ -102,10 +102,6 @@ impl<T: 'static> Obj<T> {
         self.value.borrow_mut(token)
     }
 
-    pub fn fire<E: 'static>(self, event: E) {
-        self.entity.fire(event);
-    }
-
     pub fn destroy(self) {
         self.entity.destroy()
     }
@@ -204,10 +200,6 @@ impl<T: 'static> OwnedObj<T> {
 
     pub fn get_mut(&self) -> CompMut<T> {
         self.obj.get_mut()
-    }
-
-    pub fn fire<E: 'static>(&self, event: E) {
-        self.obj.fire(event);
     }
 
     pub fn is_alive(&self) -> bool {
