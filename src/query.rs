@@ -1,11 +1,14 @@
-use std::{any::TypeId, fmt, marker::PhantomData};
+use std::{any::TypeId, cell::RefCell, fmt, marker::PhantomData, sync::Mutex};
 
 use derive_where::derive_where;
 
 use crate::{
     core::token::MainThreadToken,
     database::{DbRoot, DbStorage, InertTag},
-    util::misc::NamedTypeId,
+    util::{
+        hash_map::{ConstSafeBuildHasherDefault, FxHashMap},
+        misc::{unpoison, NamedTypeId},
+    },
 };
 
 // === Tag === //
@@ -25,6 +28,16 @@ impl<T> Tag<T> {
         Self {
             _ty: PhantomData,
             raw: RawTag::new(NamedTypeId::of::<T>()),
+        }
+    }
+
+    pub fn global() -> Self
+    where
+        T: ManagedStaticTag,
+    {
+        Self {
+            _ty: PhantomData,
+            raw: get_static_tag_internal(NamedTypeId::of::<T>(), NamedTypeId::of::<T::Component>()),
         }
     }
 
@@ -48,6 +61,15 @@ impl VirtualTag {
     pub fn new() -> Self {
         Self {
             raw: RawTag::new(NamedTypeId::of::<VirtualTagMarker>()),
+        }
+    }
+
+    pub fn global<T: VirtualStaticTag>() -> Self {
+        Self {
+            raw: get_static_tag_internal(
+                NamedTypeId::of::<T>(),
+                NamedTypeId::of::<VirtualTagMarker>(),
+            ),
         }
     }
 
@@ -92,6 +114,33 @@ impl fmt::Debug for RawTag {
             .finish()
     }
 }
+
+// === Static Tags === //
+
+fn get_static_tag_internal(id: NamedTypeId, managed_ty: NamedTypeId) -> RawTag {
+    static TAGS: Mutex<FxHashMap<NamedTypeId, RawTag>> =
+        Mutex::new(FxHashMap::with_hasher(ConstSafeBuildHasherDefault::new()));
+
+    thread_local! {
+        static TAG_CACHE: RefCell<FxHashMap<NamedTypeId, RawTag>> = const {
+            RefCell::new(FxHashMap::with_hasher(ConstSafeBuildHasherDefault::new()))
+        };
+    }
+
+    TAG_CACHE.with(|cache| {
+        *cache.borrow_mut().entry(id).or_insert_with(|| {
+            *unpoison(TAGS.lock())
+                .entry(id)
+                .or_insert_with(|| RawTag::new(managed_ty))
+        })
+    })
+}
+
+pub trait ManagedStaticTag: Sized + 'static {
+    type Component;
+}
+
+pub trait VirtualStaticTag: Sized + 'static {}
 
 // === Flushing === //
 
