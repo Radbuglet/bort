@@ -132,7 +132,7 @@ pub trait ProcessableEventList: QueryableEventList {
 
 pub trait EventHasBehavior: Sized + 'static {
     type Context<'a>;
-    type Event: QueryableEventList;
+    type EventList: 'static + QueryableEventList<Event = Self>;
 }
 
 #[derive(Debug, Default)]
@@ -141,10 +141,10 @@ pub struct BehaviorRegistry {
 }
 
 #[rustfmt::skip]
-type BehaviorRegistryHandler<E, EL> = Vec<Box<dyn Send + Sync + Fn(
+type BehaviorRegistryHandler<E> = Vec<Box<dyn Send + Sync + Fn(
 	&BehaviorRegistry,
-	&mut EL,
-	&mut <E as EventHasBehavior>::Context<'_>
+	&mut <E as EventHasBehavior>::EventList,
+	&mut <E as EventHasBehavior>::Context<'_>,
 )>>;
 
 impl BehaviorRegistry {
@@ -154,40 +154,49 @@ impl BehaviorRegistry {
         }
     }
 
-    pub fn register<E, EL, F>(&mut self, handler: F)
-    where
-        E: EventHasBehavior,
-        EL: 'static + ProcessableEventList<Event = E>,
-        F: 'static + Send + Sync + Fn(&Self, &mut EL, &mut E::Context<'_>),
-    {
+    pub fn register<E: EventHasBehavior>(
+        &mut self,
+        handler: impl 'static + Fn(&Self, &mut E::EventList, &mut E::Context<'_>) + Send + Sync,
+    ) {
         self.handlers
             .entry(NamedTypeId::of::<E>())
-            .or_insert_with(|| Box::new(BehaviorRegistryHandler::<E, EL>::new()))
-            .downcast_mut::<BehaviorRegistryHandler<E, EL>>()
+            .or_insert_with(|| Box::new(BehaviorRegistryHandler::<E>::new()))
+            .downcast_mut::<BehaviorRegistryHandler<E>>()
             .unwrap()
             .push(Box::new(handler));
     }
 
-    pub fn process_cx<E, EL>(&self, events: &mut EL, context: &mut E::Context<'_>)
-    where
-        E: EventHasBehavior,
-        EL: 'static + ProcessableEventList<Event = E>,
+    pub fn with<E: EventHasBehavior>(
+        mut self,
+        handler: impl 'static + Fn(&Self, &mut E::EventList, &mut E::Context<'_>) + Send + Sync,
+    ) -> Self {
+        self.register(handler);
+        self
+    }
+
+    pub fn process_cx<EL>(
+        &self,
+        events: &mut EL,
+        context: &mut <EL::Event as EventHasBehavior>::Context<'_>,
+    ) where
+        EL: 'static + ProcessableEventList,
+        EL::Event: EventHasBehavior<EventList = EL>,
     {
-        let Some(handlers) = self.handlers.get(&NamedTypeId::of::<E>()) else { return };
+        let Some(handlers) = self.handlers.get(&NamedTypeId::of::<EL::Event>()) else { return };
 
         for handler in handlers
-            .downcast_ref::<BehaviorRegistryHandler<E, EL>>()
+            .downcast_ref::<BehaviorRegistryHandler<EL::Event>>()
             .unwrap()
         {
             handler(self, events, context);
         }
     }
 
-    pub fn process<'a, E, EL>(&self, events: &mut EL)
+    pub fn process<'a, EL>(&self, events: &mut EL)
     where
-        E: EventHasBehavior,
-        EL: 'static + ProcessableEventList<Event = E>,
-        E::Context<'a>: Default,
+        EL: 'static + ProcessableEventList,
+        EL::Event: EventHasBehavior<EventList = EL>,
+        <EL::Event as EventHasBehavior>::Context<'a>: Default,
     {
         self.process_cx(events, &mut Default::default());
     }
@@ -265,7 +274,7 @@ impl<E> Drop for VecEventList<E> {
     fn drop(&mut self) {
         debug_assert!(
             self.is_empty(),
-            "Leaked one or more events from an VecEventList<{}>.",
+            "Leaked one or more events from a VecEventList<{}>.",
             type_name::<E>()
         );
     }

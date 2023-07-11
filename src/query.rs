@@ -246,11 +246,11 @@ macro_rules! query {
 			$crate::query::query_internals::assert!(
 				$crate::query::query_internals::try_flush(),
 				"Attempted to run a query inside another query, which is forbidden by default. \
-				 If this behavior is intended, use the `recursive for` syntax instead of the `for` syntax."
+				 If this behavior is intended, use the `rec for` syntax instead of the `for` syntax."
 			);
 
 			$crate::query! {
-				recursive for (
+				rec for (
 					$(@$entity)?
 					$($prefix $name in $tag,)*
 				) $(+ [$($vtag,)*])?
@@ -261,7 +261,7 @@ macro_rules! query {
 		}
 	};
     (
-		recursive for (
+		rec for (
 			$(@$entity:ident $(,)?)?
 			$($prefix:ident $name:ident in $tag:expr),*
 			$(,)?
