@@ -1,4 +1,9 @@
-use std::{any::Any, fmt, hash, ops::ControlFlow};
+use std::{
+    any::{type_name, Any},
+    cell::RefCell,
+    fmt, hash, mem,
+    ops::ControlFlow,
+};
 
 use derive_where::derive_where;
 
@@ -66,8 +71,10 @@ impl<V> fmt::Debug for QueryVersionMap<V> {
 }
 
 impl<V> QueryVersionMap<V> {
-    pub fn new() -> Self {
-        Self::default()
+    pub const fn new() -> Self {
+        Self {
+            versions: FxHashMap::with_hasher(ConstSafeBuildHasherDefault::new()),
+        }
     }
 
     pub fn clear(&mut self) {
@@ -106,34 +113,39 @@ impl<V> QueryVersionMap<V> {
     }
 }
 
-pub trait QueryableEvent {
+pub trait QueryableEventList {
     type Event;
-    type Proxy<'a>: EventTarget<Self::Event>;
 
-    fn query_raw<T: 'static, F>(&self, version_id: T, tags: &[RawTag], handler: F) -> bool
+    fn query_raw<K, F>(&self, version_id: K, tags: &[RawTag], handler: F)
     where
-        F: FnMut(Entity, &Self::Event, &mut Self::Proxy<'_>) -> ControlFlow<()>;
-
-    fn poll_recursion(&mut self) -> bool;
+        K: 'static + Send + Sync + hash::Hash + PartialEq,
+        F: FnMut(Entity, &Self::Event) -> ControlFlow<()>;
 }
 
-pub trait ProcessableEvent: QueryableEvent {
-    fn is_empty(&self);
+pub trait ProcessableEventList: QueryableEventList {
+    fn is_empty(&self) -> bool;
 
     fn clear(&mut self);
 }
 
 // === BehaviorRegistry === //
 
-pub trait EventHasBehavior: Sized {
+pub trait EventHasBehavior: Sized + 'static {
     type Context<'a>;
-    type Event: QueryableEvent;
+    type Event: QueryableEventList;
 }
 
 #[derive(Debug, Default)]
 pub struct BehaviorRegistry {
     handlers: FxHashMap<NamedTypeId, Box<dyn Any + Send + Sync>>,
 }
+
+#[rustfmt::skip]
+type BehaviorRegistryHandler<E, EL> = Vec<Box<dyn Send + Sync + Fn(
+	&BehaviorRegistry,
+	&mut EL,
+	&mut <E as EventHasBehavior>::Context<'_>
+)>>;
 
 impl BehaviorRegistry {
     pub const fn new() -> Self {
@@ -142,28 +154,119 @@ impl BehaviorRegistry {
         }
     }
 
-    pub fn register(&mut self) {
-        todo!();
-    }
-
-    pub fn unregister(&mut self) {
-        todo!();
-    }
-
-    pub fn process_cx<E, EL>(&mut self, events: &mut EL, context: E::Context<'_>)
+    pub fn register<E, EL, F>(&mut self, handler: F)
     where
         E: EventHasBehavior,
-        EL: ProcessableEvent<Event = E>,
+        EL: 'static + ProcessableEventList<Event = E>,
+        F: 'static + Send + Sync + Fn(&Self, &mut EL, &mut E::Context<'_>),
     {
-        todo!();
+        self.handlers
+            .entry(NamedTypeId::of::<E>())
+            .or_insert_with(|| Box::new(BehaviorRegistryHandler::<E, EL>::new()))
+            .downcast_mut::<BehaviorRegistryHandler<E, EL>>()
+            .unwrap()
+            .push(Box::new(handler));
     }
 
-    pub fn process<'a, E, EL>(&mut self, events: &mut EL)
+    pub fn process_cx<E, EL>(&self, events: &mut EL, context: &mut E::Context<'_>)
     where
         E: EventHasBehavior,
-        EL: ProcessableEvent<Event = E>,
+        EL: 'static + ProcessableEventList<Event = E>,
+    {
+        let Some(handlers) = self.handlers.get(&NamedTypeId::of::<E>()) else { return };
+
+        for handler in handlers
+            .downcast_ref::<BehaviorRegistryHandler<E, EL>>()
+            .unwrap()
+        {
+            handler(self, events, context);
+        }
+    }
+
+    pub fn process<'a, E, EL>(&self, events: &mut EL)
+    where
+        E: EventHasBehavior,
+        EL: 'static + ProcessableEventList<Event = E>,
         E::Context<'a>: Default,
     {
-        self.process_cx(events, Default::default());
+        self.process_cx(events, &mut Default::default());
+    }
+}
+
+// === VecEventList === //
+
+#[derive(Debug)]
+#[derive_where(Default)]
+pub struct VecEventList<E> {
+    process_list: RefCell<QueryVersionMap<usize>>,
+    events: Vec<(Entity, E)>,
+    owned: Vec<OwnedEntity>,
+}
+
+impl<E> VecEventList<E> {
+    pub const fn new() -> Self {
+        Self {
+            process_list: RefCell::new(QueryVersionMap::new()),
+            events: Vec::new(),
+            owned: Vec::new(),
+        }
+    }
+}
+
+impl<E, C> EventTarget<E, C> for VecEventList<E> {
+    fn fire_cx(&mut self, target: Entity, event: E, _context: C) {
+        self.events.push((target, event));
+    }
+
+    fn fire_cx_owned(&mut self, target: OwnedEntity, event: E, context: C) {
+        let (target, target_handle) = target.split_guard();
+        self.owned.push(target);
+        self.fire_cx(target_handle, event, context);
+    }
+}
+
+impl<E> QueryableEventList for VecEventList<E> {
+    type Event = E;
+
+    fn query_raw<K, F>(&self, version_id: K, tags: &[RawTag], mut handler: F)
+    where
+        K: 'static + Send + Sync + hash::Hash + PartialEq,
+        F: FnMut(Entity, &Self::Event) -> ControlFlow<()>,
+    {
+        let version = mem::replace(
+            &mut *self.process_list.borrow_mut().entry(version_id, || 0),
+            self.events.len(),
+        );
+
+        for (entity, event) in &self.events[version..] {
+            if tags.iter().all(|&tag| entity.is_tagged(tag)) {
+                match handler(*entity, event) {
+                    ControlFlow::Continue(()) => {}
+                    ControlFlow::Break(()) => break,
+                }
+            }
+        }
+    }
+}
+
+impl<E> ProcessableEventList for VecEventList<E> {
+    fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+
+    fn clear(&mut self) {
+        self.process_list.get_mut().clear();
+        self.events.clear();
+        self.owned.clear();
+    }
+}
+
+impl<E> Drop for VecEventList<E> {
+    fn drop(&mut self) {
+        debug_assert!(
+            self.is_empty(),
+            "Leaked one or more events from an VecEventList<{}>.",
+            type_name::<E>()
+        );
     }
 }
