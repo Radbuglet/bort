@@ -1,8 +1,9 @@
 use std::{
     any::{type_name, Any},
+    cell::RefCell,
     fmt, hash, mem,
     num::NonZeroU64,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use derive_where::derive_where;
@@ -16,13 +17,13 @@ use crate::{
     },
     debug::DebugLabel,
     entity::Entity,
-    query::{RawTag, VirtualTagMarker},
+    query::RawTag,
     util::{
         arena::{FreeListArena, LeakyArena, SpecArena},
         block::{BlockAllocator, BlockReservation},
-        hash_map::{FxHashMap, FxHashSet, NopHashMap},
+        hash_map::{ConstSafeBuildHasherDefault, FxHashMap, FxHashSet, NopHashMap},
         iter::{filter_duplicates, merge_iters},
-        misc::{const_new_nz_u64, leak, xorshift64, AnyDowncastExt, NamedTypeId, RawFmt},
+        misc::{const_new_nz_u64, leak, unpoison, xorshift64, AnyDowncastExt, NamedTypeId, RawFmt},
         set_map::{SetMap, SetMapArena, SetMapPtr},
     },
 };
@@ -222,9 +223,10 @@ struct DbArchetype {
 impl DbArchetype {
     fn new(tags: &[InertTag]) -> Self {
         Self {
-            managed: FxHashSet::from_iter(tags.iter().filter_map(|tag| {
-                (tag.ty != NamedTypeId::of::<VirtualTagMarker>()).then_some(tag.ty)
-            })),
+            managed: FxHashSet::from_iter(
+                tags.iter()
+                    .filter_map(|tag| (tag.ty != InertTag::inert_ty_id()).then_some(tag.ty)),
+            ),
             entity_heaps: Vec::new(),
             last_heap_len: 0,
         }
@@ -279,6 +281,12 @@ pub struct InertTag {
 }
 
 impl InertTag {
+    pub fn inert_ty_id() -> NamedTypeId {
+        struct VirtualTagMarker;
+
+        NamedTypeId::of::<VirtualTagMarker>()
+    }
+
     pub fn into_dangerous_tag(self) -> RawTag {
         RawTag(self)
     }
@@ -492,7 +500,7 @@ impl DbRoot {
 
     fn prepare_query_common(
         &mut self,
-        tags: TagList,
+        tags: ReifiedTagList,
         mut f: impl FnMut(&mut DbArchetypeArena, DbArchetypeRef),
     ) {
         if tags.iter().next().is_none() {
@@ -549,7 +557,10 @@ impl DbRoot {
         }
     }
 
-    pub fn prepare_named_entity_query(&mut self, tags: TagList) -> Vec<QueryChunkWithEntities> {
+    pub fn prepare_named_entity_query(
+        &mut self,
+        tags: ReifiedTagList,
+    ) -> Vec<QueryChunkWithEntities> {
         let mut chunks = Vec::new();
 
         self.prepare_query_common(tags, |arena, arch_id| {
@@ -564,7 +575,7 @@ impl DbRoot {
         chunks
     }
 
-    pub fn prepare_anonymous_entity_query(&mut self, tags: TagList) -> Vec<QueryChunk> {
+    pub fn prepare_anonymous_entity_query(&mut self, tags: ReifiedTagList) -> Vec<QueryChunk> {
         let mut chunks = Vec::new();
 
         self.prepare_query_common(tags, |arena, arch_id| {
@@ -1135,6 +1146,25 @@ impl<T: 'static> DbAnyStorage for DbStorage<T> {
     }
 }
 
+pub fn get_global_tag(id: NamedTypeId, managed_ty: NamedTypeId) -> RawTag {
+    static TAGS: Mutex<FxHashMap<NamedTypeId, RawTag>> =
+        Mutex::new(FxHashMap::with_hasher(ConstSafeBuildHasherDefault::new()));
+
+    thread_local! {
+        static TAG_CACHE: RefCell<FxHashMap<NamedTypeId, RawTag>> = const {
+            RefCell::new(FxHashMap::with_hasher(ConstSafeBuildHasherDefault::new()))
+        };
+    }
+
+    TAG_CACHE.with(|cache| {
+        *cache.borrow_mut().entry(id).or_insert_with(|| {
+            *unpoison(TAGS.lock())
+                .entry(id)
+                .or_insert_with(|| RawTag::new(managed_ty))
+        })
+    })
+}
+
 // === Public helpers === //
 
 #[derive(Debug)]
@@ -1197,12 +1227,12 @@ impl QueryChunk {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct TagList<'a> {
+pub struct ReifiedTagList<'a> {
     pub static_tags: &'a [Option<InertTag>],
     pub dynamic_tags: &'a [InertTag],
 }
 
-impl<'a> TagList<'a> {
+impl<'a> ReifiedTagList<'a> {
     pub fn iter(self) -> impl Iterator<Item = &'a InertTag> + Clone + 'a {
         self.static_tags
             .iter()

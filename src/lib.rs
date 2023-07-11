@@ -13,6 +13,10 @@ pub mod prelude {
     pub use crate::{
         core::cell::{OptRef, OptRefMut},
         entity::{storage, CompMut, CompRef, Entity, OwnedEntity, Storage},
+        event::{
+            BehaviorRegistry, EventHasBehavior, EventTarget, ProcessableEventList,
+            QueryableEventList, VecEventList,
+        },
         obj::{Obj, OwnedObj},
         query::{flush, query, RawTag, Tag, VirtualTag},
     };

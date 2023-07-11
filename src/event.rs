@@ -20,34 +20,20 @@ use crate::{
 // === EventTarget === //
 
 pub trait EventTarget<E, C = ()> {
-    fn fire_cx(&mut self, target: Entity, event: E, context: C);
+    fn fire(&mut self, target: Entity, event: E, context: C);
 
-    fn fire_cx_owned(&mut self, target: OwnedEntity, event: E, context: C);
-
-    fn fire(&mut self, target: Entity, event: E)
-    where
-        C: Default,
-    {
-        self.fire_cx(target, event, C::default());
-    }
-
-    fn fire_owned(&mut self, target: OwnedEntity, event: E)
-    where
-        C: Default,
-    {
-        self.fire_cx_owned(target, event, C::default());
-    }
+    fn fire_owned(&mut self, target: OwnedEntity, event: E, context: C);
 }
 
 impl<E, C, F> EventTarget<E, C> for F
 where
     F: FnMut(Entity, E, C),
 {
-    fn fire_cx(&mut self, target: Entity, event: E, context: C) {
+    fn fire(&mut self, target: Entity, event: E, context: C) {
         self(target, event, context);
     }
 
-    fn fire_cx_owned(&mut self, target: OwnedEntity, event: E, context: C) {
+    fn fire_owned(&mut self, target: OwnedEntity, event: E, context: C) {
         self(target.entity(), event, context);
     }
 }
@@ -116,9 +102,11 @@ impl<V> QueryVersionMap<V> {
 pub trait QueryableEventList {
     type Event;
 
-    fn query_raw<K, F>(&self, version_id: K, tags: &[RawTag], handler: F)
+    fn query_raw<K, I, F>(&self, version_id: K, tags: I, handler: F)
     where
         K: 'static + Send + Sync + hash::Hash + PartialEq,
+        I: IntoIterator<Item = RawTag>,
+        I::IntoIter: Clone,
         F: FnMut(Entity, &Self::Event) -> ControlFlow<()>;
 }
 
@@ -223,32 +211,35 @@ impl<E> VecEventList<E> {
 }
 
 impl<E, C> EventTarget<E, C> for VecEventList<E> {
-    fn fire_cx(&mut self, target: Entity, event: E, _context: C) {
+    fn fire(&mut self, target: Entity, event: E, _context: C) {
         self.events.push((target, event));
     }
 
-    fn fire_cx_owned(&mut self, target: OwnedEntity, event: E, context: C) {
+    fn fire_owned(&mut self, target: OwnedEntity, event: E, context: C) {
         let (target, target_handle) = target.split_guard();
         self.owned.push(target);
-        self.fire_cx(target_handle, event, context);
+        self.fire(target_handle, event, context);
     }
 }
 
 impl<E> QueryableEventList for VecEventList<E> {
     type Event = E;
 
-    fn query_raw<K, F>(&self, version_id: K, tags: &[RawTag], mut handler: F)
+    fn query_raw<K, I, F>(&self, version_id: K, tags: I, mut handler: F)
     where
         K: 'static + Send + Sync + hash::Hash + PartialEq,
+        I: IntoIterator<Item = RawTag>,
+        I::IntoIter: Clone,
         F: FnMut(Entity, &Self::Event) -> ControlFlow<()>,
     {
+        let tags = tags.into_iter();
         let version = mem::replace(
             &mut *self.process_list.borrow_mut().entry(version_id, || 0),
             self.events.len(),
         );
 
         for (entity, event) in &self.events[version..] {
-            if tags.iter().all(|&tag| entity.is_tagged(tag)) {
+            if tags.clone().all(|tag| entity.is_tagged(tag)) {
                 match handler(*entity, event) {
                     ControlFlow::Continue(()) => {}
                     ControlFlow::Break(()) => break,

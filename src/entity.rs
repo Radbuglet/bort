@@ -26,19 +26,26 @@ pub type CompMut<T> = HeapMut<'static, T>;
 pub fn storage<T: 'static>() -> Storage<T> {
     let token = MainThreadToken::acquire_fmt("fetch entity component data");
 
-    Storage {
-        inner: DbRoot::get(token).get_storage::<T>(),
-        token: *token,
-    }
+    Storage::from_database(token, DbRoot::get(token).get_storage::<T>())
 }
 
 #[derive_where(Debug, Copy, Clone)]
 pub struct Storage<T: 'static> {
-    inner: &'static DbStorage<T>,
     token: MainThreadToken,
+    inner: &'static DbStorage<T>,
 }
 
 impl<T: 'static> Storage<T> {
+    pub(crate) fn from_database(
+        token: &'static MainThreadToken,
+        inner: &'static DbStorage<T>,
+    ) -> Self {
+        Self {
+            token: *token,
+            inner,
+        }
+    }
+
     pub fn acquire() -> Storage<T> {
         storage::<T>()
     }

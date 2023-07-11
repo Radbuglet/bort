@@ -509,7 +509,6 @@ impl<T> OptRefCell<T> {
                 Ok(Some(mem::replace(curr_value, value)))
             } else {
                 self.state.set(EMPTY);
-                drop(curr_value);
                 Ok(Some(unsafe { value_container.assume_init_read() }))
             }
         } else if state == EMPTY {

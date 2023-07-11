@@ -1,21 +1,15 @@
-use std::{any::TypeId, cell::RefCell, fmt, marker::PhantomData, sync::Mutex};
+use std::{any::TypeId, fmt, marker::PhantomData};
 
 use derive_where::derive_where;
 
 use crate::{
     core::token::MainThreadToken,
-    database::{DbRoot, DbStorage, InertTag},
-    util::{
-        hash_map::{ConstSafeBuildHasherDefault, FxHashMap},
-        misc::{unpoison, NamedTypeId},
-    },
+    database::{get_global_tag, DbRoot, DbStorage, InertTag},
+    entity::Storage,
+    util::misc::NamedTypeId,
 };
 
 // === Tag === //
-
-pub(crate) struct VirtualTagMarker {
-    _never: (),
-}
 
 #[derive_where(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Tag<T: 'static> {
@@ -33,11 +27,11 @@ impl<T> Tag<T> {
 
     pub fn global() -> Self
     where
-        T: ManagedStaticTag,
+        T: ManagedGlobalTag,
     {
         Self {
             _ty: PhantomData,
-            raw: get_static_tag_internal(NamedTypeId::of::<T>(), NamedTypeId::of::<T::Component>()),
+            raw: get_global_tag(NamedTypeId::of::<T>(), NamedTypeId::of::<T::Component>()),
         }
     }
 
@@ -60,16 +54,13 @@ pub struct VirtualTag {
 impl VirtualTag {
     pub fn new() -> Self {
         Self {
-            raw: RawTag::new(NamedTypeId::of::<VirtualTagMarker>()),
+            raw: RawTag::new(InertTag::inert_ty_id()),
         }
     }
 
-    pub fn global<T: VirtualStaticTag>() -> Self {
+    pub fn global<T: VirtualGlobalTag>() -> Self {
         Self {
-            raw: get_static_tag_internal(
-                NamedTypeId::of::<T>(),
-                NamedTypeId::of::<VirtualTagMarker>(),
-            ),
+            raw: get_global_tag(NamedTypeId::of::<T>(), InertTag::inert_ty_id()),
         }
     }
 
@@ -117,30 +108,11 @@ impl fmt::Debug for RawTag {
 
 // === Static Tags === //
 
-fn get_static_tag_internal(id: NamedTypeId, managed_ty: NamedTypeId) -> RawTag {
-    static TAGS: Mutex<FxHashMap<NamedTypeId, RawTag>> =
-        Mutex::new(FxHashMap::with_hasher(ConstSafeBuildHasherDefault::new()));
-
-    thread_local! {
-        static TAG_CACHE: RefCell<FxHashMap<NamedTypeId, RawTag>> = const {
-            RefCell::new(FxHashMap::with_hasher(ConstSafeBuildHasherDefault::new()))
-        };
-    }
-
-    TAG_CACHE.with(|cache| {
-        *cache.borrow_mut().entry(id).or_insert_with(|| {
-            *unpoison(TAGS.lock())
-                .entry(id)
-                .or_insert_with(|| RawTag::new(managed_ty))
-        })
-    })
-}
-
-pub trait ManagedStaticTag: Sized + 'static {
+pub trait ManagedGlobalTag: Sized + 'static {
     type Component;
 }
 
-pub trait VirtualStaticTag: Sized + 'static {}
+pub trait VirtualGlobalTag: Sized + 'static {}
 
 // === Flushing === //
 
@@ -168,7 +140,8 @@ pub mod query_internals {
     pub use {
         crate::{
             core::token::MainThreadToken,
-            database::{DbRoot, InertTag, TagList},
+            database::{DbRoot, InertTag, ReifiedTagList},
+            event::QueryableEventList,
             query::try_flush,
         },
         std::{
@@ -176,6 +149,7 @@ pub mod query_internals {
             hint::unreachable_unchecked,
             iter::{empty, Iterator},
             mem::drop,
+            ops::ControlFlow,
             option::Option,
             vec::Vec,
         },
@@ -193,6 +167,13 @@ pub mod query_internals {
         _infer: (Tag<T>, InertTag),
     ) -> &'static DbStorage<T> {
         db.get_storage::<T>()
+    }
+
+    pub fn inner_storage_to_api_storage<T: 'static>(
+        token: &'static MainThreadToken,
+        inner: &'static DbStorage<T>,
+    ) -> Storage<T> {
+        Storage::from_database(token, inner)
     }
 
     pub trait ExtraTagConverter {
@@ -230,6 +211,94 @@ pub mod query_internals {
 
 #[macro_export]
 macro_rules! query {
+	// === Event query === //
+	(
+		for (
+			$event_name:ident in $event_src:expr
+			;
+			$(@$entity:ident $(,)?)?
+			$($prefix:ident $name:ident in $tag:expr),*
+			$(,)?
+		)
+		$(+ [$($vtag:expr),*$(,)?])?
+		{
+			$($body:tt)*
+		}
+	) => {'__query: {
+		#[derive(Hash, Eq, PartialEq)]
+		struct QueryDiscriminator;
+
+		// Evaluate our tag expressions
+		$( let $name = $crate::query::query_internals::get_tag($tag); )*
+
+		// Determine tag list
+		let mut virtual_tags_dyn = Vec::<$crate::query::query_internals::InertTag>::new();
+		let virtual_tags_static = [
+			$($crate::query::query_internals::Option::Some($name.1),)*
+			$($($crate::query::query_internals::ExtraTagConverter::into_single($vtag, &mut virtual_tags_dyn),)*)?
+		];
+
+		let tag_list = $crate::query::query_internals::ReifiedTagList {
+			static_tags: &virtual_tags_static,
+			dynamic_tags: &virtual_tags_dyn,
+		};
+
+		// Acquire storages for all tags we care about
+        let token = $crate::query::query_internals::MainThreadToken::acquire_fmt("query entities");
+        let mut db = $crate::query::query_internals::DbRoot::get(token);
+
+		$(
+			let $name = $crate::query::query_internals::get_storage(&mut db, $name);
+			let $name = $crate::query::query_internals::inner_storage_to_api_storage(token, $name);
+		)*
+		$crate::query::query_internals::drop(db);
+
+		// Run the event handler
+		$crate::query::query_internals::QueryableEventList::query_raw(
+			&$event_src,
+			QueryDiscriminator,
+			$crate::query::query_internals::Iterator::map(
+				tag_list.iter(),
+				|inert_tag| inert_tag.into_dangerous_tag()
+			),
+			|entity, $event_name| {
+				// Inject all the necessary context
+				$(
+					let $name = $name.get_slot(entity);
+					$crate::query::query!(@__internal_xform $prefix $name token);
+				)*
+				$( let $entity = entity; )?
+
+				// Handle breaks
+				// TODO: Can we also handle `return`s?
+				let mut did_run = false;
+				loop {
+					if did_run {
+						// The user must have used `continue`.
+						return $crate::query::query_internals::ControlFlow::Continue(());
+					}
+					did_run = true;
+
+					let _: () = {
+						$($body)*
+					};
+
+					// The user completed the loop.
+					#[allow(unreachable_code)]
+					{
+						return $crate::query::query_internals::ControlFlow::Continue(());
+					}
+				}
+
+				// The user broke out of the loop.
+				#[allow(unreachable_code)]
+				{
+					$crate::query::query_internals::ControlFlow::Continue(())
+				}
+			}
+		)
+	}};
+
 	// === Global query === //
 	(
 		for (
@@ -241,27 +310,48 @@ macro_rules! query {
 		{
 			$($body:tt)*
 		}
-	) => {
-		{
-			$crate::query::query_internals::assert!(
-				$crate::query::query_internals::try_flush(),
-				"Attempted to run a query inside another query, which is forbidden by default. \
-				 If this behavior is intended, use the `rec for` syntax instead of the `for` syntax."
-			);
+	) => {{
+		$crate::query::query_internals::assert!(
+			$crate::query::query_internals::try_flush(),
+			"Attempted to run a query inside another query, which is forbidden by default. \
+				If this behavior is intended, use the `rec for` syntax instead of the `for` syntax."
+		);
 
-			$crate::query! {
-				rec for (
-					$(@$entity)?
-					$($prefix $name in $tag,)*
-				) $(+ [$($vtag,)*])?
-				{
-					$($body)*
-				}
+		$crate::query! {
+			rec for (
+				$(@$entity)?
+				$($prefix $name in $tag,)*
+			) $(+ [$($vtag,)*])?
+			{
+				$($body)*
 			}
 		}
-	};
-    (
+	}};
+	(
 		rec for (
+			$(@$entity:ident $(,)?)?
+			$($prefix:ident $name:ident in $tag:expr),*
+			$(,)?
+		)
+		$(+ [$($vtag:expr),*$(,)?])?
+		{
+			$($body:tt)*
+		}
+	) => {{
+		let _ = $crate::query::query_internals::try_flush();
+
+		$crate::query! {
+			noflush for (
+				$(@$entity)?
+				$($prefix $name in $tag,)*
+			) $(+ [$($vtag,)*])?
+			{
+				$($body)*
+			}
+		}
+	}};
+    (
+		noflush for (
 			$(@$entity:ident $(,)?)?
 			$($prefix:ident $name:ident in $tag:expr),*
 			$(,)?
@@ -295,13 +385,13 @@ macro_rules! query {
 			@__internal_switch;
 			cond: {$(@$entity)?}
 			true: {
-				db.prepare_named_entity_query($crate::query::query_internals::TagList {
+				db.prepare_named_entity_query($crate::query::query_internals::ReifiedTagList {
 					static_tags: &virtual_tags_static,
 					dynamic_tags: &virtual_tags_dyn,
 				})
 			}
 			false: {
-				db.prepare_anonymous_entity_query($crate::query::query_internals::TagList {
+				db.prepare_anonymous_entity_query($crate::query::query_internals::ReifiedTagList {
 					static_tags: &virtual_tags_static,
 					dynamic_tags: &virtual_tags_dyn,
 				})
