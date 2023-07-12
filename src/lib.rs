@@ -1,5 +1,6 @@
 #![deny(unsafe_code)] // Unsafe code is only permitted in `core`.
 
+pub mod behavior;
 pub mod core;
 mod database;
 pub mod debug;
@@ -13,10 +14,7 @@ pub mod prelude {
     pub use crate::{
         core::cell::{OptRef, OptRefMut},
         entity::{storage, CompMut, CompRef, Entity, OwnedEntity, Storage},
-        event::{
-            BehaviorRegistry, EventHasBehavior, EventTarget, ProcessableEventList,
-            QueryableEventList, VecEventList,
-        },
+        event::{EventTarget, ProcessableEventList, QueryableEventList, VecEventList},
         obj::{Obj, OwnedObj},
         query::{flush, query, ManagedGlobalTag, RawTag, Tag, VirtualGlobalTag, VirtualTag},
     };

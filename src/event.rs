@@ -13,7 +13,6 @@ use crate::{
     util::{
         hash_map::{ConstSafeBuildHasherDefault, FxHashMap},
         iter::hash_one,
-        misc::NamedTypeId,
     },
 };
 
@@ -114,80 +113,6 @@ pub trait ProcessableEventList: QueryableEventList {
     fn is_empty(&self) -> bool;
 
     fn clear(&mut self);
-}
-
-// === BehaviorRegistry === //
-
-pub trait EventHasBehavior: Sized + 'static {
-    type Context<'a>;
-    type EventList: 'static + QueryableEventList<Event = Self>;
-}
-
-#[derive(Debug, Default)]
-pub struct BehaviorRegistry {
-    handlers: FxHashMap<NamedTypeId, Box<dyn Any + Send + Sync>>,
-}
-
-#[rustfmt::skip]
-type BehaviorRegistryHandler<E> = Vec<Box<dyn Send + Sync + Fn(
-	&BehaviorRegistry,
-	&mut <E as EventHasBehavior>::EventList,
-	&mut <E as EventHasBehavior>::Context<'_>,
-)>>;
-
-impl BehaviorRegistry {
-    pub const fn new() -> Self {
-        Self {
-            handlers: FxHashMap::with_hasher(ConstSafeBuildHasherDefault::new()),
-        }
-    }
-
-    pub fn register<E: EventHasBehavior>(
-        &mut self,
-        handler: impl 'static + Fn(&Self, &mut E::EventList, &mut E::Context<'_>) + Send + Sync,
-    ) {
-        self.handlers
-            .entry(NamedTypeId::of::<E>())
-            .or_insert_with(|| Box::new(BehaviorRegistryHandler::<E>::new()))
-            .downcast_mut::<BehaviorRegistryHandler<E>>()
-            .unwrap()
-            .push(Box::new(handler));
-    }
-
-    pub fn with<E: EventHasBehavior>(
-        mut self,
-        handler: impl 'static + Fn(&Self, &mut E::EventList, &mut E::Context<'_>) + Send + Sync,
-    ) -> Self {
-        self.register(handler);
-        self
-    }
-
-    pub fn process_cx<EL>(
-        &self,
-        events: &mut EL,
-        context: &mut <EL::Event as EventHasBehavior>::Context<'_>,
-    ) where
-        EL: 'static + ProcessableEventList,
-        EL::Event: EventHasBehavior<EventList = EL>,
-    {
-        let Some(handlers) = self.handlers.get(&NamedTypeId::of::<EL::Event>()) else { return };
-
-        for handler in handlers
-            .downcast_ref::<BehaviorRegistryHandler<EL::Event>>()
-            .unwrap()
-        {
-            handler(self, events, context);
-        }
-    }
-
-    pub fn process<'a, EL>(&self, events: &mut EL)
-    where
-        EL: 'static + ProcessableEventList,
-        EL::Event: EventHasBehavior<EventList = EL>,
-        <EL::Event as EventHasBehavior>::Context<'a>: Default,
-    {
-        self.process_cx(events, &mut Default::default());
-    }
 }
 
 // === VecEventList === //
