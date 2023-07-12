@@ -203,8 +203,16 @@ pub mod query_internals {
         I::Item: Into<RawTag>,
     {
         fn into_single(self, extra: &mut Vec<InertTag>) -> Option<InertTag> {
-            extra.extend(self.into_iter().map(|v| v.into().0));
-            None
+            let mut iter = self.into_iter();
+
+            if let Some(first) = iter.next() {
+                let first = first.into().0;
+                extra.extend(iter.map(|v| v.into().0));
+
+                Some(first)
+            } else {
+                None
+            }
         }
     }
 }

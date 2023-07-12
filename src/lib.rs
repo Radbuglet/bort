@@ -18,7 +18,7 @@ pub mod prelude {
             QueryableEventList, VecEventList,
         },
         obj::{Obj, OwnedObj},
-        query::{flush, query, RawTag, Tag, VirtualTag},
+        query::{flush, query, ManagedGlobalTag, RawTag, Tag, VirtualGlobalTag, VirtualTag},
     };
 }
 
