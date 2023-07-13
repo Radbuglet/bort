@@ -12,7 +12,7 @@ mod util;
 
 pub mod prelude {
     pub use crate::{
-        core::cell::{OptRef, OptRefMut},
+        behavior::{delegate, derive_multiplexed_handler, BehaviorRegistry, HasBehavior},
         entity::{storage, CompMut, CompRef, Entity, OwnedEntity, Storage},
         event::{EventTarget, ProcessableEventList, QueryableEventList, VecEventList},
         obj::{Obj, OwnedObj},

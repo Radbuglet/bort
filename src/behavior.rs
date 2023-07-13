@@ -92,6 +92,7 @@ macro_rules! delegate {
 				&$inj_lt:lifetime self [$($inj_name:ident: $inj:ty),* $(,)?]
 				$(, $para_name:ident: $para:ty)* $(,)?
 			) $(-> $ret:ty)?
+		$(as deriving $deriving:path)*
 		$(where $($where_token:tt)*)?
 	) => {
 		$crate::behavior::delegate! {
@@ -103,6 +104,7 @@ macro_rules! delegate {
 					$($inj_name: $inj,)*
 					$($para_name: $para,)*
 				) $(-> $ret)?
+			$(as deriving $deriving)*
 			$(where $($where_token)*)?
 		}
 
@@ -185,6 +187,7 @@ macro_rules! delegate {
 				$(<$($fn_lt:lifetime),* $(,)?>)?
 			)?
 			($($para_name:ident: $para:ty),* $(,)?) $(-> $ret:ty)?
+		$(as deriving $deriving:path)*
 		$(where $($where_token:tt)*)?
 	) => {
 		$(#[$attr_meta])*
@@ -290,7 +293,75 @@ macro_rules! delegate {
 				}
 			}
 		}
+
+		$crate::behavior::delegate! {
+			@__internal_forward_derives
+
+			$(#[$attr_meta])*
+			$vis fn $name
+				$(
+					<$($generic,)*>
+					$(<$($fn_lt,)*>)?
+				)?
+				($($para_name: $para,)*) $(-> $ret)?
+			$(as deriving $deriving)*
+			$(where $($where_token)*)?
+		}
 	};
+
+	// === Helpers === //
+	(
+		@__internal_forward_derives
+
+		$(#[$attr_meta:meta])*
+		$vis:vis fn $name:ident
+			$(
+				<$($generic:ident),* $(,)?>
+				$(<$($fn_lt:lifetime),* $(,)?>)?
+			)?
+			($($para_name:ident: $para:ty),* $(,)?) $(-> $ret:ty)?
+		as deriving $first_deriving:path
+		$(as deriving $next_deriving:path)*
+		$(where $($where_token:tt)*)?
+	) => {
+		$first_deriving! {
+			$(#[$attr_meta])*
+			$vis fn $name
+				$(
+					<$($generic,)*>
+					$(<$($fn_lt,)*>)?
+				)?
+				($($para_name: $para,)*) $(-> $ret)?
+			$(where $($where_token)*)?
+		}
+
+		$crate::behavior::delegate! {
+			@__internal_forward_derives
+
+			$(#[$attr_meta])*
+			$vis fn $name
+				$(
+					<$($generic,)*>
+					$(<$($fn_lt,)*>)?
+				)?
+				($($para_name: $para,)*) $(-> $ret)?
+			$(as deriving $next_deriving)*
+			$(where $($where_token)*)?
+		}
+	};
+	(
+		@__internal_forward_derives
+
+		$(#[$attr_meta:meta])*
+		$vis:vis fn $name:ident
+			$(
+				<$($generic:ident),* $(,)?>
+				$(<$($fn_lt:lifetime),* $(,)?>)?
+			)?
+			($($para_name:ident: $para:ty),* $(,)?) $(-> $ret:ty)?
+		$(where $($where_token:tt)*)?
+	) => { /* base case */};
+
 	(@__internal_or_unit $ty:ty) => { $ty };
 	(@__internal_or_unit) => { () };
 }
@@ -360,10 +431,9 @@ impl BehaviorRegistry {
     pub fn process_events<EL: ProcessableEventList, C>(&self, events: &mut EL)
     where
         EL::Event: HasBehavior,
-        for<'a> &'a EL: ContextForBehaviorDelegate<<EL::Event as HasBehavior>::Delegate>,
+        for<'a> (&'a EL, ()): ContextForBehaviorDelegate<<EL::Event as HasBehavior>::Delegate>,
     {
-        self.process::<EL::Event>(&*events);
-        events.clear();
+        self.process_events_cx(events, ());
     }
 
     pub fn process_events_cx<EL: ProcessableEventList, C>(&self, events: &mut EL, cx: C)
@@ -378,16 +448,43 @@ impl BehaviorRegistry {
 
 // === Behavior Delegates === //
 
-delegate! {
-    pub fn ContextlessEventHandler<E>(bhv: &BehaviorRegistry, events: &E)
+#[macro_export]
+macro_rules! derive_multiplexed_handler {
+	(
+		$(#[$attr_meta:meta])*
+		$vis:vis fn $name:ident
+			$(
+				<$($generic:ident),* $(,)?>
+				$(<$($fn_lt:lifetime),* $(,)?>)?
+			)?
+			(
+				$bhv_name:ident: $bhv_ty:ty
+				$(, $para_name:ident: $para:ty)* $(,)?
+			) $(-> $ret:ty)?
+		$(as deriving $deriving:path)*
+		$(where $($where_token:tt)*)?
+	) => {
+		impl<$($($generic: 'static),*)?> BehaviorDelegate for $name<$($($generic),*)?>
+		$(where $($where_token)*)?
+		{
+		}
+
+		impl<$($($generic: 'static,)* $($fn_lt,)*)?> ContextForBehaviorDelegate<$name<$($($generic),*)?>> for ($($para,)*)
+		$(where $($where_token)*)?
+		{
+			fn process(self, registry: &BehaviorRegistry, delegates: &[$name<$($($generic),*)?>]) {
+				let ($($para_name,)*) = self;
+				for delegate in delegates {
+					delegate(registry, $($para_name,)*);
+				}
+			}
+		}
+	};
 }
 
-impl<E: 'static> BehaviorDelegate for ContextlessEventHandler<E> {}
+pub use derive_multiplexed_handler;
 
-impl<E: 'static> ContextForBehaviorDelegate<ContextlessEventHandler<E>> for &'_ E {
-    fn process(self, registry: &BehaviorRegistry, delegates: &[ContextlessEventHandler<E>]) {
-        for delegate in delegates {
-            delegate(registry, self);
-        }
-    }
+delegate! {
+    pub fn ContextlessEventHandler<E>(bhv: &BehaviorRegistry, events: &E)
+    as deriving derive_multiplexed_handler
 }
