@@ -99,7 +99,7 @@ macro_rules! delegate {
 				&$inj_lt:lifetime self [$($inj_name:ident: $inj:ty),* $(,)?]
 				$(, $para_name:ident: $para:ty)* $(,)?
 			) $(-> $ret:ty)?
-		$(as deriving $deriving:path)*
+		$(as deriving $deriving:path $({ $(deriving_args:tt)* })? )*
 		$(where $($where_token:tt)*)?
 	) => {
 		$crate::behavior::delegate! {
@@ -111,7 +111,7 @@ macro_rules! delegate {
 					$($inj_name: $inj,)*
 					$($para_name: $para,)*
 				) $(-> $ret)?
-			$(as deriving $deriving)*
+			$(as deriving $deriving $({ $($deriving_args)* })? )*
 			$(where $($where_token)*)?
 		}
 
@@ -194,7 +194,7 @@ macro_rules! delegate {
 				$(<$($fn_lt:lifetime),* $(,)?>)?
 			)?
 			($($para_name:ident: $para:ty),* $(,)?) $(-> $ret:ty)?
-		$(as deriving $deriving:path)*
+		$(as deriving $deriving:path $({ $($deriving_args:tt)* })? )*
 		$(where $($where_token:tt)*)?
 	) => {
 		$(#[$attr_meta])*
@@ -311,7 +311,7 @@ macro_rules! delegate {
 					$(<$($fn_lt,)*>)?
 				)?
 				($($para_name: $para,)*) $(-> $ret)?
-			$(as deriving $deriving)*
+			$(as deriving $deriving $({ $($deriving_args)* })? )*
 			$(where $($where_token)*)?
 		}
 	};
@@ -327,11 +327,13 @@ macro_rules! delegate {
 				$(<$($fn_lt:lifetime),* $(,)?>)?
 			)?
 			($($para_name:ident: $para:ty),* $(,)?) $(-> $ret:ty)?
-		as deriving $first_deriving:path
-		$(as deriving $next_deriving:path)*
+		as deriving $first_deriving:path $({ $($first_deriving_args:tt)* })?
+		$(as deriving $next_deriving:path $({ $($next_deriving_args:tt)* })? )*
 		$(where $($where_token:tt)*)?
 	) => {
 		$first_deriving! {
+			args { $($($first_deriving_args)*)? }
+
 			$(#[$attr_meta])*
 			$vis fn $name
 				$(
@@ -352,7 +354,7 @@ macro_rules! delegate {
 					$(<$($fn_lt,)*>)?
 				)?
 				($($para_name: $para,)*) $(-> $ret)?
-			$(as deriving $next_deriving)*
+			$(as deriving $next_deriving $({ $($next_deriving_args)* })?)*
 			$(where $($where_token)*)?
 		}
 	};
@@ -486,6 +488,8 @@ pub mod behavior_derive_macro_internal {
 #[macro_export]
 macro_rules! derive_behavior_delegate {
     (
+		args {}
+
 		$(#[$attr_meta:meta])*
 		$vis:vis fn $name:ident
 			$(
@@ -510,6 +514,8 @@ pub use derive_behavior_delegate;
 #[macro_export]
 macro_rules! derive_multiplexed_handler {
 	(
+		args {}
+
 		$(#[$attr_meta:meta])*
 		$vis:vis fn $name:ident
 			$(
@@ -544,6 +550,8 @@ pub use derive_multiplexed_handler;
 #[macro_export]
 macro_rules! derive_event_handler {
     (
+		args {}
+
 		$(#[$attr_meta:meta])*
 		$vis:vis fn $name:ident
 			$(
