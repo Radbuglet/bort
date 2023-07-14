@@ -1,5 +1,6 @@
 use crate::{
     event::ProcessableEventList,
+    query::VirtualTag,
     util::{
         hash_map::{ConstSafeBuildHasherDefault, FxHashMap},
         misc::{MapFmt, NamedTypeId, RawFmt},
@@ -260,7 +261,7 @@ macro_rules! delegate {
 			}
 		}
 
-		impl<$($($generic,)* $($($fn_lt,)*)?)?> $crate::behavior::delegate_macro_internal::Dispatchable<($($para,)*)> for $name $(<$($generic),*>)?
+		impl<$($($($fn_lt,)*)? $($generic: 'static,)*)?> $crate::behavior::delegate_macro_internal::Dispatchable<($($para,)*)> for $name $(<$($generic),*>)?
 		$(where
 			$($where_token)*
 		)? {
@@ -389,7 +390,7 @@ pub trait ContextForBehaviorDelegate<D: BehaviorDelegate> {
 
 pub trait ContextForEventBehaviorDelegate<D: BehaviorDelegate>
 where
-    for<'a> (&'a Self::EventList, Self): ContextForBehaviorDelegate<D>,
+    for<'a> (&'a mut Self::EventList, Self): ContextForBehaviorDelegate<D>,
 {
     type EventList: ProcessableEventList;
 }
@@ -465,7 +466,21 @@ impl fmt::Debug for BehaviorRegistry {
 
 #[doc(hidden)]
 pub mod behavior_derive_macro_internal {
-    pub use super::{BehaviorDelegate, BehaviorRegistry, ContextForBehaviorDelegate};
+    pub use {
+        super::{
+            BehaviorDelegate, BehaviorRegistry, ContextForBehaviorDelegate,
+            ContextForEventBehaviorDelegate,
+        },
+        crate::event::ProcessableEventList,
+    };
+
+    pub trait FnPointeeInference {
+        type Pointee: ?Sized;
+    }
+
+    impl<T: ?Sized> FnPointeeInference for fn(&mut T) {
+        type Pointee = T;
+    }
 }
 
 #[macro_export]
@@ -483,7 +498,7 @@ macro_rules! derive_behavior_delegate {
 			) $(-> $ret:ty)?
 		$(where $($where_token:tt)*)?
 	) => {
-		impl<$($($generic: 'static),*)?> $crate::behavior::behavior_derive_macro_internal::BehaviorDelegate for $name<$($($generic),*)?>
+		impl<$($($($fn_lt,)*)? $($generic: 'static,)*)?> $crate::behavior::behavior_derive_macro_internal::BehaviorDelegate for $name<$($($generic),*)?>
 		$(where $($where_token)*)?
 		{
 		}
@@ -507,7 +522,7 @@ macro_rules! derive_multiplexed_handler {
 			) $(-> $ret:ty)?
 		$(where $($where_token:tt)*)?
 	) => {
-		impl<$($($generic: 'static,)* $($fn_lt,)*)?> $crate::behavior::behavior_derive_macro_internal::ContextForBehaviorDelegate<$name<$($($generic),*)?>> for ($($para,)*)
+		impl<$($($($fn_lt,)*)? $($generic: 'static,)*)?> $crate::behavior::behavior_derive_macro_internal::ContextForBehaviorDelegate<$name<$($($generic),*)?>> for ($($para,)*)
 		$(where $($where_token)*)?
 		{
 			fn process(
@@ -536,19 +551,54 @@ macro_rules! derive_event_handler {
 				$(<$($fn_lt:lifetime),* $(,)?>)?
 			)?
 			(
-				$bhv_name:ident: $bhv_ty:ty
+				$bhv_name:ident: $bhv_ty:ty,
+				$ev_name:ident: $ev_ty:ty
 				$(, $para_name:ident: $para:ty)* $(,)?
 			) $(-> $ret:ty)?
 		$(where $($where_token:tt)*)?
 	) => {
-        // TODO
+        impl<$($($($fn_lt,)*)? $($generic: 'static,)*)?> $crate::behavior::behavior_derive_macro_internal::ContextForBehaviorDelegate<$name<$($($generic),*)?>> for ($ev_ty, ($($para,)*))
+		$(where $($where_token)*)?
+		{
+			fn process(
+				self,
+				registry: &$crate::behavior::behavior_derive_macro_internal::BehaviorRegistry,
+				delegates: &[$name<$($($generic),*)?>],
+			) {
+				let ($ev_name, ($($para_name,)*)) = self;
+				for delegate in delegates {
+					delegate(registry, $ev_name, $($para_name,)*);
+				}
+				$crate::behavior::behavior_derive_macro_internal::ProcessableEventList::clear($ev_name);
+			}
+		}
+
+		impl<$($($($fn_lt,)*)? $($generic: 'static,)*)?> $crate::behavior::behavior_derive_macro_internal::ContextForEventBehaviorDelegate<$name<$($($generic),*)?>> for ($($para,)*)
+		$(where $($where_token)*)?
+		{
+			type EventList = <$($(for<$($fn_lt)*>)?)? fn($ev_ty) as $crate::behavior::behavior_derive_macro_internal::FnPointeeInference>::Pointee;
+		}
     };
 }
 
 pub use derive_event_handler;
 
 delegate! {
-    pub fn ContextlessEventHandler<EL>(bhv: &BehaviorRegistry, events: &EL)
+    pub fn ContextlessEventHandler<EL>(bhv: &BehaviorRegistry, events: &mut EL)
+    as deriving derive_behavior_delegate
+    as deriving derive_event_handler
+    where
+        EL: ProcessableEventList,
+}
+
+delegate! {
+    pub fn ContextlessQueryHandler(bhv: &BehaviorRegistry)
+    as deriving derive_behavior_delegate
+    as deriving derive_multiplexed_handler
+}
+
+delegate! {
+    pub fn NamespacedQueryHandler(bhv: &BehaviorRegistry, namespace: VirtualTag)
     as deriving derive_behavior_delegate
     as deriving derive_multiplexed_handler
 }
