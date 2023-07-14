@@ -40,9 +40,9 @@ impl<T> Tag<T> {
     }
 }
 
-impl<T> Into<RawTag> for Tag<T> {
-    fn into(self) -> RawTag {
-        self.raw
+impl<T> From<Tag<T>> for RawTag {
+    fn from(value: Tag<T>) -> Self {
+        value.raw
     }
 }
 
@@ -69,9 +69,9 @@ impl VirtualTag {
     }
 }
 
-impl Into<RawTag> for VirtualTag {
-    fn into(self) -> RawTag {
-        self.raw
+impl From<VirtualTag> for RawTag {
+    fn from(value: VirtualTag) -> Self {
+        value.raw
     }
 }
 

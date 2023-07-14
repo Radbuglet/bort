@@ -1,4 +1,5 @@
 use crate::{
+    entity::{CompMut, CompRef, Entity},
     event::ProcessableEventList,
     query::VirtualTag,
     util::{
@@ -376,6 +377,25 @@ macro_rules! delegate {
 }
 
 pub use delegate;
+
+// === Standard Injectors === //
+
+#[derive(Debug, Copy, Clone, Default)]
+pub struct ComponentInjector;
+
+impl<T: 'static> FuncMethodInjectorRef<T> for ComponentInjector {
+    type Guard<'a> = CompRef<T>;
+    type Injector = for<'a> fn(&'a (), &mut Entity) -> Self::Guard<'a>;
+
+    const INJECTOR: Self::Injector = |_, me| me.get();
+}
+
+impl<T: 'static> FuncMethodInjectorMut<T> for ComponentInjector {
+    type Guard<'a> = CompMut<T>;
+    type Injector = for<'a> fn(&'a (), &mut Entity) -> Self::Guard<'a>;
+
+    const INJECTOR: Self::Injector = |_, me| me.get_mut();
+}
 
 // === Behavior === //
 
