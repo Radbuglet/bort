@@ -14,7 +14,8 @@ pub mod prelude {
     pub use crate::{
         behavior::{
             delegate, derive_behavior_delegate, derive_event_handler, derive_multiplexed_handler,
-            BehaviorRegistry, HasBehavior,
+            BehaviorRegistry, ContextlessEventHandler, ContextlessQueryHandler, HasBehavior,
+            NamespacedQueryHandler,
         },
         entity::{storage, CompMut, CompRef, Entity, OwnedEntity, Storage},
         event::{EventTarget, ProcessableEventList, QueryableEventList, VecEventList},

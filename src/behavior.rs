@@ -379,22 +379,47 @@ pub use delegate;
 
 // === Behavior === //
 
-// Traits
+// Core traits
 pub trait HasBehavior: Sized + 'static {
     type Delegate: BehaviorDelegate;
 }
 
 pub trait BehaviorDelegate: 'static + Sized + Send + Sync {}
 
-pub trait ContextForBehaviorDelegate<D: BehaviorDelegate> {
+// ExecutableBehaviorDelegate
+pub trait ExecutableBehaviorDelegate<C>: BehaviorDelegate {
+    fn process(delegates: &[Self], registry: &BehaviorRegistry, context: C);
+}
+
+pub trait ContextForExecutableBehaviorDelegate<D: BehaviorDelegate>: Sized {
     fn process(self, registry: &BehaviorRegistry, delegates: &[D]);
 }
 
-pub trait ContextForEventBehaviorDelegate<D: BehaviorDelegate>
-where
-    for<'a> (&'a mut Self::EventList, Self): ContextForBehaviorDelegate<D>,
+impl<C, D: ExecutableBehaviorDelegate<C>> ContextForExecutableBehaviorDelegate<D> for C {
+    fn process(self, registry: &BehaviorRegistry, delegates: &[D]) {
+        D::process(delegates, registry, self)
+    }
+}
+
+// EventBehaviorDelegate
+pub trait EventBehaviorDelegate<C>:
+    for<'a> ExecutableBehaviorDelegate<(&'a mut Self::EventList, C)>
 {
     type EventList: ProcessableEventList;
+}
+
+pub trait ContextForEventBehaviorDelegate<D: BehaviorDelegate>: Sized {
+    type EventList: ProcessableEventList;
+
+    fn process(self, registry: &BehaviorRegistry, events: &mut Self::EventList, delegates: &[D]);
+}
+
+impl<C, D: EventBehaviorDelegate<C>> ContextForEventBehaviorDelegate<D> for C {
+    type EventList = D::EventList;
+
+    fn process(self, registry: &BehaviorRegistry, events: &mut Self::EventList, delegates: &[D]) {
+        D::process(delegates, registry, (events, self));
+    }
 }
 
 // BehaviorRegistry
@@ -442,8 +467,29 @@ impl BehaviorRegistry {
             })
     }
 
-    pub fn process<B: HasBehavior>(&self, cx: impl ContextForBehaviorDelegate<B::Delegate>) {
+    pub fn process<B: HasBehavior>(
+        &self,
+        cx: impl ContextForExecutableBehaviorDelegate<B::Delegate>,
+    ) {
         cx.process(self, self.get::<B>());
+    }
+
+    pub fn process_events_cx<EL: ProcessableEventList>(
+        &self,
+        events: &mut EL,
+        cx: impl ContextForEventBehaviorDelegate<<EL::Event as HasBehavior>::Delegate, EventList = EL>,
+    ) where
+        EL::Event: HasBehavior,
+    {
+        cx.process(self, events, self.get::<EL::Event>());
+    }
+
+    pub fn process_events<EL: ProcessableEventList>(&self, events: &mut EL)
+    where
+        EL::Event: HasBehavior,
+        (): ContextForEventBehaviorDelegate<<EL::Event as HasBehavior>::Delegate, EventList = EL>,
+    {
+        self.process_events_cx(events, ());
     }
 }
 
@@ -470,8 +516,7 @@ impl fmt::Debug for BehaviorRegistry {
 pub mod behavior_derive_macro_internal {
     pub use {
         super::{
-            BehaviorDelegate, BehaviorRegistry, ContextForBehaviorDelegate,
-            ContextForEventBehaviorDelegate,
+            BehaviorDelegate, BehaviorRegistry, EventBehaviorDelegate, ExecutableBehaviorDelegate,
         },
         crate::event::ProcessableEventList,
     };
@@ -528,15 +573,16 @@ macro_rules! derive_multiplexed_handler {
 			) $(-> $ret:ty)?
 		$(where $($where_token:tt)*)?
 	) => {
-		impl<$($($($fn_lt,)*)? $($generic: 'static,)*)?> $crate::behavior::behavior_derive_macro_internal::ContextForBehaviorDelegate<$name<$($($generic),*)?>> for ($($para,)*)
+		impl<$($($($fn_lt,)*)? $($generic: 'static,)*)?>
+			$crate::behavior::behavior_derive_macro_internal::ExecutableBehaviorDelegate<($($para,)*)>
+			for $name<$($($generic),*)?>
 		$(where $($where_token)*)?
 		{
 			fn process(
-				self,
-				registry: &$crate::behavior::behavior_derive_macro_internal::BehaviorRegistry,
 				delegates: &[$name<$($($generic),*)?>],
+				registry: &$crate::behavior::behavior_derive_macro_internal::BehaviorRegistry,
+				($($para_name,)*): ($($para,)*),
 			) {
-				let ($($para_name,)*) = self;
 				for delegate in delegates {
 					delegate(registry, $($para_name,)*);
 				}
@@ -565,15 +611,14 @@ macro_rules! derive_event_handler {
 			) $(-> $ret:ty)?
 		$(where $($where_token:tt)*)?
 	) => {
-        impl<$($($($fn_lt,)*)? $($generic: 'static,)*)?> $crate::behavior::behavior_derive_macro_internal::ContextForBehaviorDelegate<$name<$($($generic),*)?>> for ($ev_ty, ($($para,)*))
+        impl<$($($($fn_lt,)*)? $($generic: 'static,)*)?> $crate::behavior::behavior_derive_macro_internal::ExecutableBehaviorDelegate<($ev_ty, ($($para,)*))> for $name<$($($generic),*)?>
 		$(where $($where_token)*)?
 		{
 			fn process(
-				self,
-				registry: &$crate::behavior::behavior_derive_macro_internal::BehaviorRegistry,
 				delegates: &[$name<$($($generic),*)?>],
+				registry: &$crate::behavior::behavior_derive_macro_internal::BehaviorRegistry,
+				($ev_name, ($($para_name,)*)): ($ev_ty, ($($para,)*)),
 			) {
-				let ($ev_name, ($($para_name,)*)) = self;
 				for delegate in delegates {
 					delegate(registry, $ev_name, $($para_name,)*);
 				}
@@ -581,7 +626,7 @@ macro_rules! derive_event_handler {
 			}
 		}
 
-		impl<$($($($fn_lt,)*)? $($generic: 'static,)*)?> $crate::behavior::behavior_derive_macro_internal::ContextForEventBehaviorDelegate<$name<$($($generic),*)?>> for ($($para,)*)
+		impl<$($($($fn_lt,)*)? $($generic: 'static,)*)?> $crate::behavior::behavior_derive_macro_internal::EventBehaviorDelegate<($($para,)*)> for $name<$($($generic),*)?>
 		$(where $($where_token)*)?
 		{
 			type EventList = <$($(for<$($fn_lt)*>)?)? fn($ev_ty) as $crate::behavior::behavior_derive_macro_internal::FnPointeeInference>::Pointee;
