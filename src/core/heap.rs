@@ -1,7 +1,6 @@
 use std::{
     fmt,
     marker::PhantomData,
-    ops::{Deref, DerefMut},
     ptr::{null_mut, NonNull},
     sync::atomic::{AtomicU64, Ordering::Relaxed},
 };
@@ -319,7 +318,7 @@ impl<'a, T: 'static> DirectSlot<'a, T> {
         .get(token)
     }
 
-    pub fn borrow_or_none(self, token: &impl BorrowToken<T>) -> Option<HeapRef<T>> {
+    pub fn borrow_or_none(self, token: &impl BorrowToken<T>) -> Option<OptRef<T>> {
         unsafe {
             // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
             // precludes deletion until the reference expires.
@@ -327,26 +326,19 @@ impl<'a, T: 'static> DirectSlot<'a, T> {
         }
         .value
         .borrow_or_none(token)
-        .map(|value| HeapRef {
-            entity: self.owner_inert(token),
-            value,
-        })
     }
 
-    pub fn borrow(self, token: &impl BorrowToken<T>) -> HeapRef<T> {
-        HeapRef {
-            entity: self.owner_inert(token),
-            value: unsafe {
-                // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
-                // precludes deletion until the reference expires.
-                self.heap_value_prolonged()
-            }
-            .value
-            .borrow(token),
+    pub fn borrow(self, token: &impl BorrowToken<T>) -> OptRef<T> {
+        unsafe {
+            // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
+            // precludes deletion until the reference expires.
+            self.heap_value_prolonged()
         }
+        .value
+        .borrow(token)
     }
 
-    pub fn borrow_mut_or_none(self, token: &impl BorrowMutToken<T>) -> Option<HeapMut<T>> {
+    pub fn borrow_mut_or_none(self, token: &impl BorrowMutToken<T>) -> Option<OptRefMut<T>> {
         unsafe {
             // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
             // precludes deletion until the reference expires.
@@ -354,23 +346,16 @@ impl<'a, T: 'static> DirectSlot<'a, T> {
         }
         .value
         .borrow_mut_or_none(token)
-        .map(|value| HeapMut {
-            entity: self.owner_inert(token),
-            value,
-        })
     }
 
-    pub fn borrow_mut(self, token: &impl BorrowMutToken<T>) -> HeapMut<T> {
-        HeapMut {
-            entity: self.owner_inert(token),
-            value: unsafe {
-                // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
-                // precludes deletion until the reference expires.
-                self.heap_value_prolonged()
-            }
-            .value
-            .borrow_mut(token),
+    pub fn borrow_mut(self, token: &impl BorrowMutToken<T>) -> OptRefMut<T> {
+        unsafe {
+            // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
+            // precludes deletion until the reference expires.
+            self.heap_value_prolonged()
         }
+        .value
+        .borrow_mut(token)
     }
 
     pub fn take(self, token: &impl BorrowMutToken<T>) -> Option<T> {
@@ -480,7 +465,7 @@ impl<T> Slot<T> {
         }
     }
 
-    pub fn borrow_or_none(self, token: &impl BorrowToken<T>) -> Option<HeapRef<T>> {
+    pub fn borrow_or_none(self, token: &impl BorrowToken<T>) -> Option<OptRef<T>> {
         unsafe {
             // Safety: we only use the `DirectSlot` until the function returns, and we know the
             // direct slot cannot be invalidated until then because we never call something which
@@ -489,7 +474,7 @@ impl<T> Slot<T> {
         }
     }
 
-    pub fn borrow(self, token: &impl BorrowToken<T>) -> HeapRef<T> {
+    pub fn borrow(self, token: &impl BorrowToken<T>) -> OptRef<T> {
         unsafe {
             // Safety: we only use the `DirectSlot` until the function returns, and we know the
             // direct slot cannot be invalidated until then because we never call something which
@@ -498,7 +483,7 @@ impl<T> Slot<T> {
         }
     }
 
-    pub fn borrow_mut_or_none(self, token: &impl BorrowMutToken<T>) -> Option<HeapMut<T>> {
+    pub fn borrow_mut_or_none(self, token: &impl BorrowMutToken<T>) -> Option<OptRefMut<T>> {
         unsafe {
             // Safety: we only use the `DirectSlot` until the function returns, and we know the
             // direct slot cannot be invalidated until then because we never call something which
@@ -507,7 +492,7 @@ impl<T> Slot<T> {
         }
     }
 
-    pub fn borrow_mut(self, token: &impl BorrowMutToken<T>) -> HeapMut<T> {
+    pub fn borrow_mut(self, token: &impl BorrowMutToken<T>) -> OptRefMut<T> {
         unsafe {
             // Safety: we only use the `DirectSlot` until the function returns, and we know the
             // direct slot cannot be invalidated until then because we never call something which
@@ -532,186 +517,5 @@ impl<T> Slot<T> {
             // could potentially destroy the heap.
             self.direct_slot(token).is_empty(token)
         }
-    }
-}
-
-// === CompRef === //
-
-pub struct HeapRef<'b, T: ?Sized> {
-    entity: Option<InertEntity>,
-    value: OptRef<'b, T>,
-}
-
-impl<'b, T> HeapRef<'b, T> {
-    pub fn into_opt_ref(orig: Self) -> OptRef<'b, T> {
-        orig.value
-    }
-
-    pub fn owner(orig: &Self) -> Option<Entity> {
-        orig.entity.map(|v| v.into_dangerous_entity())
-    }
-
-    pub fn clone(orig: &Self) -> Self {
-        Self {
-            entity: orig.entity,
-            value: OptRef::clone(&orig.value),
-        }
-    }
-
-    pub fn map<U: ?Sized, F>(orig: HeapRef<'b, T>, f: F) -> HeapRef<'b, U>
-    where
-        F: FnOnce(&T) -> &U,
-    {
-        HeapRef {
-            entity: orig.entity,
-            value: OptRef::map(orig.value, f),
-        }
-    }
-
-    pub fn filter_map<U: ?Sized, F>(orig: HeapRef<'b, T>, f: F) -> Result<HeapRef<'b, U>, Self>
-    where
-        F: FnOnce(&T) -> Option<&U>,
-    {
-        let entity = orig.entity;
-
-        match OptRef::filter_map(orig.value, f) {
-            Ok(value) => Ok(HeapRef { entity, value }),
-            Err(value) => Err(HeapRef { entity, value }),
-        }
-    }
-
-    pub fn map_split<U: ?Sized, V: ?Sized, F>(
-        orig: HeapRef<'b, T>,
-        f: F,
-    ) -> (HeapRef<'b, U>, HeapRef<'b, V>)
-    where
-        F: FnOnce(&T) -> (&U, &V),
-    {
-        let entity = orig.entity;
-        let (left, right) = OptRef::map_split(orig.value, f);
-
-        (
-            HeapRef {
-                entity,
-                value: left,
-            },
-            HeapRef {
-                entity,
-                value: right,
-            },
-        )
-    }
-
-    pub fn leak(orig: HeapRef<'b, T>) -> &'b T {
-        OptRef::leak(orig.value)
-    }
-}
-
-impl<T> Deref for HeapRef<'_, T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.value
-    }
-}
-
-impl<T: fmt::Debug> fmt::Debug for HeapRef<'_, T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.value.fmt(f)
-    }
-}
-
-impl<T: fmt::Display> fmt::Display for HeapRef<'_, T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.value.fmt(f)
-    }
-}
-
-pub struct HeapMut<'b, T: ?Sized> {
-    entity: Option<InertEntity>,
-    value: OptRefMut<'b, T>,
-}
-
-impl<'b, T: ?Sized> HeapMut<'b, T> {
-    pub fn into_opt_ref_mut(orig: Self) -> OptRefMut<'b, T> {
-        orig.value
-    }
-
-    pub fn owner(orig: &Self) -> Option<Entity> {
-        orig.entity.map(|v| v.into_dangerous_entity())
-    }
-
-    pub fn map<U: ?Sized, F>(orig: HeapMut<'b, T>, f: F) -> HeapMut<'b, U>
-    where
-        F: FnOnce(&mut T) -> &mut U,
-    {
-        HeapMut {
-            entity: orig.entity,
-            value: OptRefMut::map(orig.value, f),
-        }
-    }
-
-    pub fn filter_map<U: ?Sized, F>(orig: HeapMut<'b, T>, f: F) -> Result<HeapMut<'b, U>, Self>
-    where
-        F: FnOnce(&mut T) -> Option<&mut U>,
-    {
-        let entity = orig.entity;
-
-        match OptRefMut::filter_map(orig.value, f) {
-            Ok(value) => Ok(HeapMut { entity, value }),
-            Err(value) => Err(Self { entity, value }),
-        }
-    }
-
-    pub fn map_split<U: ?Sized, V: ?Sized, F>(
-        orig: HeapMut<'b, T>,
-        f: F,
-    ) -> (HeapMut<'b, U>, HeapMut<'b, V>)
-    where
-        F: FnOnce(&mut T) -> (&mut U, &mut V),
-    {
-        let entity = orig.entity;
-        let (left, right) = OptRefMut::map_split(orig.value, f);
-
-        (
-            HeapMut {
-                entity,
-                value: left,
-            },
-            HeapMut {
-                entity,
-                value: right,
-            },
-        )
-    }
-
-    pub fn leak(orig: HeapMut<'b, T>) -> &'b mut T {
-        OptRefMut::leak(orig.value)
-    }
-}
-
-impl<T: ?Sized> Deref for HeapMut<'_, T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.value
-    }
-}
-
-impl<T: ?Sized> DerefMut for HeapMut<'_, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.value
-    }
-}
-
-impl<T: ?Sized + fmt::Debug> fmt::Debug for HeapMut<'_, T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(&**self, f)
-    }
-}
-
-impl<T: ?Sized + fmt::Display> fmt::Display for HeapMut<'_, T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&**self, f)
     }
 }

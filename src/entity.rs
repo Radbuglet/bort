@@ -1,10 +1,16 @@
-use std::{any::type_name, borrow, fmt, mem, num::NonZeroU64};
+use std::{
+    any::type_name,
+    borrow, fmt, mem,
+    num::NonZeroU64,
+    ops::{Deref, DerefMut},
+};
 
 use derive_where::derive_where;
 
 use crate::{
     core::{
-        heap::{HeapMut, HeapRef, Slot},
+        cell::{OptRef, OptRefMut},
+        heap::Slot,
         token::MainThreadToken,
     },
     database::{DbRoot, DbStorage, EntityDeadError, InertEntity},
@@ -18,9 +24,9 @@ use crate::{
 // === Storage === //
 
 // Aliases
-pub type CompRef<T> = HeapRef<'static, T>;
+pub type CompRef<T> = OptRef<'static, T>;
 
-pub type CompMut<T> = HeapMut<'static, T>;
+pub type CompMut<T> = OptRefMut<'static, T>;
 
 // Storage API
 pub fn storage<T: 'static>() -> Storage<T> {
@@ -411,5 +417,217 @@ impl borrow::Borrow<Entity> for OwnedEntity {
 impl Drop for OwnedEntity {
     fn drop(&mut self) {
         self.entity.destroy();
+    }
+}
+
+// === `HeapRef` and `HeapMut` === //
+
+pub struct HeapRef<'b, T: ?Sized, O: Copy> {
+    owner: O,
+    value: OptRef<'b, T>,
+}
+
+impl<'b, T: ?Sized, O: Copy> HeapRef<'b, T, O> {
+    pub fn new(owner: O, value: OptRef<'b, T>) -> Self {
+        Self { owner, value }
+    }
+
+    pub fn into_opt_ref(orig: Self) -> OptRef<'b, T> {
+        orig.value
+    }
+
+    pub fn map_owner<O2: Copy>(orig: Self, f: impl FnOnce(O) -> O2) -> HeapRef<'b, T, O2> {
+        HeapRef {
+            owner: f(orig.owner),
+            value: orig.value,
+        }
+    }
+
+    pub fn owner(orig: &Self) -> O {
+        orig.owner
+    }
+
+    pub fn clone(orig: &Self) -> Self {
+        Self {
+            owner: orig.owner,
+            value: OptRef::clone(&orig.value),
+        }
+    }
+
+    pub fn map<U: ?Sized, F>(orig: HeapRef<'b, T, O>, f: F) -> HeapRef<'b, U, O>
+    where
+        F: FnOnce(&T) -> &U,
+    {
+        HeapRef {
+            owner: orig.owner,
+            value: OptRef::map(orig.value, f),
+        }
+    }
+
+    pub fn filter_map<U: ?Sized, F>(
+        orig: HeapRef<'b, T, O>,
+        f: F,
+    ) -> Result<HeapRef<'b, U, O>, Self>
+    where
+        F: FnOnce(&T) -> Option<&U>,
+    {
+        let owner = orig.owner;
+
+        match OptRef::filter_map(orig.value, f) {
+            Ok(value) => Ok(HeapRef { owner, value }),
+            Err(value) => Err(HeapRef { owner, value }),
+        }
+    }
+
+    pub fn map_split<U: ?Sized, V: ?Sized, F>(
+        orig: HeapRef<'b, T, O>,
+        f: F,
+    ) -> (HeapRef<'b, U, O>, HeapRef<'b, V, O>)
+    where
+        F: FnOnce(&T) -> (&U, &V),
+    {
+        let owner = orig.owner;
+        let (left, right) = OptRef::map_split(orig.value, f);
+
+        (
+            HeapRef { owner, value: left },
+            HeapRef {
+                owner,
+                value: right,
+            },
+        )
+    }
+
+    pub fn leak(orig: HeapRef<'b, T, O>) -> &'b T {
+        OptRef::leak(orig.value)
+    }
+}
+
+impl<T: ?Sized, O: Copy> Deref for HeapRef<'_, T, O> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+
+impl<T: ?Sized + fmt::Debug, O: Copy> fmt::Debug for HeapRef<'_, T, O> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.value.fmt(f)
+    }
+}
+
+impl<T: ?Sized + fmt::Display, O: Copy> fmt::Display for HeapRef<'_, T, O> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.value.fmt(f)
+    }
+}
+
+pub struct HeapMut<'b, T: ?Sized, O: Copy> {
+    owner: O,
+    value: OptRefMut<'b, T>,
+}
+
+impl<'b, T: ?Sized, O: Copy> HeapMut<'b, T, O> {
+    pub fn new(owner: O, value: OptRefMut<'b, T>) -> Self {
+        Self { owner, value }
+    }
+
+    pub fn into_opt_ref_mut(orig: Self) -> OptRefMut<'b, T> {
+        orig.value
+    }
+
+    pub fn map_owner<O2: Copy>(orig: Self, f: impl FnOnce(O) -> O2) -> HeapMut<'b, T, O2> {
+        HeapMut {
+            owner: f(orig.owner),
+            value: orig.value,
+        }
+    }
+
+    pub fn owner(orig: &Self) -> O {
+        orig.owner
+    }
+
+    pub fn map<U: ?Sized, F>(orig: HeapMut<'b, T, O>, f: F) -> HeapMut<'b, U, O>
+    where
+        F: FnOnce(&mut T) -> &mut U,
+    {
+        HeapMut {
+            owner: orig.owner,
+            value: OptRefMut::map(orig.value, f),
+        }
+    }
+
+    pub fn filter_map<U: ?Sized, F>(
+        orig: HeapMut<'b, T, O>,
+        f: F,
+    ) -> Result<HeapMut<'b, U, O>, Self>
+    where
+        F: FnOnce(&mut T) -> Option<&mut U>,
+    {
+        let entity = orig.owner;
+
+        match OptRefMut::filter_map(orig.value, f) {
+            Ok(value) => Ok(HeapMut {
+                owner: entity,
+                value,
+            }),
+            Err(value) => Err(Self {
+                owner: entity,
+                value,
+            }),
+        }
+    }
+
+    pub fn map_split<U: ?Sized, V: ?Sized, F>(
+        orig: HeapMut<'b, T, O>,
+        f: F,
+    ) -> (HeapMut<'b, U, O>, HeapMut<'b, V, O>)
+    where
+        F: FnOnce(&mut T) -> (&mut U, &mut V),
+    {
+        let entity = orig.owner;
+        let (left, right) = OptRefMut::map_split(orig.value, f);
+
+        (
+            HeapMut {
+                owner: entity,
+                value: left,
+            },
+            HeapMut {
+                owner: entity,
+                value: right,
+            },
+        )
+    }
+
+    pub fn leak(orig: HeapMut<'b, T, O>) -> &'b mut T {
+        OptRefMut::leak(orig.value)
+    }
+}
+
+impl<T: ?Sized, O: Copy> Deref for HeapMut<'_, T, O> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+
+impl<T: ?Sized, O: Copy> DerefMut for HeapMut<'_, T, O> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.value
+    }
+}
+
+impl<T: ?Sized + fmt::Debug, O: Copy> fmt::Debug for HeapMut<'_, T, O> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&**self, f)
+    }
+}
+
+impl<T: ?Sized + fmt::Display, O: Copy> fmt::Display for HeapMut<'_, T, O> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&**self, f)
     }
 }
