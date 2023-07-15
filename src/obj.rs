@@ -70,6 +70,7 @@ impl<T: 'static> Obj<T> {
         self.is_alive_internal(token)
             .then(|| self.value.borrow_or_none(token))
             .flatten()
+            .map(|r| CompRef::new(self, r))
     }
 
     pub fn try_get_mut(self) -> Option<CompMut<T>> {
@@ -78,6 +79,7 @@ impl<T: 'static> Obj<T> {
         self.is_alive_internal(token)
             .then(|| self.value.borrow_mut_or_none(token))
             .flatten()
+            .map(|r| CompMut::new(self, r))
     }
 
     pub fn get(self) -> CompRef<T> {
@@ -88,7 +90,7 @@ impl<T: 'static> Obj<T> {
             type_name::<T>(),
             self.entity(),
         );
-        self.value.borrow(token)
+        CompRef::new(self, self.value.borrow(token))
     }
 
     pub fn get_mut(self) -> CompMut<T> {
@@ -99,7 +101,7 @@ impl<T: 'static> Obj<T> {
             type_name::<T>(),
             self.entity(),
         );
-        self.value.borrow_mut(token)
+        CompMut::new(self, self.value.borrow_mut(token))
     }
 
     pub fn destroy(self) {

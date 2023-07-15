@@ -24,9 +24,9 @@ use crate::{
 // === Storage === //
 
 // Aliases
-pub type CompRef<T> = OptRef<'static, T>;
+pub type CompRef<T, O = Obj<T>> = HeapRef<'static, T, O>;
 
-pub type CompMut<T> = OptRefMut<'static, T>;
+pub type CompMut<T, O = Obj<T>> = HeapMut<'static, T, O>;
 
 // Storage API
 pub fn storage<T: 'static>() -> Storage<T> {
@@ -107,21 +107,39 @@ impl<T: 'static> Storage<T> {
     }
 
     pub fn try_get(&self, entity: Entity) -> Option<CompRef<T>> {
-        self.try_get_slot(entity)
-            .map(|slot| slot.borrow(self.token.make_ref()))
+        self.try_get_slot(entity).map(|slot| {
+            CompRef::new(
+                Obj::from_raw_parts(entity, slot),
+                slot.borrow(self.token.make_ref()),
+            )
+        })
     }
 
     pub fn try_get_mut(&self, entity: Entity) -> Option<CompMut<T>> {
-        self.try_get_slot(entity)
-            .map(|slot| slot.borrow_mut(self.token.make_ref()))
+        self.try_get_slot(entity).map(|slot| {
+            CompMut::new(
+                Obj::from_raw_parts(entity, slot),
+                slot.borrow_mut(self.token.make_ref()),
+            )
+        })
     }
 
     pub fn get(&self, entity: Entity) -> CompRef<T> {
-        self.get_slot(entity).borrow(self.token.make_ref())
+        let slot = self.get_slot(entity);
+
+        CompRef::new(
+            Obj::from_raw_parts(entity, slot),
+            slot.borrow(self.token.make_ref()),
+        )
     }
 
     pub fn get_mut(&self, entity: Entity) -> CompMut<T> {
-        self.get_slot(entity).borrow_mut(self.token.make_ref())
+        let slot = self.get_slot(entity);
+
+        CompMut::new(
+            Obj::from_raw_parts(entity, slot),
+            slot.borrow_mut(self.token.make_ref()),
+        )
     }
 
     pub fn has(&self, entity: Entity) -> bool {
@@ -422,7 +440,7 @@ impl Drop for OwnedEntity {
 
 // === `HeapRef` and `HeapMut` === //
 
-pub struct HeapRef<'b, T: ?Sized, O: Copy> {
+pub struct HeapRef<'b, T: ?Sized, O: Copy = Obj<T>> {
     owner: O,
     value: OptRef<'b, T>,
 }
@@ -436,11 +454,18 @@ impl<'b, T: ?Sized, O: Copy> HeapRef<'b, T, O> {
         orig.value
     }
 
-    pub fn map_owner<O2: Copy>(orig: Self, f: impl FnOnce(O) -> O2) -> HeapRef<'b, T, O2> {
+    pub fn map_owner<P: Copy>(orig: Self, f: impl FnOnce(O) -> P) -> HeapRef<'b, T, P> {
         HeapRef {
             owner: f(orig.owner),
             value: orig.value,
         }
+    }
+
+    pub fn erase_owner(orig: Self) -> HeapRef<'b, T, Entity>
+    where
+        O: Into<Entity>,
+    {
+        Self::map_owner(orig, |obj| obj.into())
     }
 
     pub fn owner(orig: &Self) -> O {
@@ -523,7 +548,7 @@ impl<T: ?Sized + fmt::Display, O: Copy> fmt::Display for HeapRef<'_, T, O> {
     }
 }
 
-pub struct HeapMut<'b, T: ?Sized, O: Copy> {
+pub struct HeapMut<'b, T: ?Sized, O: Copy = Obj<T>> {
     owner: O,
     value: OptRefMut<'b, T>,
 }
@@ -537,7 +562,7 @@ impl<'b, T: ?Sized, O: Copy> HeapMut<'b, T, O> {
         orig.value
     }
 
-    pub fn map_owner<O2: Copy>(orig: Self, f: impl FnOnce(O) -> O2) -> HeapMut<'b, T, O2> {
+    pub fn map_owner<P: Copy>(orig: Self, f: impl FnOnce(O) -> P) -> HeapMut<'b, T, P> {
         HeapMut {
             owner: f(orig.owner),
             value: orig.value,
