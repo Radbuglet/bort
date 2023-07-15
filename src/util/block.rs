@@ -48,7 +48,10 @@ impl<T> BlockAllocator<T> {
         block_inner.occupied_mask |= 1 << slot_idx;
 
         // If our mask if full, remove the block
+
+        #[allow(clippy::clone_on_copy)] // This allows us to more easily switch to an Rc-based arena
         let block_clone = block.clone();
+
         if block_inner.occupied_mask == u128::MAX {
             // N.B. `block` is already located in the `HAMMERED_OR_FULL_BLOCK_SLOT`.
             self.hammered = None;

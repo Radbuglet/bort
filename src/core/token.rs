@@ -404,7 +404,7 @@ impl MainThreadToken {
     }
 
     #[inline(always)]
-    pub fn as_ref(self) -> &'static Self {
+    pub fn make_ref(self) -> &'static Self {
         &Self {
             _no_send_or_sync: PhantomData,
         }

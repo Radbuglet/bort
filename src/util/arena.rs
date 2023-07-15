@@ -2,6 +2,7 @@ use std::{
     cell::{Ref, RefCell, RefMut},
     marker::PhantomData,
     ops::{Deref, DerefMut},
+    ptr,
 };
 
 use derive_where::derive_where;
@@ -161,7 +162,7 @@ impl<'a, T: ?Sized> SpecArenaRef<'a> for &'a T {
     }
 
     fn clone(me: &Self) -> Self {
-        *me
+        me
     }
 }
 
@@ -387,7 +388,7 @@ impl<T> Eq for SpecLeakyPtr<T> {}
 
 impl<T> PartialEq for SpecLeakyPtr<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.value as *const RefCell<T> == other.value as *const RefCell<T>
+        ptr::eq(self.value, other.value)
     }
 }
 

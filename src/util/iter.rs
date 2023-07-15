@@ -122,6 +122,6 @@ where
     type Item = I::Item;
 
     fn next(&mut self) -> Option<Self::Item> {
-        (&mut self.0).find(|v| v != &self.1)
+        self.0.find(|v| v != &self.1)
     }
 }

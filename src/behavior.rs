@@ -457,10 +457,11 @@ impl BehaviorRegistry {
     pub fn register<B: HasBehavior>(&mut self, delegate: B::Delegate) -> &mut Self {
         self.behaviors
             .entry(NamedTypeId::of::<B>())
-            .or_insert_with(|| Box::new(Vec::<B::Delegate>::new()))
+            .or_insert_with(|| Box::<Vec<B::Delegate>>::default())
             .downcast_mut::<Vec<B::Delegate>>()
             .unwrap()
             .push(delegate);
+
         self
     }
 

@@ -82,6 +82,7 @@ where
         &self.root
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn lookup_extension_common(
         &mut self,
         base_ptr: Option<&SetMapPtr<K, V, A>>,
@@ -176,7 +177,7 @@ where
             let target = &mut *self.arena.get_mut(&target_ptr);
 
             for key in &*target.keys {
-                target.extensions.insert(key.clone(), target_ptr.clone());
+                target.extensions.insert(*key, target_ptr.clone());
             }
 
             target.self_ptr = Some(target_ptr.clone());
@@ -258,7 +259,7 @@ where
                 continue;
             }
 
-            self.arena.get_mut(&referencer).extensions.remove(key);
+            self.arena.get_mut(referencer).extensions.remove(key);
         }
 
         for (key, referencer) in &removed_data.extensions {
@@ -267,7 +268,7 @@ where
                 continue;
             }
 
-            self.arena.get_mut(&referencer).de_extensions.remove(key);
+            self.arena.get_mut(referencer).de_extensions.remove(key);
         }
 
         // We still have to remove the entry from the primary map.

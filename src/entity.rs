@@ -53,9 +53,9 @@ impl<T: 'static> Storage<T> {
     // === Management === //
 
     pub fn insert_with_obj(&self, entity: Entity, value: T) -> (Option<T>, Obj<T>) {
-        match DbRoot::get(self.token.as_ref()).insert_component(
-            self.token.as_ref(),
-            &mut self.inner.borrow_mut(self.token.as_ref()),
+        match DbRoot::get(self.token.make_ref()).insert_component(
+            self.token.make_ref(),
+            &mut self.inner.borrow_mut(self.token.make_ref()),
             entity.inert,
             value,
         ) {
@@ -69,9 +69,9 @@ impl<T: 'static> Storage<T> {
     }
 
     pub fn remove(&self, entity: Entity) -> Option<T> {
-        match DbRoot::get(self.token.as_ref()).remove_component(
-            self.token.as_ref(),
-            &mut self.inner.borrow_mut(self.token.as_ref()),
+        match DbRoot::get(self.token.make_ref()).remove_component(
+            self.token.make_ref(),
+            &mut self.inner.borrow_mut(self.token.make_ref()),
             entity.inert,
         ) {
             Ok(removed) => removed,
@@ -84,7 +84,7 @@ impl<T: 'static> Storage<T> {
     // === Getters === //
 
     pub fn try_get_slot(&self, entity: Entity) -> Option<Slot<T>> {
-        DbRoot::get_component(&self.inner.borrow(self.token.as_ref()), entity.inert)
+        DbRoot::get_component(&self.inner.borrow(self.token.make_ref()), entity.inert)
     }
 
     pub fn get_slot(&self, entity: Entity) -> Slot<T> {
@@ -95,27 +95,27 @@ impl<T: 'static> Storage<T> {
                 entity,
             )
         });
-        debug_assert_eq!(slot.owner(self.token.as_ref()), Some(entity));
+        debug_assert_eq!(slot.owner(self.token.make_ref()), Some(entity));
 
         slot
     }
 
     pub fn try_get(&self, entity: Entity) -> Option<CompRef<T>> {
         self.try_get_slot(entity)
-            .map(|slot| slot.borrow(self.token.as_ref()))
+            .map(|slot| slot.borrow(self.token.make_ref()))
     }
 
     pub fn try_get_mut(&self, entity: Entity) -> Option<CompMut<T>> {
         self.try_get_slot(entity)
-            .map(|slot| slot.borrow_mut(self.token.as_ref()))
+            .map(|slot| slot.borrow_mut(self.token.make_ref()))
     }
 
     pub fn get(&self, entity: Entity) -> CompRef<T> {
-        self.get_slot(entity).borrow(self.token.as_ref())
+        self.get_slot(entity).borrow(self.token.make_ref())
     }
 
     pub fn get_mut(&self, entity: Entity) -> CompMut<T> {
-        self.get_slot(entity).borrow_mut(self.token.as_ref())
+        self.get_slot(entity).borrow_mut(self.token.make_ref())
     }
 
     pub fn has(&self, entity: Entity) -> bool {

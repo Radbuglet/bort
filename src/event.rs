@@ -76,7 +76,7 @@ impl<V> QueryVersionMap<V> {
                 && entry
                     .value
                     .downcast_ref::<K>()
-                    .is_some_and(|candidate| &*candidate == &key)
+                    .is_some_and(|candidate| candidate == &key)
         });
 
         match entry {

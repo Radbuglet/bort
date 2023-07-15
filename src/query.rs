@@ -46,6 +46,12 @@ impl<T> From<Tag<T>> for RawTag {
     }
 }
 
+impl<T> Default for Tag<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct VirtualTag {
     raw: RawTag,
@@ -75,6 +81,12 @@ impl From<VirtualTag> for RawTag {
     }
 }
 
+impl Default for VirtualTag {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct RawTag(pub(crate) InertTag);
 
@@ -90,7 +102,7 @@ impl RawTag {
     }
 
     pub fn unerase<T: 'static>(self) -> Option<Tag<T>> {
-        (self.0.ty() == NamedTypeId::of::<T>()).then(|| Tag {
+        (self.0.ty() == NamedTypeId::of::<T>()).then_some(Tag {
             _ty: PhantomData,
             raw: self,
         })
