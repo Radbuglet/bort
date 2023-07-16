@@ -20,7 +20,10 @@ pub mod prelude {
         entity::{storage, CompMut, CompRef, Entity, OwnedEntity, Storage},
         event::{EventTarget, ProcessableEventList, QueryableEventList, VecEventList},
         obj::{Obj, OwnedObj},
-        query::{flush, query, ManagedGlobalTag, RawTag, Tag, VirtualGlobalTag, VirtualTag},
+        query::{
+            flush, query, GlobalTag, GlobalVirtualTag, HasGlobalManagedTag, HasGlobalVirtualTag,
+            RawTag, Tag, VirtualTag,
+        },
     };
 }
 

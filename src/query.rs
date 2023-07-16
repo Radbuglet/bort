@@ -25,13 +25,10 @@ impl<T> Tag<T> {
         }
     }
 
-    pub fn global() -> Self
-    where
-        T: ManagedGlobalTag,
-    {
+    pub fn global<G: HasGlobalManagedTag<Component = T>>() -> Self {
         Self {
             _ty: PhantomData,
-            raw: get_global_tag(NamedTypeId::of::<T>(), NamedTypeId::of::<T::Component>()),
+            raw: get_global_tag(NamedTypeId::of::<G>(), NamedTypeId::of::<T>()),
         }
     }
 
@@ -64,7 +61,7 @@ impl VirtualTag {
         }
     }
 
-    pub fn global<T: VirtualGlobalTag>() -> Self {
+    pub fn global<T: HasGlobalVirtualTag>() -> Self {
         Self {
             raw: get_global_tag(NamedTypeId::of::<T>(), InertTag::inert_ty_id()),
         }
@@ -118,13 +115,66 @@ impl fmt::Debug for RawTag {
     }
 }
 
-// === Static Tags === //
+// === Global Tags === //
 
-pub trait ManagedGlobalTag: Sized + 'static {
-    type Component;
+// Traits
+pub trait HasGlobalManagedTag: Sized + 'static {
+    type Component: 'static;
 }
 
-pub trait VirtualGlobalTag: Sized + 'static {}
+pub trait HasGlobalVirtualTag: Sized + 'static {}
+
+// Aliases
+mod tag_alias_sealed {
+    use std::marker::PhantomData;
+
+    use derive_where::derive_where;
+
+    #[derive(Debug, Copy, Clone)]
+    pub enum Never {}
+
+    #[derive_where(Debug, Copy, Clone)]
+    pub enum GlobalTag<T> {
+        _Phantom(Never, PhantomData<fn() -> T>),
+        GlobalTag,
+    }
+
+    #[derive_where(Debug, Copy, Clone)]
+    pub enum GlobalVirtualTag<T> {
+        _Phantom(Never, PhantomData<fn() -> T>),
+        GlobalVirtualTag,
+    }
+
+    pub mod globs {
+        pub use super::{GlobalTag::GlobalTag, GlobalVirtualTag::GlobalVirtualTag};
+    }
+}
+
+pub use tag_alias_sealed::{globs::*, GlobalTag, GlobalVirtualTag};
+
+impl<T: HasGlobalManagedTag> From<GlobalTag<T>> for Tag<T::Component> {
+    fn from(_: GlobalTag<T>) -> Self {
+        Tag::global::<T>()
+    }
+}
+
+impl<T: HasGlobalManagedTag> From<GlobalTag<T>> for RawTag {
+    fn from(value: GlobalTag<T>) -> Self {
+        Tag::from(value).into()
+    }
+}
+
+impl<T: HasGlobalVirtualTag> From<GlobalVirtualTag<T>> for VirtualTag {
+    fn from(_: GlobalVirtualTag<T>) -> Self {
+        VirtualTag::global::<T>()
+    }
+}
+
+impl<T: HasGlobalVirtualTag> From<GlobalVirtualTag<T>> for RawTag {
+    fn from(value: GlobalVirtualTag<T>) -> Self {
+        VirtualTag::from(value).into()
+    }
+}
 
 // === Flushing === //
 
@@ -207,6 +257,18 @@ pub mod query_internals {
     impl ExtraTagConverter for RawTag {
         fn into_single(self, _extra: &mut Vec<InertTag>) -> Option<InertTag> {
             Some(self.0)
+        }
+    }
+
+    impl<T: HasGlobalManagedTag> ExtraTagConverter for GlobalTag<T> {
+        fn into_single(self, _extra: &mut Vec<InertTag>) -> Option<InertTag> {
+            Some(Tag::from(self).raw().0)
+        }
+    }
+
+    impl<T: HasGlobalVirtualTag> ExtraTagConverter for GlobalVirtualTag<T> {
+        fn into_single(self, _extra: &mut Vec<InertTag>) -> Option<InertTag> {
+            Some(VirtualTag::from(self).raw().0)
         }
     }
 
