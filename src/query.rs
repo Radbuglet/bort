@@ -203,11 +203,14 @@ pub mod query_internals {
         crate::{
             core::token::MainThreadToken,
             database::{DbRoot, InertTag, ReifiedTagList},
+            entity::{HeapMut, HeapRef},
             event::QueryableEventList,
+            obj::Obj,
             query::try_flush,
         },
         std::{
             assert,
+            convert::Into,
             hint::unreachable_unchecked,
             iter::{empty, Iterator},
             mem::drop,
@@ -536,8 +539,8 @@ macro_rules! query {
 					$($crate::query::query_internals::Iterator::next(&mut $entity),)?
 				) {
 					// Convert the residuals to their target form
-					$( $crate::query::query!(@__internal_xform $prefix $name token); )*
 					$( let $entity = $entity.get(token).into_dangerous_entity(); )?
+					$crate::query::query!(@__internal_xform $($entity)?; $($prefix $name token;)*);
 
 					// Run userland code, absorbing their attempt at an early return.
 					let mut did_run = false;
@@ -588,11 +591,46 @@ macro_rules! query {
 	};
 
 	// N.B. these work on both `Slot`s and `DirectSlot`s
-	(@__internal_xform ref $name:ident $token:ident) => { let $name = &*$name.borrow($token); };
-	(@__internal_xform mut $name:ident $token:ident) => { let $name = &mut *$name.borrow_mut($token); };
-	(@__internal_xform oref $name:ident $token:ident) => { let $name = $name.borrow($token); };
-	(@__internal_xform omut $name:ident $token:ident) => { let mut $name =  $name.borrow_mut($token); };
-	(@__internal_xform slot $name:ident $token:ident) => {};
+	(@__internal_xform $($entity:ident)?;) => {};
+	(@__internal_xform $($entity:ident)?; slot $name:ident $token:ident; $($rest:tt)*) => {
+		$crate::query::query!(@__internal_xform $($entity)?; $($rest)*);
+	};
+	(@__internal_xform $($entity:ident)?; ref $name:ident $token:ident; $($rest:tt)*) => {
+		let $name = &*$name.borrow($token);
+		$crate::query::query!(@__internal_xform $($entity)?; $($rest)*);
+	};
+	(@__internal_xform $($entity:ident)?; mut $name:ident $token:ident; $($rest:tt)*) => {
+		let $name = &mut *$name.borrow_mut($token);
+		$crate::query::query!(@__internal_xform $($entity)?; $($rest)*);
+	};
+	(@__internal_xform; oref $name:ident $token:ident; $($rest:tt)*) => {
+		let $name = $name.borrow($token);
+		$crate::query::query!(@__internal_xform; $($rest)*);
+	};
+	(@__internal_xform; omut $name:ident $token:ident; $($rest:tt)*) => {
+		let mut $name =  $name.borrow_mut($token);
+		$crate::query::query!(@__internal_xform; $($rest)*);
+	};
+	(@__internal_xform $entity:ident; oref $name:ident $token:ident; $($rest:tt)*) => {
+		let $name = $crate::query::query_internals::HeapRef::new(
+			$crate::query::query_internals::Obj::from_raw_parts(
+				$entity,
+				$crate::query::query_internals::Into::into($name),
+			),
+			$name.borrow($token),
+		);
+		$crate::query::query!(@__internal_xform $entity; $($rest)*);
+	};
+	(@__internal_xform $entity:ident; omut $name:ident $token:ident; $($rest:tt)*) => {
+		let mut $name = $crate::query::query_internals::HeapMut::new(
+			$crate::query::query_internals::Obj::from_raw_parts(
+				$entity,
+				$crate::query::query_internals::Into::into($name),
+			),
+			$name.borrow_mut($token),
+		);
+		$crate::query::query!(@__internal_xform $entity; $($rest)*);
+	};
 }
 
 pub use query;

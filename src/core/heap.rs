@@ -372,6 +372,12 @@ impl<'a, T: 'static> DirectSlot<'a, T> {
     }
 }
 
+impl<T> From<DirectSlot<'_, T>> for Slot<T> {
+    fn from(slot: DirectSlot<'_, T>) -> Self {
+        slot.slot()
+    }
+}
+
 #[derive_where(Copy, Clone)]
 pub struct Slot<T: 'static> {
     _ty: PhantomData<&'static HeapValue<T>>,

@@ -17,7 +17,7 @@ pub mod prelude {
             BehaviorRegistry, ComponentInjector, ContextlessEventHandler, ContextlessQueryHandler,
             HasBehavior, NamespacedQueryHandler,
         },
-        entity::{storage, CompMut, CompRef, Entity, OwnedEntity, Storage},
+        entity::{storage, CompMut, CompRef, Entity, HeapMut, HeapRef, OwnedEntity, Storage},
         event::{EventTarget, ProcessableEventList, QueryableEventList, VecEventList},
         obj::{Obj, OwnedObj},
         query::{
