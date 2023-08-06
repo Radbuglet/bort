@@ -350,7 +350,7 @@ macro_rules! query {
 				// Inject all the necessary context
 				$(
 					let $name = $name.get_slot(entity);
-					$crate::query::query!(@__internal_xform $prefix $name token);
+					$crate::query::query!(@__internal_xform entity; $prefix $name token;);
 				)*
 				$( let $entity = entity; )?
 
