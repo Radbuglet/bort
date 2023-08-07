@@ -49,6 +49,7 @@ struct CellBorrow<'b, const MUTABLE: bool> {
 
 impl<'b> CellBorrowRef<'b> {
     #[inline(always)]
+    #[track_caller]
     fn acquire(state_cell: &'b Cell<u32>, location: &BorrowTracker) -> Option<Self> {
         let state = state_cell.get();
 
@@ -77,6 +78,7 @@ impl<'b> CellBorrowRef<'b> {
 
 impl<'b> CellBorrowMut<'b> {
     #[inline(always)]
+    #[track_caller]
     fn acquire(state_cell: &'b Cell<u32>, location: &BorrowTracker) -> Option<Self> {
         let state = state_cell.get();
         if state == NEUTRAL {
@@ -133,6 +135,7 @@ cfgenius::cond! {
             }
 
             #[inline(always)]
+            #[track_caller]
             pub fn set(&self) {
                 self.0.set(Some(Location::caller()));
             }
@@ -496,6 +499,7 @@ impl<T> OptRefCell<T> {
 
     // === Replace === //
 
+    #[track_caller]
     pub fn try_replace_with<F>(&self, f: F) -> Result<Option<T>, BorrowMutError>
     where
         F: FnOnce(Option<&mut T>) -> Option<T>,
@@ -522,6 +526,7 @@ impl<T> OptRefCell<T> {
         }
     }
 
+    #[track_caller]
     pub fn replace_with<F>(&self, f: F) -> Option<T>
     where
         F: FnOnce(Option<&mut T>) -> Option<T>,
@@ -529,18 +534,22 @@ impl<T> OptRefCell<T> {
         unwrap_error(self.try_replace_with(f))
     }
 
+    #[track_caller]
     pub fn try_replace(&self, t: Option<T>) -> Result<Option<T>, BorrowMutError> {
         self.try_replace_with(|_| t)
     }
 
+    #[track_caller]
     pub fn replace(&self, t: Option<T>) -> Option<T> {
         self.replace_with(|_| t)
     }
 
+    #[track_caller]
     pub fn take(&self) -> Option<T> {
         self.replace(None)
     }
 
+    #[track_caller]
     pub fn swap(&self, other: &OptRefCell<T>) {
         let value = self.take();
         self.replace(other.replace(value));

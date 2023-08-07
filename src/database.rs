@@ -154,7 +154,7 @@ enum DbEntityMappingHeap<T: 'static> {
 struct DbComponentType {
     pub id: NamedTypeId,
     pub name: &'static str,
-    pub dtor: fn(&'static MainThreadToken, &mut DbRoot, InertEntity),
+    pub dtor: fn(&'static MainThreadToken, InertEntity),
 }
 
 impl fmt::Debug for DbComponentType {
@@ -168,10 +168,14 @@ impl fmt::Debug for DbComponentType {
 
 impl DbComponentType {
     fn of<T: 'static>() -> Self {
-        fn dtor<T: 'static>(token: &'static MainThreadToken, db: &mut DbRoot, entity: InertEntity) {
-            let storage = db.get_storage::<T>();
-            let comp = db.remove_component(token, &mut storage.borrow_mut(token), entity);
+        fn dtor<T: 'static>(token: &'static MainThreadToken, entity: InertEntity) {
+            let comp = {
+                let mut db = DbRoot::get(token);
+                let storage = db.get_storage::<T>();
+                db.remove_component(token, &mut storage.borrow_mut(token), entity)
+            };
             debug_assert!(comp.is_ok());
+            drop(comp);
         }
 
         Self {
@@ -356,11 +360,10 @@ impl DbRoot {
         me
     }
 
-    pub fn despawn_entity(
+    pub fn despawn_entity_without_comp_cleanup(
         &mut self,
-        token: &'static MainThreadToken,
         entity: InertEntity,
-    ) -> Result<(), EntityDeadError> {
+    ) -> Result<ComponentListSnapshot, EntityDeadError> {
         // Fetch the entity info
         let Some(entity_info) = self
             .alive_entities
@@ -379,17 +382,7 @@ impl DbRoot {
             });
         }
 
-        // Remove all of the object's components
-        //
-        // N.B. This `direct_borrow` operation could be dangerous since we're not just borrowing
-        // they immutable component list, but also the metadata used by the set to update its
-        // cache. Fortunately, the actual destructors are operating on logically dead entities and
-        // so will therefore never update the component list, making the borrow temporarily safe.
-        for comp in entity_info.comp_list.direct_borrow().keys() {
-            (comp.dtor)(token, self, entity)
-        }
-
-        Ok(())
+        Ok(ComponentListSnapshot(entity_info.comp_list))
     }
 
     pub fn is_entity_alive(&self, entity: InertEntity) -> bool {
@@ -1238,5 +1231,21 @@ impl<'a> ReifiedTagList<'a> {
             .iter()
             .filter_map(|v| v.as_ref())
             .chain(self.dynamic_tags.iter())
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct ComponentListSnapshot(DbComponentListRef);
+
+impl ComponentListSnapshot {
+    pub fn run_dtors(self, token: &'static MainThreadToken, target: InertEntity) {
+        // TODO: Optimize.
+
+        let len = self.0.direct_borrow().keys().len();
+
+        for i in 0..len {
+            let dtor = self.0.direct_borrow().keys()[i].dtor;
+            dtor(token, target);
+        }
     }
 }

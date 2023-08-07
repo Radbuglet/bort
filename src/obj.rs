@@ -64,6 +64,7 @@ impl<T: 'static> Obj<T> {
         self.value
     }
 
+    #[track_caller]
     pub fn try_get(self) -> Option<CompRef<T>> {
         let token = MainThreadToken::acquire_fmt("fetch entity component data");
 
@@ -73,6 +74,7 @@ impl<T: 'static> Obj<T> {
             .map(|r| CompRef::new(self, r))
     }
 
+    #[track_caller]
     pub fn try_get_mut(self) -> Option<CompMut<T>> {
         let token = MainThreadToken::acquire_fmt("fetch entity component data");
 
@@ -82,6 +84,7 @@ impl<T: 'static> Obj<T> {
             .map(|r| CompMut::new(self, r))
     }
 
+    #[track_caller]
     pub fn get(self) -> CompRef<T> {
         let token = MainThreadToken::acquire_fmt("fetch entity component data");
         assert!(
@@ -93,6 +96,7 @@ impl<T: 'static> Obj<T> {
         CompRef::new(self, self.value.borrow(token))
     }
 
+    #[track_caller]
     pub fn get_mut(self) -> CompMut<T> {
         let token = MainThreadToken::acquire_fmt("fetch entity component data");
         assert!(

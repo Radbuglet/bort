@@ -106,6 +106,7 @@ impl<T: 'static> Storage<T> {
         slot
     }
 
+    #[track_caller]
     pub fn try_get(&self, entity: Entity) -> Option<CompRef<T>> {
         self.try_get_slot(entity).map(|slot| {
             CompRef::new(
@@ -115,6 +116,7 @@ impl<T: 'static> Storage<T> {
         })
     }
 
+    #[track_caller]
     pub fn try_get_mut(&self, entity: Entity) -> Option<CompMut<T>> {
         self.try_get_slot(entity).map(|slot| {
             CompMut::new(
@@ -124,6 +126,7 @@ impl<T: 'static> Storage<T> {
         })
     }
 
+    #[track_caller]
     pub fn get(&self, entity: Entity) -> CompRef<T> {
         let slot = self.get_slot(entity);
 
@@ -133,6 +136,7 @@ impl<T: 'static> Storage<T> {
         )
     }
 
+    #[track_caller]
     pub fn get_mut(&self, entity: Entity) -> CompMut<T> {
         let slot = self.get_slot(entity);
 
@@ -191,14 +195,17 @@ impl Entity {
         storage::<T>().remove(self)
     }
 
+    #[track_caller]
     pub fn try_get_slot<T: 'static>(self) -> Option<Slot<T>> {
         storage::<T>().try_get_slot(self)
     }
 
+    #[track_caller]
     pub fn try_get<T: 'static>(self) -> Option<CompRef<T>> {
         storage::<T>().try_get(self)
     }
 
+    #[track_caller]
     pub fn try_get_mut<T: 'static>(self) -> Option<CompMut<T>> {
         storage::<T>().try_get_mut(self)
     }
@@ -207,10 +214,12 @@ impl Entity {
         storage::<T>().get_slot(self)
     }
 
+    #[track_caller]
     pub fn get<T: 'static>(self) -> CompRef<T> {
         storage::<T>().get(self)
     }
 
+    #[track_caller]
     pub fn get_mut<T: 'static>(self) -> CompMut<T> {
         storage::<T>().get_mut(self)
     }
@@ -270,10 +279,11 @@ impl Entity {
 
     pub fn destroy(self) {
         let token = MainThreadToken::acquire_fmt("destroy entity");
-        match DbRoot::get(token).despawn_entity(token, self.inert) {
-            Ok(()) => {}
-            Err(_) => panic!("Attempted to destroy already dead entity {self:?}"),
-        }
+        let components = DbRoot::get(token)
+            .despawn_entity_without_comp_cleanup(self.inert)
+            .unwrap_or_else(|_| panic!("Attempted to destroy already dead entity {self:?}"));
+
+        components.run_dtors(token, self.inert);
     }
 }
 
@@ -360,10 +370,12 @@ impl OwnedEntity {
         self.entity.try_get_slot()
     }
 
+    #[track_caller]
     pub fn try_get<T: 'static>(&self) -> Option<CompRef<T>> {
         self.entity.try_get()
     }
 
+    #[track_caller]
     pub fn try_get_mut<T: 'static>(&self) -> Option<CompMut<T>> {
         self.entity.try_get_mut()
     }
@@ -372,10 +384,12 @@ impl OwnedEntity {
         self.entity.get_slot()
     }
 
+    #[track_caller]
     pub fn get<T: 'static>(&self) -> CompRef<T> {
         self.entity.get()
     }
 
+    #[track_caller]
     pub fn get_mut<T: 'static>(&self) -> CompMut<T> {
         self.entity.get_mut()
     }

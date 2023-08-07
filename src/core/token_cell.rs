@@ -264,6 +264,7 @@ impl<T> NOptRefCell<T> {
         *self.namespace.get_mut() = namespace.map_or(0, |Namespace(id)| id.get());
     }
 
+    #[track_caller]
     pub fn set_namespace_ref(
         &self,
         token: &impl ExclusiveTokenHint<T>,
@@ -335,6 +336,7 @@ impl<T> NOptRefCell<T> {
         }
     }
 
+    #[track_caller]
     pub fn try_borrow<'a>(
         &'a self,
         token: &'a impl BorrowToken<T>,
@@ -355,6 +357,7 @@ impl<T> NOptRefCell<T> {
         self.value.try_borrow()
     }
 
+    #[track_caller]
     pub fn borrow_or_none<'a>(&'a self, token: &'a impl BorrowToken<T>) -> Option<OptRef<'a, T>> {
         self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
 
@@ -362,6 +365,7 @@ impl<T> NOptRefCell<T> {
         self.value.borrow_or_none()
     }
 
+    #[track_caller]
     pub fn borrow<'a>(&'a self, token: &'a impl BorrowToken<T>) -> OptRef<'a, T> {
         self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
 
@@ -369,6 +373,7 @@ impl<T> NOptRefCell<T> {
         self.value.borrow()
     }
 
+    #[track_caller]
     pub fn try_borrow_mut<'a>(
         &'a self,
         token: &'a impl BorrowMutToken<T>,
@@ -379,6 +384,7 @@ impl<T> NOptRefCell<T> {
         self.value.try_borrow_mut()
     }
 
+    #[track_caller]
     pub fn borrow_mut_or_none<'a>(
         &'a self,
         token: &'a impl BorrowMutToken<T>,
@@ -389,6 +395,7 @@ impl<T> NOptRefCell<T> {
         self.value.borrow_mut_or_none()
     }
 
+    #[track_caller]
     pub fn borrow_mut<'a>(&'a self, token: &'a impl BorrowMutToken<T>) -> OptRefMut<'a, T> {
         self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
 
@@ -398,6 +405,7 @@ impl<T> NOptRefCell<T> {
 
     // === Replace === //
 
+    #[track_caller]
     pub fn try_replace_with<F>(
         &self,
         token: &impl BorrowMutToken<T>,
@@ -412,6 +420,7 @@ impl<T> NOptRefCell<T> {
         self.value.try_replace_with(f)
     }
 
+    #[track_caller]
     pub fn replace_with<F>(&self, token: &impl BorrowMutToken<T>, f: F) -> Option<T>
     where
         F: FnOnce(Option<&mut T>) -> Option<T>,
@@ -422,6 +431,7 @@ impl<T> NOptRefCell<T> {
         self.value.replace_with(f)
     }
 
+    #[track_caller]
     pub fn try_replace(
         &self,
         token: &impl BorrowMutToken<T>,
@@ -433,6 +443,7 @@ impl<T> NOptRefCell<T> {
         self.value.try_replace(t)
     }
 
+    #[track_caller]
     pub fn replace(&self, token: &impl BorrowMutToken<T>, t: Option<T>) -> Option<T> {
         self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
 
@@ -440,6 +451,7 @@ impl<T> NOptRefCell<T> {
         self.value.replace(t)
     }
 
+    #[track_caller]
     pub fn take(&self, token: &impl BorrowMutToken<T>) -> Option<T> {
         self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
 
@@ -447,6 +459,7 @@ impl<T> NOptRefCell<T> {
         self.value.take()
     }
 
+    #[track_caller]
     pub fn swap_multi_token(
         &self,
         my_token: &impl BorrowMutToken<T>,
@@ -459,6 +472,7 @@ impl<T> NOptRefCell<T> {
         self.value.swap(&other.value)
     }
 
+    #[track_caller]
     pub fn swap(&self, token: &impl BorrowMutToken<T>, other: &NOptRefCell<T>) {
         self.swap_multi_token(token, token, other)
     }

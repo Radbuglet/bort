@@ -318,6 +318,7 @@ impl<'a, T: 'static> DirectSlot<'a, T> {
         .get(token)
     }
 
+    #[track_caller]
     pub fn borrow_or_none(self, token: &impl BorrowToken<T>) -> Option<OptRef<T>> {
         unsafe {
             // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
@@ -328,6 +329,7 @@ impl<'a, T: 'static> DirectSlot<'a, T> {
         .borrow_or_none(token)
     }
 
+    #[track_caller]
     pub fn borrow(self, token: &impl BorrowToken<T>) -> OptRef<T> {
         unsafe {
             // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
@@ -338,6 +340,7 @@ impl<'a, T: 'static> DirectSlot<'a, T> {
         .borrow(token)
     }
 
+    #[track_caller]
     pub fn borrow_mut_or_none(self, token: &impl BorrowMutToken<T>) -> Option<OptRefMut<T>> {
         unsafe {
             // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
@@ -348,6 +351,7 @@ impl<'a, T: 'static> DirectSlot<'a, T> {
         .borrow_mut_or_none(token)
     }
 
+    #[track_caller]
     pub fn borrow_mut(self, token: &impl BorrowMutToken<T>) -> OptRefMut<T> {
         unsafe {
             // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
@@ -358,6 +362,7 @@ impl<'a, T: 'static> DirectSlot<'a, T> {
         .borrow_mut(token)
     }
 
+    #[track_caller]
     pub fn take(self, token: &impl BorrowMutToken<T>) -> Option<T> {
         let taken = self.heap_value.value.take(token);
 
@@ -471,6 +476,7 @@ impl<T> Slot<T> {
         }
     }
 
+    #[track_caller]
     pub fn borrow_or_none(self, token: &impl BorrowToken<T>) -> Option<OptRef<T>> {
         unsafe {
             // Safety: we only use the `DirectSlot` until the function returns, and we know the
@@ -480,6 +486,7 @@ impl<T> Slot<T> {
         }
     }
 
+    #[track_caller]
     pub fn borrow(self, token: &impl BorrowToken<T>) -> OptRef<T> {
         unsafe {
             // Safety: we only use the `DirectSlot` until the function returns, and we know the
@@ -489,6 +496,7 @@ impl<T> Slot<T> {
         }
     }
 
+    #[track_caller]
     pub fn borrow_mut_or_none(self, token: &impl BorrowMutToken<T>) -> Option<OptRefMut<T>> {
         unsafe {
             // Safety: we only use the `DirectSlot` until the function returns, and we know the
@@ -498,6 +506,7 @@ impl<T> Slot<T> {
         }
     }
 
+    #[track_caller]
     pub fn borrow_mut(self, token: &impl BorrowMutToken<T>) -> OptRefMut<T> {
         unsafe {
             // Safety: we only use the `DirectSlot` until the function returns, and we know the
@@ -507,6 +516,7 @@ impl<T> Slot<T> {
         }
     }
 
+    #[track_caller]
     pub fn take(&self, token: &impl BorrowMutToken<T>) -> Option<T> {
         unsafe {
             // Safety: we only use the `DirectSlot` until the function returns, and we know the
