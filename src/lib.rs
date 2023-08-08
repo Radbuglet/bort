@@ -8,6 +8,7 @@ pub mod entity;
 pub mod event;
 pub mod obj;
 pub mod query;
+pub mod reborrow;
 mod util;
 
 pub mod prelude {
@@ -24,6 +25,7 @@ pub mod prelude {
             flush, query, GlobalTag, GlobalVirtualTag, HasGlobalManagedTag, HasGlobalVirtualTag,
             RawTag, Tag, VirtualTag,
         },
+        reborrow::arb,
     };
 }
 
