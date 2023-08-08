@@ -175,6 +175,14 @@ impl Entity {
         self
     }
 
+    pub fn with_many<F>(self, f: F) -> Self
+    where
+        F: FnOnce(Entity),
+    {
+        f(self);
+        self
+    }
+
     pub fn with_debug_label<L: AsDebugLabel>(self, label: L) -> Self {
         #[cfg(debug_assertions)]
         self.with(crate::debug::DebugLabel::from(label));
@@ -233,8 +241,9 @@ impl Entity {
     }
 
     pub fn tag(self, tag: impl Into<RawTag>) {
-        match DbRoot::get(MainThreadToken::acquire_fmt("tag an entity"))
-            .tag_entity(self.inert, tag.into().0)
+        let tag = tag.into().0;
+
+        match DbRoot::get(MainThreadToken::acquire_fmt("tag an entity")).tag_entity(self.inert, tag)
         {
             Ok(()) => { /* no-op */ }
             Err(EntityDeadError) => panic!("Attempted to add tag to dead entity {self:?}"),
@@ -242,8 +251,9 @@ impl Entity {
     }
 
     pub fn untag(self, tag: impl Into<RawTag>) {
+        let tag = tag.into().0;
         match DbRoot::get(MainThreadToken::acquire_fmt("untag an entity"))
-            .untag_entity(self.inert, tag.into().0)
+            .untag_entity(self.inert, tag)
         {
             Ok(()) => {}
             Err(EntityDeadError) => panic!("Attempted to remove tag from dead entity {self:?}"),
@@ -262,8 +272,9 @@ impl Entity {
     }
 
     pub fn is_tagged(self, tag: impl Into<RawTag>) -> bool {
+        let tag = tag.into().0;
         match DbRoot::get(MainThreadToken::acquire_fmt("query entity tags"))
-            .is_entity_tagged(self.inert, tag.into().0)
+            .is_entity_tagged(self.inert, tag)
         {
             Ok(result) => result,
             Err(EntityDeadError) => panic!("Attempted to query tags of dead entity {self:?}"),
@@ -346,6 +357,14 @@ impl OwnedEntity {
 
     pub fn with_self_referential<T: 'static>(self, func: impl FnOnce(Entity) -> T) -> Self {
         self.entity.insert(func(self.entity()));
+        self
+    }
+
+    pub fn with_many<F>(self, f: F) -> Self
+    where
+        F: FnOnce(Entity),
+    {
+        f(self.entity);
         self
     }
 

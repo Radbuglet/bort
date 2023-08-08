@@ -307,6 +307,7 @@ impl InertTag {
 // === Methods === //
 
 impl DbRoot {
+    #[track_caller]
     pub fn get(token: &'static MainThreadToken) -> OptRefMut<'static, DbRoot> {
         static DB: NOptRefCell<DbRoot> = NOptRefCell::new_empty();
 
