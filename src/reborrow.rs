@@ -45,7 +45,7 @@ pub mod macro_internals {
 #[macro_export]
 macro_rules! arb {
 	(
-		$cx:ident $(, $($name:ident),* $(,)?)? => $body:expr
+		$cx:ident $(: $($name:ident),* $(,)?)? => $body:expr
 	) => {{
 		let $crate::reborrow::macro_internals::AutoReborrow { cache, populators, clear } = &mut $cx;
 
@@ -71,70 +71,86 @@ macro_rules! arb {
 		$body
 
 	}};
-    (
-		$cx:ident:
-		$(let $name:ident$(($($dep:ident),*$(,)?))? = $rb:expr;)*
+	(
+		$cx:ident
+		$(: $($name:ident),* $(,)?)?
 	) => {
-		#[allow(unused_mut)]
-		let mut $cx = {
-			#[allow(non_camel_case_types)]
-			struct Container<$($name),*> { $($name: $name),* }
+		#[allow(unused_variables)]
+		let $crate::reborrow::macro_internals::AutoReborrow {
+			cache: __cache,
+			populators: __populators,
+			clear: __clear,
+		} = &mut $cx;
 
-			// Gather closures
-			let (raw_populators, result_types) = {
-				let result_types = Container { $($name: $crate::reborrow::macro_internals::BoundTy::new()),* };
+		// Clear the cache
+		__clear(__cache);
 
-				$(
-					let $name = move |($($($dep,)*)?): ($($( $crate::reborrow::macro_internals::arb!(@__bind_dep_and_give_mut_ref; $dep), )*)?)| {
-						$($( let $dep = result_types.$dep.bind_mut($dep); )*)?
-						$rb
-					};
-					result_types.$name.bind_fn_result(&$name);
-				)*
+		// Populate the cache
+		$($((__populators.$name)(&mut *__cache);)*)?
 
-				(Container { $($name),* }, result_types)
-			};
-
-			// Construct cache
-			let cache = Container { $($name: result_types.$name.make_none()),* };
-			let cache_ty = $crate::reborrow::macro_internals::BoundTy::new();
-			cache_ty.bind_ref(&cache);
-
-			// Construct cache populator
-			let populators = {
-				$(
-					let $name = move |cache: &mut _| {
-						let cache = cache_ty.bind_mut(cache);
-
-						if cache.$name.is_none() {
-							// Populate dependencies
-							$($(
-								$dep(&mut *cache);
-							)*)?
-
-							// Fetch dependencies
-							$($(let $dep = cache.$dep.as_mut().unwrap();)*)?
-
-							// Compute value
-							let value = (raw_populators.$name)(($($($dep,)*)?));
-
-							cache.$name = $crate::reborrow::macro_internals::Option::Some(value);
-						}
-					};
-				)*
-
-				Container { $($name),* }
-			};
-
-			// Create cache clearer
-			let clear = move |cache: &mut _| {
-				let cache = cache_ty.bind_mut(cache);
-				$(cache.$name = $crate::reborrow::macro_internals::Option::None;)*
-			};
-
-			$crate::reborrow::macro_internals::AutoReborrow { cache, populators, clear }
-		};
+		// Inject dependencies
+		$($( let $name = __cache.$name.as_mut().unwrap(); )*)?
 	};
+    (
+		$(let $name:ident$(($($dep:ident),*$(,)?))? = $rb:expr;)*
+	) => {{
+		#[allow(non_camel_case_types)]
+		struct Container<$($name),*> { $($name: $name),* }
+
+		// Gather closures
+		let (raw_populators, result_types) = {
+			let result_types = Container { $($name: $crate::reborrow::macro_internals::BoundTy::new()),* };
+
+			$(
+				let $name = move |($($($dep,)*)?): ($($( $crate::reborrow::macro_internals::arb!(@__bind_dep_and_give_mut_ref; $dep), )*)?)| {
+					$($( let $dep = result_types.$dep.bind_mut($dep); )*)?
+					$rb
+				};
+				result_types.$name.bind_fn_result(&$name);
+			)*
+
+			(Container { $($name),* }, result_types)
+		};
+
+		// Construct cache
+		let cache = Container { $($name: result_types.$name.make_none()),* };
+		let cache_ty = $crate::reborrow::macro_internals::BoundTy::new();
+		cache_ty.bind_ref(&cache);
+
+		// Construct cache populator
+		let populators = {
+			$(
+				let $name = move |cache: &mut _| {
+					let cache = cache_ty.bind_mut(cache);
+
+					if cache.$name.is_none() {
+						// Populate dependencies
+						$($(
+							$dep(&mut *cache);
+						)*)?
+
+						// Fetch dependencies
+						$($(let $dep = cache.$dep.as_mut().unwrap();)*)?
+
+						// Compute value
+						let value = (raw_populators.$name)(($($($dep,)*)?));
+
+						cache.$name = $crate::reborrow::macro_internals::Option::Some(value);
+					}
+				};
+			)*
+
+			Container { $($name),* }
+		};
+
+		// Create cache clearer
+		let clear = move |cache: &mut _| {
+			let cache = cache_ty.bind_mut(cache);
+			$(cache.$name = $crate::reborrow::macro_internals::Option::None;)*
+		};
+
+		$crate::reborrow::macro_internals::AutoReborrow { cache, populators, clear }
+	}};
 	(@__bind_dep_and_give_mut_ref; $dep:ident) => { &mut _ };
 }
 
