@@ -4,7 +4,7 @@ pub mod macro_internals {
     use std::marker::PhantomData;
 
     pub use {
-        super::arb,
+        super::auto_reborrow,
         std::{ops::Drop, option::Option},
     };
 
@@ -43,7 +43,7 @@ pub mod macro_internals {
 }
 
 #[macro_export]
-macro_rules! arb {
+macro_rules! auto_reborrow {
 	(
 		$cx:ident $(: $($name:ident),* $(,)?)? => $body:expr
 	) => {{
@@ -102,7 +102,7 @@ macro_rules! arb {
 			let result_types = Container { $($name: $crate::reborrow::macro_internals::BoundTy::new()),* };
 
 			$(
-				let $name = move |($($($dep,)*)?): ($($( $crate::reborrow::macro_internals::arb!(@__bind_dep_and_give_mut_ref; $dep), )*)?)| {
+				let $name = move |($($($dep,)*)?): ($($( $crate::reborrow::macro_internals::auto_reborrow!(@__bind_dep_and_give_mut_ref; $dep), )*)?)| {
 					$($( let $dep = result_types.$dep.bind_mut($dep); )*)?
 					$rb
 				};
@@ -154,4 +154,4 @@ macro_rules! arb {
 	(@__bind_dep_and_give_mut_ref; $dep:ident) => { &mut _ };
 }
 
-pub use arb;
+pub use auto_reborrow;

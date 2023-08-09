@@ -404,7 +404,11 @@ pub trait HasBehavior: Sized + 'static {
     type Delegate: BehaviorDelegate;
 }
 
-pub trait BehaviorDelegate: 'static + Sized + Send + Sync {}
+pub trait BehaviorDelegate: 'static + Sized + Send + Sync {
+    fn pre_register(&mut self, registry: &mut BehaviorRegistry) {
+        let _ = registry;
+    }
+}
 
 // ExecutableBehaviorDelegate
 pub trait ExecutableBehaviorDelegate<C>: BehaviorDelegate {
@@ -454,7 +458,9 @@ impl BehaviorRegistry {
         }
     }
 
-    pub fn register<B: HasBehavior>(&mut self, delegate: B::Delegate) -> &mut Self {
+    pub fn register<B: HasBehavior>(&mut self, mut delegate: B::Delegate) -> &mut Self {
+        delegate.pre_register(self);
+
         self.behaviors
             .entry(NamedTypeId::of::<B>())
             .or_insert_with(|| Box::<Vec<B::Delegate>>::default())

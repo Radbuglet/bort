@@ -25,7 +25,7 @@ pub mod prelude {
             flush, query, GlobalTag, GlobalVirtualTag, HasGlobalManagedTag, HasGlobalVirtualTag,
             RawTag, Tag, VirtualTag,
         },
-        reborrow::arb,
+        reborrow::auto_reborrow,
     };
 }
 
