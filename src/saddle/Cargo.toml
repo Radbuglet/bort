@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 derive-where = "1.2.1"
 linkme = "0.3.14"
+rustc-hash = "1.1.0"
