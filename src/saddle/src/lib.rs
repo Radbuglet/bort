@@ -1,9 +1,5 @@
 use std::marker::PhantomData;
 
-// === Validator === //
-
-mod validator;
-
 // === Markers === //
 
 pub trait Universe: Sized + 'static {}
@@ -198,6 +194,12 @@ macro_rules! behavior {
 	};
 }
 
+// === Validation === //
+
+pub mod validator;
+
+// TODO: Expose graph-printing behavior
+
 // === Entry === //
 
 pub struct RootBehaviorToken<U> {
@@ -211,5 +213,3 @@ impl<U: Universe> RootBehaviorToken<U> {
         todo!();
     }
 }
-
-// TODO: Expose graph-printing behavior

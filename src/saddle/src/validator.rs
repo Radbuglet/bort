@@ -10,13 +10,7 @@ use rustc_hash::FxHashMap;
 
 // === Helpers === //
 
-#[derive(Copy, Clone)]
-pub struct DefInfo {
-    pub name: &'static str,
-    pub path: &'static str,
-}
-
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub enum Mutability {
     Mutable,
     Immutable,
@@ -47,40 +41,107 @@ impl Mutability {
 
 // === Validator === //
 
+#[derive(Debug)]
 pub struct Validator {
     /// The graph of behavior namespaces connected by the behaviors which could possibly call into
     /// other namespaces.
     graph: Graph<Namespace, Rc<Behavior>>,
 
-    /// A map from universe type to definition info.
-    universe_def_infos: FxHashMap<TypeId, DefInfo>,
+    /// A map from namespace types to namespace nodes.
+    namespace_ty_map: FxHashMap<TypeId, NodeIndex>,
 
     /// A map from component type IDs to component type names.
     component_names: FxHashMap<TypeId, &'static str>,
 }
 
+#[derive(Debug)]
 struct Namespace {
-    /// The `TypeId` of the universe in which this namespace lives.
-    universe: TypeId,
+    /// The location where the namespace's universe was defined.
+    universe_def_loc: &'static str,
 
     /// The location where this namespace was defined.
-    def_info: DefInfo,
+    my_def_loc: &'static str,
 
     /// The set of behaviors which borrow data in the namespace but don't actually call into any other
     /// behaviors.
     terminal_behaviors: Vec<Behavior>,
 }
 
+#[derive(Debug)]
 struct Behavior {
     /// The location where the behavior was defined.
-    def_info: DefInfo,
+    def_path: &'static str,
 
     /// The set of components borrowed by the behavior.
     borrows: FxHashMap<TypeId, Mutability>,
 }
 
 impl Validator {
-    pub fn validate(&mut self) {
+    fn get_namespace(
+        &mut self,
+        universe: &'static str,
+        namespace: (TypeId, &'static str),
+    ) -> NodeIndex {
+        match self.namespace_ty_map.entry(namespace.0) {
+            std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let graph = self.graph.add_node(Namespace {
+                    universe_def_loc: universe,
+                    my_def_loc: namespace.1,
+                    terminal_behaviors: Vec::new(),
+                });
+                *entry.insert(graph)
+            }
+        }
+    }
+
+    pub fn add_behavior(
+        &mut self,
+        universe: &'static str,
+        namespace: (TypeId, &'static str),
+        my_path: &'static str,
+        borrows: impl IntoIterator<Item = (TypeId, &'static str, Mutability)>,
+        calls: impl IntoIterator<Item = (TypeId, &'static str)>,
+    ) {
+        // Create the namespace node
+        let src_idx = self.get_namespace(universe, namespace);
+
+        // Construct the behavior
+        let borrows = borrows
+            .into_iter()
+            .map(|(id, name, perms)| {
+                self.component_names.entry(id).or_insert(name);
+                (id, perms)
+            })
+            .collect();
+
+        let behavior = Behavior {
+            def_path: my_path,
+            borrows,
+        };
+
+        // Construct an edge for every call or register the behavior as terminal
+        {
+            let mut iter = calls.into_iter();
+            let mut curr = iter.next();
+
+            if curr.is_some() {
+                let behavior = Rc::new(behavior);
+
+                // We have edges to connect
+                while let Some(call) = curr {
+                    let dst_idx = self.get_namespace(universe, call);
+                    self.graph.add_edge(src_idx, dst_idx, behavior.clone());
+                    curr = iter.next();
+                }
+            } else {
+                // This is a terminal edge
+                self.graph[src_idx].terminal_behaviors.push(behavior);
+            }
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
         // Assuming our graph is a DAG, toposort the namespaces.
         let Ok(topos) = toposort(&self.graph, None) else {
 			// If the graph is not a DAG, we know that it is invalid since a dependency issue could
@@ -104,30 +165,27 @@ impl Validator {
 			// the number of simple cycles in a graph grows factorially w.r.t the number of vertices.
 			// This is because, in a K^n graph, our cycles would be at least all possible permutations of
 			// those `n` nodes.
-			let mut sccs = FxHashMap::<TypeId, Vec<Vec<_>>>::default();
-
-			petgraph::algo::TarjanScc::new().run(&self.graph, |nodes| {
-				let universe = self.graph[nodes[0]].universe;
-				sccs.entry(universe).or_default().push(nodes.to_vec());
-			});
+			let mut sccs = petgraph::algo::tarjan_scc(&self.graph);
+			let mut f = String::new();
+			write!(f, "Failed to validate behavior graph: behaviors may be called in a cycle, which could cause borrow violations.").unwrap();
 
 			// TODO: Pretty-print this information.
 
-			panic!("Failed to validate behavior graph: behaviors may be called in a cycle, which could cause borrow violations.");
+			return Err(f);
 		};
 
         // Working in topological order, we populate the set of all components which could possibly
         // be borrowed when a namespace is called.
         struct ValidationCx<'a> {
-            ty_map: &'a FxHashMap<TypeId, &'static str>,
+            validator: &'a Validator,
             potentially_borrowed: Vec<FxHashMap<TypeId, (Mutability, Vec<EdgeIndex>)>>,
             err_msg_or_empty: String,
         }
 
         impl<'a> ValidationCx<'a> {
-            pub fn new(ty_map: &'a FxHashMap<TypeId, &'static str>, node_count: usize) -> Self {
+            pub fn new(validator: &'a Validator, node_count: usize) -> Self {
                 Self {
-                    ty_map,
+                    validator,
                     potentially_borrowed: (0..node_count).map(|_| FxHashMap::default()).collect(),
                     err_msg_or_empty: String::new(),
                 }
@@ -149,10 +207,10 @@ impl Validator {
                     // TODO: Pretty-print the chain of borrows.
                     write!(
                         f,
-                        "Behavior {} ({}) borrows component {} {} even though it may have already been borrowed {}.",
-                        behavior.def_info.name,
-						behavior.def_info.path,
-						self.ty_map[&req_ty],
+                        "Behavior in namespace {} defined at {} borrows component {} {} even though it may have already been borrowed {}.",
+						self.validator.graph[node].my_def_loc,
+						behavior.def_path,
+						self.validator.component_names[&req_ty],
 						req_mut.adjective(),
 						pre_mut.adjective(),
                     )
@@ -183,7 +241,7 @@ impl Validator {
             }
         }
 
-        let mut cx = ValidationCx::new(&self.component_names, self.graph.node_count());
+        let mut cx = ValidationCx::new(self, self.graph.node_count());
 
         for src_idx in topos {
             let src = &self.graph[src_idx];
@@ -204,12 +262,13 @@ impl Validator {
 
         // If we had any errors while validating this graph
         if !cx.err_msg_or_empty.is_empty() {
-            panic!(
+            return Err(format!(
                 "Failed to validate behavior graph:\n\n{}",
-                cx.err_msg_or_empty
-            );
+                cx.err_msg_or_empty,
+            ));
         }
 
         // Otherwise, the graph is fully valid.
+        Ok(())
     }
 }
