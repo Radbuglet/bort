@@ -15,4 +15,3 @@ Other than these access restrictions, Safe Bort is very flexible with respect to
 **Behavior modules** are comprised of lists of functions implementing a specific behavior delegate type. These functions are free to call into any component methods they desire but must define both the component types they require access to and the behaviors they'll be executing during that time statically. Before the behavior registry can finish constructing, Safe Bort checks these relationships to ensure that it is impossible for a behavior to call into another behavior with a conflicting access requirement.
 
 To summarize, whereas component modules are allowed to borrow only a fixed set of components in an unchecked fashion, behavior modules are allowed to borrow the full gamut of components in a very conservatively checked fashion.
-
