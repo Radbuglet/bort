@@ -5,6 +5,7 @@ universe!(pub MyUniverse);
 namespace! {
     pub MyBehavior1 in MyUniverse;
     pub MyBehavior2 in MyUniverse;
+    pub MyBehavior3 in MyUniverse;
 }
 
 cx! {
@@ -17,11 +18,23 @@ fn main() {
 
     behavior! {
         as MyBehavior1[bhv] do
-        (cx: [Bar; ref f64], bhv: [MyBehavior2]) {
+        (cx: [Bar; mut f64], bhv2: [MyBehavior2]) {
             behavior! {
-                as MyBehavior2[bhv] do
-                (cx: [;ref f64], bhv: []) {
-					// :)
+                as MyBehavior2[bhv2] do
+                (cx: [], bhv: [MyBehavior3]) {
+                    behavior! {
+                        as MyBehavior3[bhv] do
+                        (cx: [;ref f64], bhv: []) {
+                            // :)
+                        }
+                    }
+                }
+            }
+
+            behavior! {
+                as MyBehavior2[bhv2] do
+                (cx: [;ref f64], bhv: [MyBehavior3]) {
+                    // :)
                 }
             }
         }

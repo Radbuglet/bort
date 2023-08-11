@@ -1,12 +1,11 @@
-use std::{any::TypeId, fmt::Write, rc::Rc};
-
-use petgraph::{
-    algo::toposort,
-    graph::{EdgeIndex, NodeIndex},
-    visit::EdgeRef,
-    Graph,
+use std::{
+    any::TypeId,
+    fmt::{self, Write},
+    rc::Rc,
 };
-use rustc_hash::FxHashMap;
+
+use petgraph::{algo::toposort, graph::NodeIndex, visit::EdgeRef, Direction, Graph};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 // === Helpers === //
 
@@ -39,7 +38,33 @@ impl Mutability {
     }
 }
 
+#[derive(Copy, Clone)]
+struct Indent(u32);
+
+impl fmt::Display for Indent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for _ in 0..self.0 {
+            f.write_char(' ')?;
+        }
+        Ok(())
+    }
+}
+
+fn borrow_two<T>(list: &mut [T], a: usize, b: usize) -> (&mut T, &mut T) {
+    assert_ne!(a, b);
+
+    if a < b {
+        let (left, right) = list.split_at_mut(a + 1);
+        (&mut left[a], &mut right[b - a - 1])
+    } else {
+        let (b, a) = borrow_two(list, b, a);
+        (a, b)
+    }
+}
+
 // === Validator === //
+
+const INDENT_SIZE: u32 = 4;
 
 #[derive(Debug, Default)]
 pub struct Validator {
@@ -57,10 +82,10 @@ pub struct Validator {
 #[derive(Debug)]
 struct Namespace {
     /// The location where the namespace's universe was defined.
-    universe_def_loc: &'static str,
+    universe_def: &'static str,
 
     /// The location where this namespace was defined.
-    my_def_loc: &'static str,
+    my_def: &'static str,
 
     /// The set of behaviors which borrow data in the namespace but don't actually call into any other
     /// behaviors.
@@ -86,8 +111,8 @@ impl Validator {
             std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
             std::collections::hash_map::Entry::Vacant(entry) => {
                 let graph = self.graph.add_node(Namespace {
-                    universe_def_loc: universe,
-                    my_def_loc: namespace.1,
+                    universe_def: universe,
+                    my_def: namespace.1,
                     terminal_behaviors: Vec::new(),
                 });
                 *entry.insert(graph)
@@ -178,7 +203,7 @@ impl Validator {
         // be borrowed when a namespace is called.
         struct ValidationCx<'a> {
             validator: &'a Validator,
-            potentially_borrowed: Vec<FxHashMap<TypeId, (Mutability, Vec<EdgeIndex>)>>,
+            potentially_borrowed: Vec<FxHashMap<TypeId, Mutability>>,
             err_msg_or_empty: String,
         }
 
@@ -197,46 +222,143 @@ impl Validator {
 
                 for (&req_ty, &req_mut) in &behavior.borrows {
                     // If the request is compatible with the PBS, ignore it.
-                    let Some((pre_mut, pre_contrib)) = pbs.get(&req_ty) else { continue };
+                    let Some(pre_mut) = pbs.get(&req_ty) else { continue };
 
                     if pre_mut.is_compatible_with(req_mut) {
                         return;
                     }
 
                     // Otherwise, log out the error chain.
-                    // TODO: Pretty-print the chain of borrows.
                     write!(
                         f,
-                        "Behavior in namespace {} defined at {} borrows component {} {} even though it may have already been borrowed {}.",
-						self.validator.graph[node].my_def_loc,
+                        "The behavior in namespace {} defined at {} borrows component {} {} even though it may have already been borrowed {}.",
+						self.validator.graph[node].my_def,
 						behavior.def_path,
 						self.validator.component_names[&req_ty],
 						req_mut.adjective(),
 						pre_mut.adjective(),
                     )
                     .unwrap();
+
+                    fn print_tree(
+                        f: &mut String,
+                        validator: &Validator,
+                        potentially_borrowed: &[FxHashMap<TypeId, Mutability>],
+                        desired_comp: TypeId,
+                        desired_mut: Mutability,
+                        target: NodeIndex,
+                        indent: u32,
+                    ) {
+                        // There are two ways our target node may have been called with a specific
+                        // offending borrow type: inherited and direct.
+
+                        // We begin by logging out the direct calls.
+                        for caller in validator.graph.edges_directed(target, Direction::Incoming) {
+                            let Some(&caller_mut) = caller
+                                .weight()
+                                .borrows
+                                .get(&desired_comp)
+                                .filter(|v| !v.is_compatible_with(desired_mut))
+							else { continue };
+
+                            write!(
+								f,
+								"{}- The behavior in namespace {} defined at {} may have called it while holding the component {}.\n",
+								Indent(indent),
+								validator.graph[caller.source()].my_def,
+								caller.weight().def_path,
+								caller_mut.adjective(),
+							)
+                            .unwrap();
+                        }
+
+                        let mut printed_callers = FxHashSet::default();
+
+                        for caller in validator
+                            .graph
+                            .neighbors_directed(target, Direction::Incoming)
+                        {
+                            if !printed_callers.insert(caller) {
+                                continue;
+                            }
+
+                            let Some(&caller_mut) = potentially_borrowed[caller.index()]
+                                .get(&desired_comp)
+                                .filter(|v| !v.is_compatible_with(desired_mut))
+							else { continue };
+
+                            write!(
+                                f,
+                                "{}- The namespace {} may have called it while an ancestor was holding the component {}.\n\
+								 {}  Hint: the following behaviors may have been responsible for the aforementioned call...\n",
+                                Indent(indent),
+                                validator.graph[caller].my_def,
+                                caller_mut.adjective(),
+								Indent(indent),
+                            )
+                            .unwrap();
+
+                            for edge in validator.graph.edges_connecting(caller, target) {
+                                write!(
+                                    f,
+                                    "{}- {}\n",
+                                    Indent(indent + INDENT_SIZE),
+                                    edge.weight().def_path,
+                                )
+                                .unwrap();
+                            }
+
+                            write!(f, "{}  Tracing back responsibility...\n", Indent(indent))
+                                .unwrap();
+
+                            print_tree(
+                                f,
+                                validator,
+                                potentially_borrowed,
+                                desired_comp,
+                                desired_mut,
+                                caller,
+                                indent + INDENT_SIZE,
+                            );
+                        }
+                    }
+
+                    print_tree(
+                        f,
+                        self.validator,
+                        &self.potentially_borrowed,
+                        req_ty,
+                        req_mut,
+                        node,
+                        INDENT_SIZE,
+                    );
+
+                    f.push_str("\n\n");
                 }
             }
 
             pub fn extend_borrows(
                 &mut self,
-                calling_edge: EdgeIndex,
+                caller: NodeIndex,
                 calling_bhv: &Behavior,
                 callee: NodeIndex,
             ) {
-                let callee_pbs = &mut self.potentially_borrowed[callee.index()];
+                let (caller_pbs, callee_pbs) = borrow_two(
+                    &mut self.potentially_borrowed,
+                    caller.index(),
+                    callee.index(),
+                );
 
+                // Propagate inherited borrows
+                for (&req_ty, &req_mut) in &*caller_pbs {
+                    let pbs_mut = callee_pbs.entry(req_ty).or_insert(Mutability::Immutable);
+                    *pbs_mut = pbs_mut.strictest(req_mut);
+                }
+
+                // Propagate behavior borrows
                 for (&req_ty, &req_mut) in &calling_bhv.borrows {
-                    match callee_pbs.entry(req_ty) {
-                        std::collections::hash_map::Entry::Occupied(entry) => {
-                            let (pbs_mut, pbs_requesters) = entry.into_mut();
-                            *pbs_mut = pbs_mut.strictest(req_mut);
-                            pbs_requesters.push(calling_edge);
-                        }
-                        std::collections::hash_map::Entry::Vacant(entry) => {
-                            entry.insert((req_mut, vec![calling_edge]));
-                        }
-                    }
+                    let pbs_mut = callee_pbs.entry(req_ty).or_insert(Mutability::Immutable);
+                    *pbs_mut = pbs_mut.strictest(req_mut);
                 }
             }
         }
@@ -253,10 +375,10 @@ impl Validator {
 
             // For every non-terminal behavior, check it against the PBS and then extend the future
             // nodes.
-            for edge in self.graph.edges(src_idx) {
+            for edge in self.graph.edges_directed(src_idx, Direction::Outgoing) {
                 let edge_bhv = &self.graph[edge.id()];
                 cx.validate_behavior(src_idx, edge_bhv);
-                cx.extend_borrows(edge.id(), edge_bhv, edge.target());
+                cx.extend_borrows(src_idx, edge_bhv, edge.target());
             }
         }
 
