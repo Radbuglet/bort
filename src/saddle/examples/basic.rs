@@ -1,11 +1,29 @@
-saddle::universe!(pub Whee);
+use saddle::{behavior, cx, namespace, universe, RootBehaviorToken};
 
-saddle::cx! {
-    pub trait Foo(Whee) = mut u32;
+universe!(pub MyUniverse);
+
+namespace! {
+    pub MyBehavior1 in MyUniverse;
+    pub MyBehavior2 in MyUniverse;
 }
 
-saddle::cx! {
-    pub trait Bar(Whee): Foo = ref i32, mut f32;
+cx! {
+    pub trait Foo(MyUniverse) = mut u32;
+    pub trait Bar(MyUniverse): Foo = ref i32, mut f32;
 }
 
-fn main() {}
+fn main() {
+    let mut bhv = RootBehaviorToken::acquire();
+
+    behavior! {
+        as MyBehavior1[bhv] do
+        (cx: [Bar; ref f64], bhv: [MyBehavior2]) {
+            behavior! {
+                as MyBehavior2[bhv] do
+                (cx: [;ref f64], bhv: []) {
+					// :)
+                }
+            }
+        }
+    }
+}

@@ -41,7 +41,7 @@ impl Mutability {
 
 // === Validator === //
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Validator {
     /// The graph of behavior namespaces connected by the behaviors which could possibly call into
     /// other namespaces.

@@ -1,4 +1,9 @@
-use std::marker::PhantomData;
+use std::{
+    marker::PhantomData,
+    sync::atomic::{AtomicBool, Ordering::Relaxed},
+};
+
+use behavior_macro_internals::Validator;
 
 // === Trait internals === //
 
@@ -13,7 +18,7 @@ pub mod trait_internals {
     }
 
     pub trait AccessAlias {
-        type AccessIter: IntoIterator<Item = (TypeId, &'static str, Mutability)>;
+        type AccessIter: Iterator<Item = (TypeId, &'static str, Mutability)>;
 
         fn iter_access() -> Self::AccessIter;
     }
@@ -46,7 +51,7 @@ macro_rules! universe {
 		impl $crate::trait_internals::TrackDefinition for $name {
 			const LOCATION: &'static str = $crate::marker_macro_internals::concat!(
 				$crate::marker_macro_internals::stringify!($name),
-				"(at ",
+				" (at ",
 				$crate::marker_macro_internals::file!(),
 				":",
 				$crate::marker_macro_internals::line!(),
@@ -74,7 +79,7 @@ macro_rules! namespace {
 		impl $crate::trait_internals::TrackDefinition for $name {
 			const LOCATION: &'static str = $crate::marker_macro_internals::concat!(
 				$crate::marker_macro_internals::stringify!($name),
-				"(at ",
+				" (at ",
 				$crate::marker_macro_internals::file!(),
 				":",
 				$crate::marker_macro_internals::line!(),
@@ -201,7 +206,14 @@ macro_rules! cx {
 pub mod behavior_macro_internals {
     use crate::{AccessMut, AccessRef, BehaviorToken, Namespace, Universe};
 
-    pub use {linkme::distributed_slice, std::marker::Sized};
+    pub use {
+        crate::validator::Validator,
+        linkme::distributed_slice,
+        std::{any::TypeId, column, concat, file, line, marker::Sized},
+    };
+
+    #[distributed_slice]
+    pub static BEHAVIORS: [fn(&mut Validator)] = [..];
 
     pub trait BehaviorTokenExt<N: Namespace>: BehaviorToken<N> {
         fn __validate_behavior_token(&mut self) -> BehaviorTokenTyProof<'_, N>;
@@ -254,6 +266,7 @@ macro_rules! behavior {
 	) => {
 		let __input = {
 			use $crate::behavior_macro_internals::BehaviorTokenExt as _;
+
 			// Validate the behavior token
 			$crate::behavior_macro_internals::validate_behavior_token::<$namespace>(
 				$in_bhv.__validate_behavior_token()
@@ -264,13 +277,37 @@ macro_rules! behavior {
 			let __token = {
 				// Define a trait describing the set of components we're acquiring.
 				$crate::cx! {
-					trait __OurAccess(<$namespace as $crate::Namespace>::Universe)
+					trait BehaviorAccess(<$namespace as $crate::Namespace>::Universe)
 						: $($comp_inherits),*
 						$(= $($comp_kw $comp_ty),*)?;
 				};
 
+				// Define a registration method
+				#[$crate::behavior_macro_internals::distributed_slice($crate::behavior_macro_internals::BEHAVIORS)]
+				fn register(validator: &mut $crate::behavior_macro_internals::Validator) {
+					validator.add_behavior(
+						/* universe: */ <<$namespace as $crate::Namespace>::Universe as $crate::trait_internals::TrackDefinition>::LOCATION,
+						/* namespace: */ (
+							$crate::behavior_macro_internals::TypeId::of::<$namespace>(),
+							<$namespace as $crate::trait_internals::TrackDefinition>::LOCATION,
+						),
+						/* my_path: */ $crate::behavior_macro_internals::concat!(
+							$crate::behavior_macro_internals::file!(),
+							":",
+							$crate::behavior_macro_internals::line!(),
+							":",
+							$crate::behavior_macro_internals::column!(),
+						),
+						/* borrows: */ <dyn BehaviorAccess as $crate::trait_internals::AccessAlias>::iter_access(),
+						/* calls: */ [$((
+							$crate::behavior_macro_internals::TypeId::of::<$bhv_ty>(),
+							<$bhv_ty as $crate::trait_internals::TrackDefinition>::LOCATION,
+						))*],
+					);
+				}
+
 				// Fetch a token
-				fn get_token<'a>() -> impl __OurAccess {
+				fn get_token<'a>() -> impl BehaviorAccess {
 					$crate::behavior_macro_internals::SuperDangerousGlobalToken
 				}
 
@@ -301,7 +338,28 @@ macro_rules! behavior {
 
 pub mod validator;
 
-// TODO: Expose graph-printing behavior
+impl Validator {
+    pub fn global() -> Self {
+        let mut validator = Validator::default();
+
+        for bhv in behavior_macro_internals::BEHAVIORS {
+            bhv(&mut validator);
+        }
+
+        validator
+    }
+}
+
+pub fn validate() -> Result<(), String> {
+    static HAS_VALIDATED: AtomicBool = AtomicBool::new(false);
+
+    if !HAS_VALIDATED.load(Relaxed) {
+        Validator::global().validate()?;
+        HAS_VALIDATED.store(true, Relaxed);
+    }
+
+    Ok(())
+}
 
 // === Entry === //
 
@@ -313,6 +371,12 @@ impl<U: Universe, N: Namespace<Universe = U>> BehaviorToken<N> for RootBehaviorT
 
 impl<U: Universe> RootBehaviorToken<U> {
     pub fn acquire() -> Self {
-        todo!();
+        if let Err(err) = validate() {
+            panic!("{err}");
+        }
+
+        Self {
+            _private: PhantomData,
+        }
     }
 }
