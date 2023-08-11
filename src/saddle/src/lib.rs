@@ -1,11 +1,35 @@
 use std::marker::PhantomData;
 
+// === Trait internals === //
+
+#[doc(hidden)]
+pub mod trait_internals {
+    use std::any::TypeId;
+
+    use crate::validator::Mutability;
+
+    pub trait TrackDefinition {
+        const LOCATION: &'static str;
+    }
+
+    pub trait AccessAlias {
+        type AccessIter: IntoIterator<Item = (TypeId, &'static str, Mutability)>;
+
+        fn iter_access() -> Self::AccessIter;
+    }
+}
+
 // === Markers === //
 
-pub trait Universe: Sized + 'static {}
+pub trait Universe: 'static + Send + Sync + trait_internals::TrackDefinition {}
 
-pub trait Namespace: Sized + 'static {
+pub trait Namespace: 'static + Send + Sync + trait_internals::TrackDefinition {
     type Universe: Universe;
+}
+
+#[doc(hidden)]
+pub mod marker_macro_internals {
+    pub use std::{column, concat, file, line, stringify};
 }
 
 #[macro_export]
@@ -18,6 +42,19 @@ macro_rules! universe {
 		$vis struct $name { _marker: () }
 
 		impl $crate::Universe for $name {}
+
+		impl $crate::trait_internals::TrackDefinition for $name {
+			const LOCATION: &'static str = $crate::marker_macro_internals::concat!(
+				$crate::marker_macro_internals::stringify!($name),
+				"(at ",
+				$crate::marker_macro_internals::file!(),
+				":",
+				$crate::marker_macro_internals::line!(),
+				":",
+				$crate::marker_macro_internals::column!(),
+				")"
+			);
+		}
 	)*}
 }
 
@@ -33,24 +70,59 @@ macro_rules! namespace {
 		impl $crate::Namespace for $name {
 			type Universe = $universe;
 		}
+
+		impl $crate::trait_internals::TrackDefinition for $name {
+			const LOCATION: &'static str = $crate::marker_macro_internals::concat!(
+				$crate::marker_macro_internals::stringify!($name),
+				"(at ",
+				$crate::marker_macro_internals::file!(),
+				":",
+				$crate::marker_macro_internals::line!(),
+				":",
+				$crate::marker_macro_internals::column!(),
+				")"
+			);
+		}
 	)*}
 }
 
 // === Access Tokens === //
 
 // Traits
-pub trait AccessMut<U: Universe, T: ?Sized>: AccessRef<U, T> {}
+pub trait AccessMut<U: Universe, T: ?Sized>: Send + Sync + AccessRef<U, T> {}
 
-pub trait AccessRef<U: Universe, T: ?Sized> {}
+pub trait AccessRef<U: Universe, T: ?Sized>: Send + Sync {}
 
-pub trait BehaviorToken<N: Namespace> {}
+pub trait BehaviorToken<N: Namespace>: Send + Sync {}
 
 // Macros
 #[doc(hidden)]
 pub mod cx_macro_internals {
-    use crate::{AccessMut, AccessRef, Universe};
+    use crate::{validator::Mutability, AccessMut, AccessRef, Universe};
 
-    pub use std::any::{type_name, TypeId};
+    pub use {
+        crate::validator::Mutability::{Immutable, Mutable},
+        std::{
+            any::{type_name, TypeId},
+            iter::{IntoIterator, Iterator},
+        },
+    };
+
+    pub type TriChain<_Ignored, A, B> = <_Ignored as TriChainInner<A, B>>::Output;
+    pub type ArrayIter<const N: usize> =
+        std::array::IntoIter<(TypeId, &'static str, Mutability), N>;
+
+    pub trait TriChainInner<A, B> {
+        type Output;
+    }
+
+    impl<T: ?Sized, A, B> TriChainInner<A, B> for T {
+        type Output = std::iter::Chain<A, B>;
+    }
+
+    pub const fn bind_and_return_one<T: ?Sized>() -> usize {
+        1
+    }
 
     pub trait Dummy {}
 
@@ -85,11 +157,42 @@ macro_rules! cx {
 			   $($(+ $crate::cx_macro_internals::Access<$crate::cx!(@__parse_kw $kw), $universe, $ty>)*)?
 		{
 		}
+
+		impl $crate::trait_internals::AccessAlias for dyn $name {
+			type AccessIter =
+				$($($crate::cx_macro_internals::TriChain<dyn $inherits, )*)?
+				$crate::cx_macro_internals::ArrayIter<{
+					$($($crate::cx_macro_internals::bind_and_return_one::<$ty>() +)*)? 0
+				}>
+				$($(, <dyn $inherits as $crate::trait_internals::AccessAlias>::AccessIter> )*)?;
+
+			fn iter_access() -> Self::AccessIter {
+				// Construct the base iterator
+				let iter = $crate::cx_macro_internals::IntoIterator::into_iter([$($((
+					$crate::cx_macro_internals::TypeId::of::<$ty>(),
+					$crate::cx_macro_internals::type_name::<$ty>(),
+					$crate::cx!(@__parse_kw_expr $kw),
+				)),*)?]);
+
+				// Store the inherited accessors in a cons list in their original order...
+				let iters = ();
+				$($(let iters = (<dyn $inherits as $crate::trait_internals::AccessAlias>::iter_access(), iters);)*)?
+
+				// ...and pop them out and chain them in their opposite order.
+				$($(
+					let _ = $crate::cx_macro_internals::bind_and_return_one::<dyn $inherits>();
+					let (next_iter, iters) = iters;
+					let iter = $crate::cx_macro_internals::Iterator::chain(iter, next_iter);
+				)*)?
+
+				iter
+			}
+		}
 	)*};
 	(@__parse_kw mut) => { $crate::cx_macro_internals::MutAccessMode };
 	(@__parse_kw ref) => { $crate::cx_macro_internals::RefAccessMode };
-	(@__parse_kw_is_mut mut) => { true };
-	(@__parse_kw_is_mut ref) => { false };
+	(@__parse_kw_expr mut) => { $crate::cx_macro_internals::Mutable };
+	(@__parse_kw_expr ref) => { $crate::cx_macro_internals::Immutable };
 }
 
 // === Behavior === //

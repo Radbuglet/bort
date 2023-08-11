@@ -165,7 +165,7 @@ impl Validator {
 			// the number of simple cycles in a graph grows factorially w.r.t the number of vertices.
 			// This is because, in a K^n graph, our cycles would be at least all possible permutations of
 			// those `n` nodes.
-			let mut sccs = petgraph::algo::tarjan_scc(&self.graph);
+			let sccs = petgraph::algo::tarjan_scc(&self.graph);
 			let mut f = String::new();
 			write!(f, "Failed to validate behavior graph: behaviors may be called in a cycle, which could cause borrow violations.").unwrap();
 
