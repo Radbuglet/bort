@@ -26,7 +26,7 @@ pub mod trait_internals {
 
 // === Markers === //
 
-pub trait Universe: 'static + Send + Sync + trait_internals::TrackDefinition {}
+pub trait Universe: 'static + Send + Sync {}
 
 pub trait Namespace: 'static + Send + Sync + trait_internals::TrackDefinition {
     type Universe: Universe;
@@ -47,19 +47,6 @@ macro_rules! universe {
 		$vis struct $name { _marker: () }
 
 		impl $crate::Universe for $name {}
-
-		impl $crate::trait_internals::TrackDefinition for $name {
-			const LOCATION: &'static str = $crate::marker_macro_internals::concat!(
-				$crate::marker_macro_internals::stringify!($name),
-				" (at ",
-				$crate::marker_macro_internals::file!(),
-				":",
-				$crate::marker_macro_internals::line!(),
-				":",
-				$crate::marker_macro_internals::column!(),
-				")"
-			);
-		}
 	)*}
 }
 
@@ -94,6 +81,7 @@ macro_rules! namespace {
 // === Access Tokens === //
 
 // Traits
+// TODO: Allow users to annotate access tokens with their own metadata.
 pub trait AccessMut<U: Universe, T: ?Sized>: Send + Sync + AccessRef<U, T> {}
 
 pub trait AccessRef<U: Universe, T: ?Sized>: Send + Sync {}
@@ -286,7 +274,6 @@ macro_rules! behavior {
 				#[$crate::behavior_macro_internals::distributed_slice($crate::behavior_macro_internals::BEHAVIORS)]
 				fn register(validator: &mut $crate::behavior_macro_internals::Validator) {
 					validator.add_behavior(
-						/* universe: */ <<$namespace as $crate::Namespace>::Universe as $crate::trait_internals::TrackDefinition>::LOCATION,
 						/* namespace: */ (
 							$crate::behavior_macro_internals::TypeId::of::<$namespace>(),
 							<$namespace as $crate::trait_internals::TrackDefinition>::LOCATION,
@@ -314,6 +301,7 @@ macro_rules! behavior {
 				get_token()
 			};
 
+			// TODO: Undo this shadow once users are done.
 			let $cx_name = &__token;
 
 			let mut __bhv = {
@@ -360,6 +348,8 @@ pub fn validate() -> Result<(), String> {
 
     Ok(())
 }
+
+// TODO: Allow users to export a graph of behaviors
 
 // === Entry === //
 

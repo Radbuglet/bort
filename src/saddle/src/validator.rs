@@ -81,9 +81,6 @@ pub struct Validator {
 
 #[derive(Debug)]
 struct Namespace {
-    /// The location where the namespace's universe was defined.
-    universe_def: &'static str,
-
     /// The location where this namespace was defined.
     my_def: &'static str,
 
@@ -102,16 +99,11 @@ struct Behavior {
 }
 
 impl Validator {
-    fn get_namespace(
-        &mut self,
-        universe: &'static str,
-        namespace: (TypeId, &'static str),
-    ) -> NodeIndex {
+    fn get_namespace(&mut self, namespace: (TypeId, &'static str)) -> NodeIndex {
         match self.namespace_ty_map.entry(namespace.0) {
             std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
             std::collections::hash_map::Entry::Vacant(entry) => {
                 let graph = self.graph.add_node(Namespace {
-                    universe_def: universe,
                     my_def: namespace.1,
                     terminal_behaviors: Vec::new(),
                 });
@@ -122,14 +114,13 @@ impl Validator {
 
     pub fn add_behavior(
         &mut self,
-        universe: &'static str,
         namespace: (TypeId, &'static str),
         my_path: &'static str,
         borrows: impl IntoIterator<Item = (TypeId, &'static str, Mutability)>,
         calls: impl IntoIterator<Item = (TypeId, &'static str)>,
     ) {
         // Create the namespace node
-        let src_idx = self.get_namespace(universe, namespace);
+        let src_idx = self.get_namespace(namespace);
 
         // Construct the behavior
         let borrows = borrows
@@ -155,7 +146,7 @@ impl Validator {
 
                 // We have edges to connect
                 while let Some(call) = curr {
-                    let dst_idx = self.get_namespace(universe, call);
+                    let dst_idx = self.get_namespace(call);
                     self.graph.add_edge(src_idx, dst_idx, behavior.clone());
                     curr = iter.next();
                 }

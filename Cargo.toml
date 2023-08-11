@@ -1,2 +1,2 @@
 [workspace]
-members = ["src/bort", "src/saddle", "src/safe-bort"]
+members = ["src/bort", "src/saddle"]

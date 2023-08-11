@@ -16,9 +16,8 @@ use crate::{
     database::{DbRoot, DbStorage, EntityDeadError, InertEntity},
     debug::AsDebugLabel,
     obj::{Obj, OwnedObj},
-    query::RawTag,
+    query::{RawTag, Tag},
     util::misc::RawFmt,
-    Tag,
 };
 
 // === Storage === //
