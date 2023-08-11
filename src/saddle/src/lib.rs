@@ -7,6 +7,8 @@ use behavior_macro_internals::Validator;
 
 // === Trait internals === //
 
+// TODO: Deny external implementations of these traits
+
 #[doc(hidden)]
 pub mod trait_internals {
     use std::any::TypeId;
@@ -360,6 +362,7 @@ pub struct RootBehaviorToken<U> {
 impl<U: Universe, N: Namespace<Universe = U>> BehaviorToken<N> for RootBehaviorToken<U> {}
 
 impl<U: Universe> RootBehaviorToken<U> {
+    // TODO: Enforce singleton rules
     pub fn acquire() -> Self {
         if let Err(err) = validate() {
             panic!("{err}");

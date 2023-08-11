@@ -3,6 +3,8 @@ use crate::{
     obj::{Obj, OwnedObj},
 };
 
+pub use saddle::{self, behavior, cx, namespace, RootBehaviorToken};
+
 saddle::universe!(pub BortComponents);
 
 impl Entity {
