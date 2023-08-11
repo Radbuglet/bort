@@ -22,12 +22,6 @@ use crate::{
 
 // === Storage === //
 
-// Aliases
-pub type CompRef<T, O = Obj<T>> = HeapRef<'static, T, O>;
-
-pub type CompMut<T, O = Obj<T>> = HeapMut<'static, T, O>;
-
-// Storage API
 pub fn storage<T: 'static>() -> Storage<T> {
     let token = MainThreadToken::acquire_fmt("fetch entity component data");
 
@@ -106,7 +100,7 @@ impl<T: 'static> Storage<T> {
     }
 
     #[track_caller]
-    pub fn try_get(&self, entity: Entity) -> Option<CompRef<T>> {
+    pub fn try_get(&self, entity: Entity) -> Option<CompRef<'static, T>> {
         self.try_get_slot(entity).map(|slot| {
             CompRef::new(
                 Obj::from_raw_parts(entity, slot),
@@ -116,7 +110,7 @@ impl<T: 'static> Storage<T> {
     }
 
     #[track_caller]
-    pub fn try_get_mut(&self, entity: Entity) -> Option<CompMut<T>> {
+    pub fn try_get_mut(&self, entity: Entity) -> Option<CompMut<'static, T>> {
         self.try_get_slot(entity).map(|slot| {
             CompMut::new(
                 Obj::from_raw_parts(entity, slot),
@@ -126,7 +120,7 @@ impl<T: 'static> Storage<T> {
     }
 
     #[track_caller]
-    pub fn get(&self, entity: Entity) -> CompRef<T> {
+    pub fn get(&self, entity: Entity) -> CompRef<'static, T> {
         let slot = self.get_slot(entity);
 
         CompRef::new(
@@ -136,7 +130,7 @@ impl<T: 'static> Storage<T> {
     }
 
     #[track_caller]
-    pub fn get_mut(&self, entity: Entity) -> CompMut<T> {
+    pub fn get_mut(&self, entity: Entity) -> CompMut<'static, T> {
         let slot = self.get_slot(entity);
 
         CompMut::new(
@@ -208,12 +202,12 @@ impl Entity {
     }
 
     #[track_caller]
-    pub fn try_get<T: 'static>(self) -> Option<CompRef<T>> {
+    pub fn try_get<T: 'static>(self) -> Option<CompRef<'static, T>> {
         storage::<T>().try_get(self)
     }
 
     #[track_caller]
-    pub fn try_get_mut<T: 'static>(self) -> Option<CompMut<T>> {
+    pub fn try_get_mut<T: 'static>(self) -> Option<CompMut<'static, T>> {
         storage::<T>().try_get_mut(self)
     }
 
@@ -222,12 +216,12 @@ impl Entity {
     }
 
     #[track_caller]
-    pub fn get<T: 'static>(self) -> CompRef<T> {
+    pub fn get<T: 'static>(self) -> CompRef<'static, T> {
         storage::<T>().get(self)
     }
 
     #[track_caller]
-    pub fn get_mut<T: 'static>(self) -> CompMut<T> {
+    pub fn get_mut<T: 'static>(self) -> CompMut<'static, T> {
         storage::<T>().get_mut(self)
     }
 
@@ -389,12 +383,12 @@ impl OwnedEntity {
     }
 
     #[track_caller]
-    pub fn try_get<T: 'static>(&self) -> Option<CompRef<T>> {
+    pub fn try_get<T: 'static>(&self) -> Option<CompRef<'static, T>> {
         self.entity.try_get()
     }
 
     #[track_caller]
-    pub fn try_get_mut<T: 'static>(&self) -> Option<CompMut<T>> {
+    pub fn try_get_mut<T: 'static>(&self) -> Option<CompMut<'static, T>> {
         self.entity.try_get_mut()
     }
 
@@ -403,12 +397,12 @@ impl OwnedEntity {
     }
 
     #[track_caller]
-    pub fn get<T: 'static>(&self) -> CompRef<T> {
+    pub fn get<T: 'static>(&self) -> CompRef<'static, T> {
         self.entity.get()
     }
 
     #[track_caller]
-    pub fn get_mut<T: 'static>(&self) -> CompMut<T> {
+    pub fn get_mut<T: 'static>(&self) -> CompMut<'static, T> {
         self.entity.get_mut()
     }
 
@@ -470,14 +464,14 @@ impl Drop for OwnedEntity {
     }
 }
 
-// === `HeapRef` and `HeapMut` === //
+// === `CompRef` and `CompMut` === //
 
-pub struct HeapRef<'b, T: ?Sized, O: Copy = Obj<T>> {
+pub struct CompRef<'b, T: ?Sized, O: Copy = Obj<T>> {
     owner: O,
     value: OptRef<'b, T>,
 }
 
-impl<'b, T: ?Sized, O: Copy> HeapRef<'b, T, O> {
+impl<'b, T: ?Sized, O: Copy> CompRef<'b, T, O> {
     pub fn new(owner: O, value: OptRef<'b, T>) -> Self {
         Self { owner, value }
     }
@@ -486,14 +480,14 @@ impl<'b, T: ?Sized, O: Copy> HeapRef<'b, T, O> {
         orig.value
     }
 
-    pub fn map_owner<P: Copy>(orig: Self, f: impl FnOnce(O) -> P) -> HeapRef<'b, T, P> {
-        HeapRef {
+    pub fn map_owner<P: Copy>(orig: Self, f: impl FnOnce(O) -> P) -> CompRef<'b, T, P> {
+        CompRef {
             owner: f(orig.owner),
             value: orig.value,
         }
     }
 
-    pub fn erase_owner(orig: Self) -> HeapRef<'b, T, Entity>
+    pub fn erase_owner(orig: Self) -> CompRef<'b, T, Entity>
     where
         O: Into<Entity>,
     {
@@ -511,35 +505,35 @@ impl<'b, T: ?Sized, O: Copy> HeapRef<'b, T, O> {
         }
     }
 
-    pub fn map<U: ?Sized, F>(orig: HeapRef<'b, T, O>, f: F) -> HeapRef<'b, U, O>
+    pub fn map<U: ?Sized, F>(orig: CompRef<'b, T, O>, f: F) -> CompRef<'b, U, O>
     where
         F: FnOnce(&T) -> &U,
     {
-        HeapRef {
+        CompRef {
             owner: orig.owner,
             value: OptRef::map(orig.value, f),
         }
     }
 
     pub fn filter_map<U: ?Sized, F>(
-        orig: HeapRef<'b, T, O>,
+        orig: CompRef<'b, T, O>,
         f: F,
-    ) -> Result<HeapRef<'b, U, O>, Self>
+    ) -> Result<CompRef<'b, U, O>, Self>
     where
         F: FnOnce(&T) -> Option<&U>,
     {
         let owner = orig.owner;
 
         match OptRef::filter_map(orig.value, f) {
-            Ok(value) => Ok(HeapRef { owner, value }),
-            Err(value) => Err(HeapRef { owner, value }),
+            Ok(value) => Ok(CompRef { owner, value }),
+            Err(value) => Err(CompRef { owner, value }),
         }
     }
 
     pub fn map_split<U: ?Sized, V: ?Sized, F>(
-        orig: HeapRef<'b, T, O>,
+        orig: CompRef<'b, T, O>,
         f: F,
-    ) -> (HeapRef<'b, U, O>, HeapRef<'b, V, O>)
+    ) -> (CompRef<'b, U, O>, CompRef<'b, V, O>)
     where
         F: FnOnce(&T) -> (&U, &V),
     {
@@ -547,20 +541,20 @@ impl<'b, T: ?Sized, O: Copy> HeapRef<'b, T, O> {
         let (left, right) = OptRef::map_split(orig.value, f);
 
         (
-            HeapRef { owner, value: left },
-            HeapRef {
+            CompRef { owner, value: left },
+            CompRef {
                 owner,
                 value: right,
             },
         )
     }
 
-    pub fn leak(orig: HeapRef<'b, T, O>) -> &'b T {
+    pub fn leak(orig: CompRef<'b, T, O>) -> &'b T {
         OptRef::leak(orig.value)
     }
 }
 
-impl<T: ?Sized, O: Copy> Deref for HeapRef<'_, T, O> {
+impl<T: ?Sized, O: Copy> Deref for CompRef<'_, T, O> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -568,24 +562,24 @@ impl<T: ?Sized, O: Copy> Deref for HeapRef<'_, T, O> {
     }
 }
 
-impl<T: ?Sized + fmt::Debug, O: Copy> fmt::Debug for HeapRef<'_, T, O> {
+impl<T: ?Sized + fmt::Debug, O: Copy> fmt::Debug for CompRef<'_, T, O> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.value.fmt(f)
     }
 }
 
-impl<T: ?Sized + fmt::Display, O: Copy> fmt::Display for HeapRef<'_, T, O> {
+impl<T: ?Sized + fmt::Display, O: Copy> fmt::Display for CompRef<'_, T, O> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.value.fmt(f)
     }
 }
 
-pub struct HeapMut<'b, T: ?Sized, O: Copy = Obj<T>> {
+pub struct CompMut<'b, T: ?Sized, O: Copy = Obj<T>> {
     owner: O,
     value: OptRefMut<'b, T>,
 }
 
-impl<'b, T: ?Sized, O: Copy> HeapMut<'b, T, O> {
+impl<'b, T: ?Sized, O: Copy> CompMut<'b, T, O> {
     pub fn new(owner: O, value: OptRefMut<'b, T>) -> Self {
         Self { owner, value }
     }
@@ -594,8 +588,8 @@ impl<'b, T: ?Sized, O: Copy> HeapMut<'b, T, O> {
         orig.value
     }
 
-    pub fn map_owner<P: Copy>(orig: Self, f: impl FnOnce(O) -> P) -> HeapMut<'b, T, P> {
-        HeapMut {
+    pub fn map_owner<P: Copy>(orig: Self, f: impl FnOnce(O) -> P) -> CompMut<'b, T, P> {
+        CompMut {
             owner: f(orig.owner),
             value: orig.value,
         }
@@ -605,27 +599,27 @@ impl<'b, T: ?Sized, O: Copy> HeapMut<'b, T, O> {
         orig.owner
     }
 
-    pub fn map<U: ?Sized, F>(orig: HeapMut<'b, T, O>, f: F) -> HeapMut<'b, U, O>
+    pub fn map<U: ?Sized, F>(orig: CompMut<'b, T, O>, f: F) -> CompMut<'b, U, O>
     where
         F: FnOnce(&mut T) -> &mut U,
     {
-        HeapMut {
+        CompMut {
             owner: orig.owner,
             value: OptRefMut::map(orig.value, f),
         }
     }
 
     pub fn filter_map<U: ?Sized, F>(
-        orig: HeapMut<'b, T, O>,
+        orig: CompMut<'b, T, O>,
         f: F,
-    ) -> Result<HeapMut<'b, U, O>, Self>
+    ) -> Result<CompMut<'b, U, O>, Self>
     where
         F: FnOnce(&mut T) -> Option<&mut U>,
     {
         let entity = orig.owner;
 
         match OptRefMut::filter_map(orig.value, f) {
-            Ok(value) => Ok(HeapMut {
+            Ok(value) => Ok(CompMut {
                 owner: entity,
                 value,
             }),
@@ -637,9 +631,9 @@ impl<'b, T: ?Sized, O: Copy> HeapMut<'b, T, O> {
     }
 
     pub fn map_split<U: ?Sized, V: ?Sized, F>(
-        orig: HeapMut<'b, T, O>,
+        orig: CompMut<'b, T, O>,
         f: F,
-    ) -> (HeapMut<'b, U, O>, HeapMut<'b, V, O>)
+    ) -> (CompMut<'b, U, O>, CompMut<'b, V, O>)
     where
         F: FnOnce(&mut T) -> (&mut U, &mut V),
     {
@@ -647,23 +641,23 @@ impl<'b, T: ?Sized, O: Copy> HeapMut<'b, T, O> {
         let (left, right) = OptRefMut::map_split(orig.value, f);
 
         (
-            HeapMut {
+            CompMut {
                 owner: entity,
                 value: left,
             },
-            HeapMut {
+            CompMut {
                 owner: entity,
                 value: right,
             },
         )
     }
 
-    pub fn leak(orig: HeapMut<'b, T, O>) -> &'b mut T {
+    pub fn leak(orig: CompMut<'b, T, O>) -> &'b mut T {
         OptRefMut::leak(orig.value)
     }
 }
 
-impl<T: ?Sized, O: Copy> Deref for HeapMut<'_, T, O> {
+impl<T: ?Sized, O: Copy> Deref for CompMut<'_, T, O> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -671,19 +665,19 @@ impl<T: ?Sized, O: Copy> Deref for HeapMut<'_, T, O> {
     }
 }
 
-impl<T: ?Sized, O: Copy> DerefMut for HeapMut<'_, T, O> {
+impl<T: ?Sized, O: Copy> DerefMut for CompMut<'_, T, O> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.value
     }
 }
 
-impl<T: ?Sized + fmt::Debug, O: Copy> fmt::Debug for HeapMut<'_, T, O> {
+impl<T: ?Sized + fmt::Debug, O: Copy> fmt::Debug for CompMut<'_, T, O> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(&**self, f)
     }
 }
 
-impl<T: ?Sized + fmt::Display, O: Copy> fmt::Display for HeapMut<'_, T, O> {
+impl<T: ?Sized + fmt::Display, O: Copy> fmt::Display for CompMut<'_, T, O> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&**self, f)
     }

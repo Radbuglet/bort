@@ -183,9 +183,50 @@ impl Validator {
 			// those `n` nodes.
 			let sccs = petgraph::algo::tarjan_scc(&self.graph);
 			let mut f = String::new();
-			write!(f, "Failed to validate behavior graph: behaviors may be called in a cycle, which could cause borrow violations.").unwrap();
+			write!(
+				f,
+				"Failed to validate behavior graph: behaviors may be called in a cycle, which could \
+				 cause borrow violations.\n\
+				 \n\
+				 The following behavior namespaces form cycles:\n\n",
+			).unwrap();
 
-			// TODO: Pretty-print this information.
+			let mut i = 1;
+
+			for scc in sccs.into_iter() {
+				// If the SCC is just an individual node without any self-edges, ignore it.
+				if
+					scc.len() == 1 &&
+					!self.graph.edges_directed(scc[0], Direction::Outgoing).any(|edge| edge.source() == edge.target())
+				{
+					continue;
+				}
+
+				// Otherwise, print out the SCCs nodes and the way they connect to one another.
+				write!(f, "Cycle {}:\n", i).unwrap();
+				i += 1;
+
+				let scc = scc.into_iter().collect::<FxHashSet<_>>();
+
+				for &namespace in &scc {
+					write!(f, " - Namespace {}, which could call into...\n", self.graph[namespace].my_def).unwrap();
+
+					for caller in self.graph.edges_directed(namespace, Direction::Outgoing) {
+						if !scc.contains(&caller.target()) {
+							continue;
+						}
+
+						write!(
+							f,
+							"    - Namespace {} using the behavior defined at {}\n",
+							self.graph[caller.target()].my_def,
+							caller.weight().def_path,
+						).unwrap();
+					}
+				}
+
+				write!(f, "\n").unwrap();
+			}
 
 			return Err(f);
 		};

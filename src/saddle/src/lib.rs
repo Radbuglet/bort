@@ -289,7 +289,7 @@ macro_rules! behavior {
 						/* calls: */ [$((
 							$crate::behavior_macro_internals::TypeId::of::<$bhv_ty>(),
 							<$bhv_ty as $crate::trait_internals::TrackDefinition>::LOCATION,
-						))*],
+						)),*],
 					);
 				}
 

@@ -203,7 +203,7 @@ pub mod query_internals {
         crate::{
             core::token::MainThreadToken,
             database::{DbRoot, InertTag, ReifiedTagList},
-            entity::{HeapMut, HeapRef},
+            entity::{CompMut, CompRef},
             event::QueryableEventList,
             obj::Obj,
             query::try_flush,
@@ -612,7 +612,7 @@ macro_rules! query {
 		$crate::query::query!(@__internal_xform; $($rest)*);
 	};
 	(@__internal_xform $entity:ident; oref $name:ident $token:ident; $($rest:tt)*) => {
-		let $name = $crate::query::query_internals::HeapRef::new(
+		let $name = $crate::query::query_internals::CompRef::new(
 			$crate::query::query_internals::Obj::from_raw_parts(
 				$entity,
 				$crate::query::query_internals::Into::into($name),
@@ -622,7 +622,7 @@ macro_rules! query {
 		$crate::query::query!(@__internal_xform $entity; $($rest)*);
 	};
 	(@__internal_xform $entity:ident; omut $name:ident $token:ident; $($rest:tt)*) => {
-		let mut $name = $crate::query::query_internals::HeapMut::new(
+		let mut $name = $crate::query::query_internals::CompMut::new(
 			$crate::query::query_internals::Obj::from_raw_parts(
 				$entity,
 				$crate::query::query_internals::Into::into($name),

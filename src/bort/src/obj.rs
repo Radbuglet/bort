@@ -8,7 +8,8 @@ use crate::{
         token::{MainThreadToken, Token},
     },
     debug::AsDebugLabel,
-    entity::{CompMut, CompRef, Entity, OwnedEntity},
+    entity::{CompRef, Entity, OwnedEntity},
+    CompMut,
 };
 
 // === Obj === //
@@ -65,7 +66,7 @@ impl<T: 'static> Obj<T> {
     }
 
     #[track_caller]
-    pub fn try_get(self) -> Option<CompRef<T>> {
+    pub fn try_get(self) -> Option<CompRef<'static, T>> {
         let token = MainThreadToken::acquire_fmt("fetch entity component data");
 
         self.is_alive_internal(token)
@@ -75,7 +76,7 @@ impl<T: 'static> Obj<T> {
     }
 
     #[track_caller]
-    pub fn try_get_mut(self) -> Option<CompMut<T>> {
+    pub fn try_get_mut(self) -> Option<CompMut<'static, T>> {
         let token = MainThreadToken::acquire_fmt("fetch entity component data");
 
         self.is_alive_internal(token)
@@ -85,7 +86,7 @@ impl<T: 'static> Obj<T> {
     }
 
     #[track_caller]
-    pub fn get(self) -> CompRef<T> {
+    pub fn get(self) -> CompRef<'static, T> {
         let token = MainThreadToken::acquire_fmt("fetch entity component data");
         assert!(
             self.is_alive_internal(token),
@@ -97,7 +98,7 @@ impl<T: 'static> Obj<T> {
     }
 
     #[track_caller]
-    pub fn get_mut(self) -> CompMut<T> {
+    pub fn get_mut(self) -> CompMut<'static, T> {
         let token = MainThreadToken::acquire_fmt("fetch entity component data");
         assert!(
             self.is_alive_internal(token),
@@ -192,19 +193,19 @@ impl<T: 'static> OwnedObj<T> {
         self.obj.value()
     }
 
-    pub fn try_get(&self) -> Option<CompRef<T>> {
+    pub fn try_get(&self) -> Option<CompRef<'static, T>> {
         self.obj.try_get()
     }
 
-    pub fn try_get_mut(&self) -> Option<CompMut<T>> {
+    pub fn try_get_mut(&self) -> Option<CompMut<'static, T>> {
         self.obj.try_get_mut()
     }
 
-    pub fn get(&self) -> CompRef<T> {
+    pub fn get(&self) -> CompRef<'static, T> {
         self.obj.get()
     }
 
-    pub fn get_mut(&self) -> CompMut<T> {
+    pub fn get_mut(&self) -> CompMut<'static, T> {
         self.obj.get_mut()
     }
 

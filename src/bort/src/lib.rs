@@ -11,6 +11,9 @@ pub mod query;
 pub mod reborrow;
 mod util;
 
+#[cfg(feature = "saddle")]
+pub mod saddle;
+
 pub mod prelude {
     pub use crate::{
         behavior::{
@@ -18,7 +21,7 @@ pub mod prelude {
             BehaviorRegistry, ComponentInjector, ContextlessEventHandler, ContextlessQueryHandler,
             HasBehavior, NamespacedQueryHandler,
         },
-        entity::{storage, CompMut, CompRef, Entity, HeapMut, HeapRef, OwnedEntity, Storage},
+        entity::{storage, CompMut, CompRef, Entity, OwnedEntity, Storage},
         event::{EventTarget, ProcessableEventList, QueryableEventList, VecEventList},
         obj::{Obj, OwnedObj},
         query::{

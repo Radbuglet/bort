@@ -46,6 +46,7 @@ dependencies = [
  "glam",
  "hashbrown 0.14.0",
  "rustc-hash",
+ "saddle",
 ]
 
 [[package]]
