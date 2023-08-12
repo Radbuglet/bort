@@ -218,7 +218,7 @@ pub mod behavior_macro_internals {
         _private: ([&'a (); 0], [N; 0]),
     }
 
-    impl<N: Namespace, T: BehaviorToken<N>> BehaviorTokenExt<N> for T {
+    impl<N: Namespace, T: ?Sized + BehaviorToken<N>> BehaviorTokenExt<N> for T {
         fn __validate_behavior_token(&mut self) -> BehaviorTokenTyProof<'_, N> {
             BehaviorTokenTyProof { _private: ([], []) }
         }
