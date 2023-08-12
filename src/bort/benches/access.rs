@@ -11,7 +11,7 @@ fn access_tests() {
     let mut c = Criterion::default().configure_from_args();
 
     c.bench_function("storage", |c| {
-        c.iter(|| storage::<i32>());
+        c.iter(storage::<i32>);
     });
 
     c.bench_function("entity.get", |c| {
@@ -52,15 +52,15 @@ fn access_tests() {
     });
 
     c.bench_function("obj.get", |c| {
-        let foo = OwnedObj::new(());
+        let obj = OwnedObj::new(());
 
-        c.iter(|| foo.get());
+        c.iter(|| obj.get());
     });
 
     c.bench_function("opt-ref-cell", |c| {
-        let foo = OptRefCell::new_full(3);
+        let cell = OptRefCell::new_full(3);
 
-        c.iter(|| foo.borrow());
+        c.iter(|| cell.borrow());
     });
 
     c.bench_function("query-manual", |c| {
@@ -128,9 +128,9 @@ fn access_tests() {
     });
 
     c.bench_function("std-ref-cell", |c| {
-        let foo = RefCell::new(3);
+        let cell = RefCell::new(3);
 
-        c.iter(|| foo.borrow());
+        c.iter(|| cell.borrow());
     });
 }
 

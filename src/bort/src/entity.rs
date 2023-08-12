@@ -498,6 +498,7 @@ impl<'b, T: ?Sized, O: Copy> CompRef<'b, T, O> {
         orig.owner
     }
 
+    #[allow(clippy::should_implement_trait)] // (follows standard library conventions)
     pub fn clone(orig: &Self) -> Self {
         Self {
             owner: orig.owner,

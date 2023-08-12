@@ -139,6 +139,10 @@ impl<T> Heap<T> {
         self.values.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     fn values(&self) -> &[HeapValue<T>] {
         unsafe { self.values.as_ref() }
     }

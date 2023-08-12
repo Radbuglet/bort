@@ -13,13 +13,14 @@ use behavior_macro_internals::Validator;
 pub mod trait_internals {
     use std::any::TypeId;
 
-    use crate::validator::Mutability;
+    use crate::{validator::Mutability, Universe};
 
     pub trait TrackDefinition {
         const LOCATION: &'static str;
     }
 
     pub trait AccessAlias {
+        type Universe: Universe;
         type AccessIter: Iterator<Item = (TypeId, &'static str, Mutability)>;
 
         fn iter_access() -> Self::AccessIter;
@@ -83,7 +84,6 @@ macro_rules! namespace {
 // === Access Tokens === //
 
 // Traits
-// TODO: Allow users to annotate access tokens with their own metadata.
 pub trait AccessMut<U: Universe, T: ?Sized>: Send + Sync + AccessRef<U, T> {}
 
 pub trait AccessRef<U: Universe, T: ?Sized>: Send + Sync {}
@@ -93,7 +93,9 @@ pub trait BehaviorToken<N: Namespace>: Send + Sync {}
 // Macros
 #[doc(hidden)]
 pub mod cx_macro_internals {
-    use crate::{validator::Mutability, AccessMut, AccessRef, Universe};
+    use crate::{
+        trait_internals::AccessAlias, validator::Mutability, AccessMut, AccessRef, Universe,
+    };
 
     pub use {
         crate::validator::Mutability::{Immutable, Mutable},
@@ -118,6 +120,8 @@ pub mod cx_macro_internals {
     pub const fn bind_and_return_one<T: ?Sized>() -> usize {
         1
     }
+
+    pub fn bind_and_ensure_in_universe<U: Universe, T: ?Sized + AccessAlias<Universe = U>>() {}
 
     pub trait Dummy {}
 
@@ -154,6 +158,7 @@ macro_rules! cx {
 		}
 
 		impl $crate::trait_internals::AccessAlias for dyn $name {
+			type Universe = $universe;
 			type AccessIter =
 				$($($crate::cx_macro_internals::TriChain<dyn $inherits, )*)?
 				$crate::cx_macro_internals::ArrayIter<{
@@ -175,7 +180,7 @@ macro_rules! cx {
 
 				// ...and pop them out and chain them in their opposite order.
 				$($(
-					let _ = $crate::cx_macro_internals::bind_and_return_one::<dyn $inherits>();
+					$crate::cx_macro_internals::bind_and_ensure_in_universe::<$universe, dyn $inherits>();
 					let (next_iter, iters) = iters;
 					let iter = $crate::cx_macro_internals::Iterator::chain(iter, next_iter);
 				)*)?
@@ -351,11 +356,9 @@ pub fn validate() -> Result<(), String> {
     Ok(())
 }
 
-// TODO: Allow users to export a graph of behaviors
-
 // === Entry === //
 
-pub struct RootBehaviorToken<U> {
+pub struct RootBehaviorToken<U: Universe> {
     _private: PhantomData<fn() -> U>,
 }
 
@@ -371,5 +374,11 @@ impl<U: Universe> RootBehaviorToken<U> {
         Self {
             _private: PhantomData,
         }
+    }
+}
+
+impl<U: Universe> Drop for RootBehaviorToken<U> {
+    fn drop(&mut self) {
+        // (no-op for now, kept for forwards compatibility)
     }
 }

@@ -203,29 +203,29 @@ impl Validator {
 				}
 
 				// Otherwise, print out the SCCs nodes and the way they connect to one another.
-				write!(f, "Cycle {}:\n", i).unwrap();
+				writeln!(f, "Cycle {}:", i).unwrap();
 				i += 1;
 
 				let scc = scc.into_iter().collect::<FxHashSet<_>>();
 
 				for &namespace in &scc {
-					write!(f, " - Namespace {}, which could call into...\n", self.graph[namespace].my_def).unwrap();
+					writeln!(f, " - Namespace {}, which could call into...", self.graph[namespace].my_def).unwrap();
 
 					for caller in self.graph.edges_directed(namespace, Direction::Outgoing) {
 						if !scc.contains(&caller.target()) {
 							continue;
 						}
 
-						write!(
+						writeln!(
 							f,
-							"    - Namespace {} using the behavior defined at {}\n",
+							"    - Namespace {} using the behavior defined at {}",
 							self.graph[caller.target()].my_def,
 							caller.weight().def_path,
 						).unwrap();
 					}
 				}
 
-				write!(f, "\n").unwrap();
+				writeln!(f).unwrap();
 			}
 
 			return Err(f);
@@ -293,9 +293,9 @@ impl Validator {
                                 .filter(|v| !v.is_compatible_with(desired_mut))
 							else { continue };
 
-                            write!(
+                            writeln!(
 								f,
-								"{}- The behavior in namespace {} defined at {} may have called it while holding the component {}.\n",
+								"{}- The behavior in namespace {} defined at {} may have called it while holding the component {}.",
 								Indent(indent),
 								validator.graph[caller.source()].my_def,
 								caller.weight().def_path,
@@ -331,16 +331,16 @@ impl Validator {
                             .unwrap();
 
                             for edge in validator.graph.edges_connecting(caller, target) {
-                                write!(
+                                writeln!(
                                     f,
-                                    "{}- {}\n",
+                                    "{}- {}",
                                     Indent(indent + INDENT_SIZE),
                                     edge.weight().def_path,
                                 )
                                 .unwrap();
                             }
 
-                            write!(f, "{}  Tracing back responsibility...\n", Indent(indent))
+                            writeln!(f, "{}  Tracing back responsibility...", Indent(indent))
                                 .unwrap();
 
                             print_tree(

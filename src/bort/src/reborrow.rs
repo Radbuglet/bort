@@ -12,6 +12,7 @@ pub mod macro_internals {
     pub struct BoundTy<T>(PhantomData<fn(T) -> T>);
 
     impl<T> BoundTy<T> {
+        #[allow(clippy::new_without_default)] // (this is an internal object)
         pub fn new() -> Self {
             Self(PhantomData)
         }

@@ -629,6 +629,7 @@ pub struct OptRef<'b, T: ?Sized> {
 }
 
 impl<'b, T: ?Sized> OptRef<'b, T> {
+    #[allow(clippy::should_implement_trait)] // (follows standard library conventions)
     pub fn clone(orig: &Self) -> Self {
         Self {
             value: orig.value,
