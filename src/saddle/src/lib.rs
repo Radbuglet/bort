@@ -3,20 +3,36 @@ use std::{
     sync::atomic::{AtomicBool, Ordering::Relaxed},
 };
 
-use behavior_macro_internals::Validator;
+use self::internal_traits::{Access, MutAccessMode, RefAccessMode};
+use self::validator::Validator;
 
 // === Trait internals === //
 
 // TODO: Deny external implementations of these traits
 
 #[doc(hidden)]
-pub mod trait_internals {
+pub mod internal_traits {
     use std::any::TypeId;
 
     use crate::{validator::Mutability, Universe};
 
+    // Namespaces
     pub trait TrackDefinition {
         const LOCATION: &'static str;
+    }
+
+    // Access tokens
+    pub trait Access<M, U: Universe, T: ?Sized>: Send + Sync {}
+
+    pub struct MutAccessMode;
+    pub struct RefAccessMode;
+
+    impl<U, T, K> Access<RefAccessMode, U, T> for K
+    where
+        U: Universe,
+        T: ?Sized,
+        K: ?Sized + Access<MutAccessMode, U, T>,
+    {
     }
 
     pub trait AccessAlias {
@@ -31,13 +47,16 @@ pub mod trait_internals {
 
 pub trait Universe: 'static + Send + Sync {}
 
-pub trait Namespace: 'static + Send + Sync + trait_internals::TrackDefinition {
+pub trait Namespace: 'static + Send + Sync + internal_traits::TrackDefinition {
     type Universe: Universe;
 }
 
 #[doc(hidden)]
 pub mod marker_macro_internals {
-    pub use std::{column, concat, file, line, stringify};
+    pub use {
+        crate::internal_traits::TrackDefinition,
+        std::{column, concat, file, line, stringify},
+    };
 }
 
 #[macro_export]
@@ -66,7 +85,7 @@ macro_rules! namespace {
 			type Universe = $universe;
 		}
 
-		impl $crate::trait_internals::TrackDefinition for $name {
+		impl $crate::marker_macro_internals::TrackDefinition for $name {
 			const LOCATION: &'static str = $crate::marker_macro_internals::concat!(
 				$crate::marker_macro_internals::stringify!($name),
 				" (at ",
@@ -84,27 +103,52 @@ macro_rules! namespace {
 // === Access Tokens === //
 
 // Traits
-pub trait AccessMut<U: Universe, T: ?Sized>: Send + Sync + AccessRef<U, T> {}
+pub trait AccessMut<U: Universe, T: ?Sized>: internal_traits::Access<MutAccessMode, U, T> {
+    fn as_dyn_mut(&self) -> &dyn AccessMut<U, T> {
+        &SuperDangerousGlobalToken
+    }
+}
 
-pub trait AccessRef<U: Universe, T: ?Sized>: Send + Sync {}
+pub trait AccessRef<U: Universe, T: ?Sized>: internal_traits::Access<RefAccessMode, U, T> {
+    fn as_dyn(&self) -> &dyn AccessRef<U, T> {
+        &SuperDangerousGlobalToken
+    }
+}
+
+impl<U: Universe, T: ?Sized, K: ?Sized + Access<MutAccessMode, U, T>> AccessMut<U, T> for K {}
+impl<U: Universe, T: ?Sized, K: ?Sized + Access<RefAccessMode, U, T>> AccessRef<U, T> for K {}
 
 pub trait BehaviorToken<N: Namespace>: Send + Sync {}
+
+// Global token
+pub struct SuperDangerousGlobalToken;
+
+impl<U: Universe, T: ?Sized> Access<MutAccessMode, U, T> for SuperDangerousGlobalToken {}
+
+impl<N: Namespace> BehaviorToken<N> for SuperDangerousGlobalToken {}
 
 // Macros
 #[doc(hidden)]
 pub mod cx_macro_internals {
-    use crate::{
-        trait_internals::AccessAlias, validator::Mutability, AccessMut, AccessRef, Universe,
-    };
+    use crate::{validator::Mutability, Universe};
 
     pub use {
-        crate::validator::Mutability::{Immutable, Mutable},
+        crate::{
+            internal_traits::{Access, AccessAlias, MutAccessMode, RefAccessMode},
+            validator::Mutability::{Immutable, Mutable},
+        },
         std::{
             any::{type_name, TypeId},
             iter::{IntoIterator, Iterator},
         },
     };
 
+    // Common
+    pub trait Dummy {}
+
+    impl<T: ?Sized> Dummy for T {}
+
+    // Trait definition
     pub type TriChain<_Ignored, A, B> = <_Ignored as TriChainInner<A, B>>::Output;
     pub type ArrayIter<const N: usize> =
         std::array::IntoIter<(TypeId, &'static str, Mutability), N>;
@@ -122,18 +166,6 @@ pub mod cx_macro_internals {
     }
 
     pub fn bind_and_ensure_in_universe<U: Universe, T: ?Sized + AccessAlias<Universe = U>>() {}
-
-    pub trait Dummy {}
-
-    impl<T: ?Sized> Dummy for T {}
-
-    pub struct MutAccessMode;
-    pub struct RefAccessMode;
-
-    pub trait Access<M, U: Universe, T: ?Sized> {}
-
-    impl<U: Universe, K: ?Sized + AccessMut<U, T>, T: ?Sized> Access<MutAccessMode, U, T> for K {}
-    impl<U: Universe, K: ?Sized + AccessRef<U, T>, T: ?Sized> Access<RefAccessMode, U, T> for K {}
 }
 
 #[macro_export]
@@ -157,14 +189,14 @@ macro_rules! cx {
 		{
 		}
 
-		impl $crate::trait_internals::AccessAlias for dyn $name {
+		impl $crate::cx_macro_internals::AccessAlias for dyn $name {
 			type Universe = $universe;
 			type AccessIter =
 				$($($crate::cx_macro_internals::TriChain<dyn $inherits, )*)?
 				$crate::cx_macro_internals::ArrayIter<{
 					$($($crate::cx_macro_internals::bind_and_return_one::<$ty>() +)*)? 0
 				}>
-				$($(, <dyn $inherits as $crate::trait_internals::AccessAlias>::AccessIter> )*)?;
+				$($(, <dyn $inherits as $crate::cx_macro_internals::AccessAlias>::AccessIter> )*)?;
 
 			fn iter_access() -> Self::AccessIter {
 				// Construct the base iterator
@@ -176,7 +208,7 @@ macro_rules! cx {
 
 				// Store the inherited accessors in a cons list in their original order...
 				let iters = ();
-				$($(let iters = (<dyn $inherits as $crate::trait_internals::AccessAlias>::iter_access(), iters);)*)?
+				$($(let iters = (<dyn $inherits as $crate::cx_macro_internals::AccessAlias>::iter_access(), iters);)*)?
 
 				// ...and pop them out and chain them in their opposite order.
 				$($(
@@ -199,10 +231,14 @@ macro_rules! cx {
 
 #[doc(hidden)]
 pub mod behavior_macro_internals {
-    use crate::{AccessMut, AccessRef, BehaviorToken, Namespace, Universe};
+    use crate::{BehaviorToken, Namespace};
 
     pub use {
-        crate::validator::Validator,
+        crate::{
+            internal_traits::{AccessAlias, TrackDefinition},
+            validator::Validator,
+            SuperDangerousGlobalToken,
+        },
         linkme::distributed_slice,
         partial_scope::partial_shadow,
         std::{any::TypeId, column, concat, file, line, marker::Sized},
@@ -230,14 +266,6 @@ pub mod behavior_macro_internals {
     ) -> BehaviorTokenTyProof<'_, N> {
         bhv
     }
-
-    pub struct SuperDangerousGlobalToken;
-
-    impl<U: Universe, T: ?Sized> AccessMut<U, T> for SuperDangerousGlobalToken {}
-
-    impl<U: Universe, T: ?Sized> AccessRef<U, T> for SuperDangerousGlobalToken {}
-
-    impl<N: Namespace> BehaviorToken<N> for SuperDangerousGlobalToken {}
 }
 
 #[macro_export]
@@ -269,8 +297,9 @@ macro_rules! behavior {
 			)
 		};
 
-		$($crate::behavior_macro_internals::partial_shadow! {
-			$cx_name, $bhv_name;
+		// TODO: Re-enable shadowing once IDE support improves
+		$(/*$crate::behavior_macro_internals::partial_shadow! {
+			$cx_name, $bhv_name;*/
 
 			let __token = {
 				// Define a trait describing the set of components we're acquiring.
@@ -286,7 +315,7 @@ macro_rules! behavior {
 					validator.add_behavior(
 						/* namespace: */ (
 							$crate::behavior_macro_internals::TypeId::of::<$namespace>(),
-							<$namespace as $crate::trait_internals::TrackDefinition>::LOCATION,
+							<$namespace as $crate::behavior_macro_internals::TrackDefinition>::LOCATION,
 						),
 						/* my_path: */ $crate::behavior_macro_internals::concat!(
 							$crate::behavior_macro_internals::file!(),
@@ -295,10 +324,10 @@ macro_rules! behavior {
 							":",
 							$crate::behavior_macro_internals::column!(),
 						),
-						/* borrows: */ <dyn BehaviorAccess as $crate::trait_internals::AccessAlias>::iter_access(),
+						/* borrows: */ <dyn BehaviorAccess as $crate::behavior_macro_internals::AccessAlias>::iter_access(),
 						/* calls: */ [$((
 							$crate::behavior_macro_internals::TypeId::of::<$bhv_ty>(),
-							<$bhv_ty as $crate::trait_internals::TrackDefinition>::LOCATION,
+							<$bhv_ty as $crate::behavior_macro_internals::TrackDefinition>::LOCATION,
 						)),*],
 					);
 				}
@@ -325,7 +354,7 @@ macro_rules! behavior {
 			$($body)*
 
 			let _ = (__token, __bhv);
-		})*
+		/*}*/)*
 
 		let _ = __input;
 	};

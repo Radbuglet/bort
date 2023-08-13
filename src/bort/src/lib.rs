@@ -8,7 +8,6 @@ pub mod entity;
 pub mod event;
 pub mod obj;
 pub mod query;
-pub mod reborrow;
 mod util;
 
 #[cfg(feature = "saddle")]
@@ -28,7 +27,6 @@ pub mod prelude {
             flush, query, GlobalTag, GlobalVirtualTag, HasGlobalManagedTag, HasGlobalVirtualTag,
             RawTag, Tag, VirtualTag,
         },
-        reborrow::auto_reborrow,
     };
 }
 
