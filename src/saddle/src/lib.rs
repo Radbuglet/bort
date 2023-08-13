@@ -204,6 +204,7 @@ pub mod behavior_macro_internals {
     pub use {
         crate::validator::Validator,
         linkme::distributed_slice,
+        partial_scope::partial_shadow,
         std::{any::TypeId, column, concat, file, line, marker::Sized},
     };
 
@@ -268,7 +269,9 @@ macro_rules! behavior {
 			)
 		};
 
-		$(
+		$($crate::behavior_macro_internals::partial_shadow! {
+			$cx_name, $bhv_name;
+
 			let __token = {
 				// Define a trait describing the set of components we're acquiring.
 				$crate::cx! {
@@ -308,7 +311,6 @@ macro_rules! behavior {
 				get_token()
 			};
 
-			// TODO: Undo this shadow once users are done.
 			let $cx_name = &__token;
 
 			let mut __bhv = {
@@ -323,7 +325,7 @@ macro_rules! behavior {
 			$($body)*
 
 			let _ = (__token, __bhv);
-		)*
+		})*
 
 		let _ = __input;
 	};

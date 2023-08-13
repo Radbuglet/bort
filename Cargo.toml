@@ -1,2 +1,2 @@
 [workspace]
-members = ["src/bort", "src/saddle"]
+members = ["src/bort", "src/partial-scope", "src/saddle"]
