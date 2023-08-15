@@ -63,7 +63,7 @@ pub fn partial_shadow(inp: TokenStream) -> TokenStream {
     visit_tokens(inp.collect(), &mut |token| {
         if let TokenTree::Ident(ident) = token {
             if do_not_shadow.contains(&ident.to_string()) {
-                ident.set_span(Span::mixed_site());
+                ident.set_span(ident.span().resolved_at(Span::mixed_site()));
             }
         }
     })

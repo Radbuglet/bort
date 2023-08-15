@@ -261,7 +261,7 @@ impl Validator {
                     }
 
                     // Otherwise, log out the error chain.
-                    write!(
+                    writeln!(
                         f,
                         "The behavior in namespace {} defined at {} borrows component {} {} even though it may have already been borrowed {}.",
 						self.validator.graph[node].my_def,
@@ -319,10 +319,10 @@ impl Validator {
                                 .filter(|v| !v.is_compatible_with(desired_mut))
 							else { continue };
 
-                            write!(
+                            writeln!(
                                 f,
                                 "{}- The namespace {} may have called it while an ancestor was holding the component {}.\n\
-								 {}  Hint: the following behaviors may have been responsible for the aforementioned call...\n",
+								 {}  Hint: the following behaviors may have been responsible for the aforementioned call...",
                                 Indent(indent),
                                 validator.graph[caller].my_def,
                                 caller_mut.adjective(),

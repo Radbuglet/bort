@@ -297,9 +297,8 @@ macro_rules! behavior {
 			)
 		};
 
-		// TODO: Re-enable shadowing once IDE support improves
-		$(/*$crate::behavior_macro_internals::partial_shadow! {
-			$cx_name, $bhv_name;*/
+		$($crate::behavior_macro_internals::partial_shadow! {
+			$cx_name, $bhv_name;
 
 			let __token = {
 				// Define a trait describing the set of components we're acquiring.
@@ -354,7 +353,7 @@ macro_rules! behavior {
 			$($body)*
 
 			let _ = (__token, __bhv);
-		/*}*/)*
+		})*
 
 		let _ = __input;
 	};

@@ -19,6 +19,22 @@ saddle::universe!(pub BortComponents);
 
 impl Entity {
     #[track_caller]
+    pub fn try_get_s<T: 'static>(
+        self,
+        _cx: &saddle::cx![BortComponents; ref T],
+    ) -> Option<CompRef<'_, T>> {
+        self.try_get()
+    }
+
+    #[track_caller]
+    pub fn try_get_mut_s<T: 'static>(
+        self,
+        _cx: &saddle::cx![BortComponents; mut T],
+    ) -> Option<CompMut<'_, T>> {
+        self.try_get_mut()
+    }
+
+    #[track_caller]
     pub fn get_s<T: 'static>(self, _cx: &saddle::cx![BortComponents; ref T]) -> CompRef<'_, T> {
         self.get()
     }
@@ -30,6 +46,22 @@ impl Entity {
 }
 
 impl OwnedEntity {
+    #[track_caller]
+    pub fn try_get_s<'b, T: 'static>(
+        &self,
+        _cx: &'b saddle::cx![BortComponents; ref T],
+    ) -> Option<CompRef<'b, T>> {
+        self.try_get()
+    }
+
+    #[track_caller]
+    pub fn try_get_mut_s<'b, T: 'static>(
+        &self,
+        _cx: &'b saddle::cx![BortComponents; mut T],
+    ) -> Option<CompMut<'b, T>> {
+        self.try_get_mut()
+    }
+
     #[track_caller]
     pub fn get_s<'b, T: 'static>(
         &self,
@@ -49,6 +81,16 @@ impl OwnedEntity {
 
 impl<T: 'static> Obj<T> {
     #[track_caller]
+    pub fn try_get_s(self, _cx: &saddle::cx![BortComponents; ref T]) -> Option<CompRef<'_, T>> {
+        self.try_get()
+    }
+
+    #[track_caller]
+    pub fn try_get_mut_s(self, _cx: &saddle::cx![BortComponents; mut T]) -> Option<CompMut<'_, T>> {
+        self.try_get_mut()
+    }
+
+    #[track_caller]
     pub fn get_s(self, _cx: &saddle::cx![BortComponents; ref T]) -> CompRef<'_, T> {
         self.get()
     }
@@ -60,6 +102,22 @@ impl<T: 'static> Obj<T> {
 }
 
 impl<T: 'static> OwnedObj<T> {
+    #[track_caller]
+    pub fn try_get_s<'b>(
+        &self,
+        _cx: &'b saddle::cx![BortComponents; ref T],
+    ) -> Option<CompRef<'b, T>> {
+        self.try_get()
+    }
+
+    #[track_caller]
+    pub fn try_get_mut_s<'b>(
+        &self,
+        _cx: &'b saddle::cx![BortComponents; mut T],
+    ) -> Option<CompMut<'b, T>> {
+        self.try_get_mut()
+    }
+
     #[track_caller]
     pub fn get_s<'b>(&self, _cx: &'b saddle::cx![BortComponents; ref T]) -> CompRef<'b, T> {
         self.get()
