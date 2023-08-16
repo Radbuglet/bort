@@ -101,7 +101,7 @@ macro_rules! delegate {
 				&$inj_lt:lifetime self [$($inj_name:ident: $inj:ty),* $(,)?]
 				$(, $para_name:ident: $para:ty)* $(,)?
 			) $(-> $ret:ty)?
-		$(as deriving $deriving:path $({ $(deriving_args:tt)* })? )*
+		$(as deriving $deriving:path $({ $($deriving_args:tt)* })? )*
 		$(where $($where_token:tt)*)?
 	) => {
 		$crate::behavior::delegate! {
@@ -411,6 +411,68 @@ pub trait BehaviorDelegate: 'static + Sized + Send + Sync {
     }
 }
 
+// Macro
+#[doc(hidden)]
+pub mod behavior_kind_macro_internals {
+    pub use {
+        super::{behavior_kind, HasBehavior},
+        crate::HAS_SADDLE_SUPPORT,
+        cfgenius::cond,
+    };
+
+    cfgenius::cond! {
+        if macro(HAS_SADDLE_SUPPORT) {
+            pub use {saddle::namespace, crate::saddle::BortComponents};
+        }
+    }
+}
+
+#[macro_export]
+macro_rules! behavior_kind {
+	($(
+		$(#[$meta:meta])*
+		$vis:vis $name:ident($delegate:ty)$(;)?
+	)*) => {$(
+		$(#[$meta])*
+		$vis struct $name { _marker: () }
+
+		$crate::behavior::behavior_kind_macro_internals::behavior_kind!(derive $name => $delegate);
+	)*};
+	($(
+		derive $name:path => $delegate:ty  $(;)?
+	)*) => {$(
+		impl $crate::behavior::behavior_kind_macro_internals::HasBehavior for $name {
+			type Delegate = $name;
+		}
+
+		$crate::behavior::behavior_kind_macro_internals::cond! {
+			if macro($crate::behavior::behavior_kind_macro_internals::HAS_SADDLE_SUPPORT) {
+				$crate::behavior::behavior_kind_macro_internals::namespace!(
+					derive $name => $crate::behavior::behavior_kind_macro_internals::BortComponents
+				);
+			}
+		}
+	)*};
+	(
+		args {}
+
+		$(#[$attr_meta:meta])*
+		$vis:vis fn $name:ident
+			$(
+				<$($generic:ident),* $(,)?>
+				$(<$($fn_lt:lifetime),* $(,)?>)?
+			)?
+			(
+				$($para_name:ident: $para:ty),* $(,)?
+			) $(-> $ret:ty)?
+		$(where $($where_token:tt)*)?
+	) => {
+		$crate::behavior::behavior_kind_macro_internals::behavior_kind!(derive $name => $name);
+	};
+}
+
+pub use behavior_kind;
+
 // ExecutableBehaviorDelegate
 pub trait ExecutableBehaviorDelegate<C>: BehaviorDelegate {
     fn process(delegates: &[Self], registry: &BehaviorRegistry, context: C);
@@ -547,6 +609,7 @@ pub mod behavior_derive_macro_internal {
             BehaviorDelegate, BehaviorRegistry, EventBehaviorDelegate, ExecutableBehaviorDelegate,
         },
         crate::event::ProcessableEventList,
+        std::{compile_error, concat, stringify},
     };
 
     pub trait FnPointeeInference {
@@ -561,7 +624,7 @@ pub mod behavior_derive_macro_internal {
 #[macro_export]
 macro_rules! derive_behavior_delegate {
     (
-		args {}
+		args { only_base }
 
 		$(#[$attr_meta:meta])*
 		$vis:vis fn $name:ident
@@ -580,14 +643,8 @@ macro_rules! derive_behavior_delegate {
 		{
 		}
 	};
-}
-
-pub use derive_behavior_delegate;
-
-#[macro_export]
-macro_rules! derive_multiplexed_handler {
 	(
-		args {}
+		args { query }
 
 		$(#[$attr_meta:meta])*
 		$vis:vis fn $name:ident
@@ -601,6 +658,22 @@ macro_rules! derive_multiplexed_handler {
 			) $(-> $ret:ty)?
 		$(where $($where_token:tt)*)?
 	) => {
+		$crate::behavior::derive_behavior_delegate! {
+			args { only_base }
+
+			$(#[$attr_meta])*
+			$vis fn $name
+				$(
+					<$($generic),*>
+					$(<$($fn_lt),*>)?
+				)?
+				(
+					$bhv_name: $bhv_ty
+					$(, $para_name: $para)*
+				) $(-> $ret)?
+			$(where $($where_token)*)?
+		}
+
 		impl<$($($($fn_lt,)*)? $($generic: 'static,)*)?>
 			$crate::behavior::behavior_derive_macro_internal::ExecutableBehaviorDelegate<($($para,)*)>
 			for $name<$($($generic),*)?>
@@ -617,14 +690,8 @@ macro_rules! derive_multiplexed_handler {
 			}
 		}
 	};
-}
-
-pub use derive_multiplexed_handler;
-
-#[macro_export]
-macro_rules! derive_event_handler {
-    (
-		args {}
+	(
+		args { event }
 
 		$(#[$attr_meta:meta])*
 		$vis:vis fn $name:ident
@@ -639,7 +706,24 @@ macro_rules! derive_event_handler {
 			) $(-> $ret:ty)?
 		$(where $($where_token:tt)*)?
 	) => {
-        impl<$($($($fn_lt,)*)? $($generic: 'static,)*)?> $crate::behavior::behavior_derive_macro_internal::ExecutableBehaviorDelegate<($ev_ty, ($($para,)*))> for $name<$($($generic),*)?>
+		$crate::behavior::derive_behavior_delegate! {
+			args { only_base }
+
+			$(#[$attr_meta])*
+			$vis fn $name
+				$(
+					<$($generic),*>
+					$(<$($fn_lt),*>)?
+				)?
+				(
+					$bhv_name: $bhv_ty,
+					$ev_name: $ev_ty
+					$(, $para_name: $para)*
+				) $(-> $ret)?
+			$(where $($where_token)*)?
+		}
+
+		impl<$($($($fn_lt,)*)? $($generic: 'static,)*)?> $crate::behavior::behavior_derive_macro_internal::ExecutableBehaviorDelegate<($ev_ty, ($($para,)*))> for $name<$($($generic),*)?>
 		$(where $($where_token)*)?
 		{
 			fn process(
@@ -659,27 +743,33 @@ macro_rules! derive_event_handler {
 		{
 			type EventList = <$($(for<$($fn_lt)*>)?)? fn($ev_ty) as $crate::behavior::behavior_derive_macro_internal::FnPointeeInference>::Pointee;
 		}
-    };
+	};
+	( args { $($unexpected:tt)* } $($rest:tt)* ) => {
+		$crate::behavior::behavior_derive_macro_internal::compile_error!(
+			$crate::behavior::behavior_derive_macro_internal::concat!(
+				"Invalid argument to `derive_behavior_delegate!`. Expected `event`, `only_base`, or `query`. Got `",
+				$crate::behavior::behavior_derive_macro_internal::stringify!($($unexpected)*),
+				"`.",
+			),
+		);
+	}
 }
 
-pub use derive_event_handler;
+pub use derive_behavior_delegate;
 
 delegate! {
     pub fn ContextlessEventHandler<EL>(bhv: &BehaviorRegistry, events: &mut EL)
-    as deriving derive_behavior_delegate
-    as deriving derive_event_handler
+    as deriving derive_behavior_delegate { event }
     where
         EL: ProcessableEventList,
 }
 
 delegate! {
     pub fn ContextlessQueryHandler(bhv: &BehaviorRegistry)
-    as deriving derive_behavior_delegate
-    as deriving derive_multiplexed_handler
+    as deriving derive_behavior_delegate { query }
 }
 
 delegate! {
     pub fn NamespacedQueryHandler(bhv: &BehaviorRegistry, namespace: VirtualTag)
-    as deriving derive_behavior_delegate
-    as deriving derive_multiplexed_handler
+    as deriving derive_behavior_delegate { query }
 }

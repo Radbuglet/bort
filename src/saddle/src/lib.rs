@@ -81,6 +81,9 @@ macro_rules! namespace {
 		$(#[$meta])*
 		$vis struct $name { _marker: () }
 
+		$crate::namespace!(derive $name => $universe);
+	)*};
+	($(derive $name:path => $universe:ty$(;)?)*) => {$(
 		impl $crate::Namespace for $name {
 			type Universe = $universe;
 		}
@@ -97,7 +100,7 @@ macro_rules! namespace {
 				")"
 			);
 		}
-	)*}
+	)*};
 }
 
 // === Access Tokens === //
@@ -118,7 +121,15 @@ pub trait AccessRef<U: Universe, T: ?Sized>: internal_traits::Access<RefAccessMo
 impl<U: Universe, T: ?Sized, K: ?Sized + Access<MutAccessMode, U, T>> AccessMut<U, T> for K {}
 impl<U: Universe, T: ?Sized, K: ?Sized + Access<RefAccessMode, U, T>> AccessRef<U, T> for K {}
 
-pub trait BehaviorToken<N: Namespace>: Send + Sync {}
+pub trait BehaviorToken<N: Namespace>: Send + Sync {
+    fn as_dyn(&self) -> &dyn BehaviorToken<N> {
+        &SuperDangerousGlobalToken
+    }
+
+    fn as_dyn_mut(&mut self) -> &mut dyn BehaviorToken<N> {
+        Box::leak(Box::new(SuperDangerousGlobalToken))
+    }
+}
 
 // Global token
 pub struct SuperDangerousGlobalToken;

@@ -10,15 +10,21 @@ pub mod obj;
 pub mod query;
 mod util;
 
-#[cfg(feature = "saddle")]
-pub mod saddle;
+cfgenius::define! {
+    pub HAS_SADDLE_SUPPORT = cfg(feature = "saddle")
+}
+
+cfgenius::cond! {
+    if macro(HAS_SADDLE_SUPPORT) {
+        pub mod saddle;
+    }
+}
 
 pub mod prelude {
     pub use crate::{
         behavior::{
-            delegate, derive_behavior_delegate, derive_event_handler, derive_multiplexed_handler,
-            BehaviorRegistry, ComponentInjector, ContextlessEventHandler, ContextlessQueryHandler,
-            HasBehavior, NamespacedQueryHandler,
+            behavior_kind, delegate, derive_behavior_delegate, BehaviorRegistry, ComponentInjector,
+            ContextlessEventHandler, ContextlessQueryHandler, HasBehavior, NamespacedQueryHandler,
         },
         entity::{storage, CompMut, CompRef, Entity, OwnedEntity, Storage},
         event::{EventTarget, ProcessableEventList, QueryableEventList, VecEventList},

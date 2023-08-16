@@ -9,11 +9,38 @@ use derive_where::derive_where;
 
 // === Saddle re-exports === //
 
-pub use saddle::{self, behavior, cx, namespace, AccessMut, AccessRef, BehaviorToken};
+pub use saddle::{self, behavior, cx, namespace, BehaviorToken};
+
+saddle::universe!(pub BortComponents);
 
 pub type RootBehaviorToken = saddle::RootBehaviorToken<BortComponents>;
 
-saddle::universe!(pub BortComponents);
+pub trait AccessRef<T: ?Sized>: saddle::AccessRef<BortComponents, T> {
+    fn as_dyn_bort(&self) -> &dyn AccessRef<T>;
+}
+
+impl<R, T> AccessRef<T> for R
+where
+    R: ?Sized + saddle::AccessRef<BortComponents, T>,
+    T: ?Sized,
+{
+    fn as_dyn_bort(&self) -> &dyn AccessRef<T> {
+        &saddle::SuperDangerousGlobalToken
+    }
+}
+
+pub trait AccessMut<T: ?Sized>: saddle::AccessMut<BortComponents, T> {
+    fn as_dyn_mut_bort(&self) -> &dyn AccessMut<T> {
+        &saddle::SuperDangerousGlobalToken
+    }
+}
+
+impl<R, T> AccessMut<T> for R
+where
+    R: ?Sized + saddle::AccessMut<BortComponents, T>,
+    T: ?Sized,
+{
+}
 
 // === Safe method variants === //
 
@@ -141,18 +168,18 @@ pub struct LateBorrow<T, F> {
 impl<T, F> LateBorrow<T, F>
 where
     T: 'static,
-    F: Fn(&'_ dyn AccessRef<BortComponents, T>) -> CompRef<'_, T>,
+    F: Fn(&'_ dyn AccessRef<T>) -> CompRef<'_, T>,
 {
     #[track_caller]
     pub fn get<'b>(&self, cx: &'b cx![BortComponents; ref T]) -> CompRef<'b, T> {
-        (self.f)(cx.as_dyn())
+        (self.f)(cx.as_dyn_bort())
     }
 }
 
 pub fn late_borrow<T, F>(f: F) -> LateBorrow<T, F>
 where
     T: 'static,
-    F: for<'b> Fn(&'b dyn AccessRef<BortComponents, T>) -> CompRef<'b, T>,
+    F: for<'b> Fn(&'b dyn AccessRef<T>) -> CompRef<'b, T>,
 {
     LateBorrow {
         _ty: PhantomData,
@@ -170,18 +197,18 @@ pub struct LateBorrowMut<T, F> {
 impl<T, F> LateBorrowMut<T, F>
 where
     T: 'static,
-    F: Fn(&'_ dyn AccessMut<BortComponents, T>) -> CompMut<'_, T>,
+    F: Fn(&'_ dyn AccessMut<T>) -> CompMut<'_, T>,
 {
     #[track_caller]
     pub fn get<'b>(&self, cx: &'b cx![BortComponents; mut T]) -> CompMut<'b, T> {
-        (self.f)(cx.as_dyn_mut())
+        (self.f)(cx.as_dyn_mut_bort())
     }
 }
 
 pub fn late_borrow_mut<T, F>(f: F) -> LateBorrowMut<T, F>
 where
     T: 'static,
-    F: for<'b> Fn(&'_ dyn AccessMut<BortComponents, T>) -> CompMut<'_, T>,
+    F: for<'b> Fn(&'_ dyn AccessMut<T>) -> CompMut<'_, T>,
 {
     LateBorrowMut {
         _ty: PhantomData,
