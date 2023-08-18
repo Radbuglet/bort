@@ -228,6 +228,10 @@ macro_rules! cx {
 		impl $crate::cx_macro_internals::AccessAlias for dyn $name {
 			type Universe = $universe;
 			type AccessIter =
+				// N.B. This construction is a bit weird. One may think that the first item in the
+				// list is the inner-most iterator and the last item is the outermost, but this is
+				// reversed because we use the third trailing parameter to define the type, not the
+				// leading one!
 				$($($crate::cx_macro_internals::TriChain<dyn $inherits, )*)?
 				$crate::cx_macro_internals::ArrayIter<{
 					$($($crate::cx_macro_internals::bind_and_return_one::<$ty>() +)*)? 0
@@ -235,22 +239,18 @@ macro_rules! cx {
 				$($(, <dyn $inherits as $crate::cx_macro_internals::AccessAlias>::AccessIter> )*)?;
 
 			fn iter_access() -> Self::AccessIter {
-				// Construct the base iterator
 				let iter = $crate::cx_macro_internals::IntoIterator::into_iter([$($((
 					$crate::cx_macro_internals::TypeId::of::<$ty>(),
 					$crate::cx_macro_internals::type_name::<$ty>(),
 					$crate::cx!(@__parse_kw_expr $kw),
 				)),*)?]);
 
-				// Store the inherited accessors in a cons list in their original order...
-				let iters = ();
-				$($(let iters = (<dyn $inherits as $crate::cx_macro_internals::AccessAlias>::iter_access(), iters);)*)?
-
-				// ...and pop them out and chain them in their opposite order.
 				$($(
 					$crate::cx_macro_internals::bind_and_ensure_in_universe::<$universe, dyn $inherits>();
-					let (next_iter, iters) = iters;
-					let iter = $crate::cx_macro_internals::Iterator::chain(iter, next_iter);
+					let iter = $crate::cx_macro_internals::Iterator::chain(
+						iter,
+						<dyn $inherits as $crate::cx_macro_internals::AccessAlias>::iter_access(),
+					);
 				)*)?
 
 				iter
