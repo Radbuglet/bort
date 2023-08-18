@@ -107,14 +107,22 @@ macro_rules! namespace {
 
 // Traits
 pub trait AccessMut<U: Universe, T: ?Sized>: internal_traits::Access<MutAccessMode, U, T> {
-    fn as_dyn_mut(&self) -> &dyn AccessMut<U, T> {
-        &SuperDangerousGlobalToken
+    fn as_dyn(&self) -> &dyn AccessMut<U, T> {
+        SuperDangerousGlobalToken::new()
+    }
+
+    fn as_dyn_mut(&mut self) -> &mut dyn AccessMut<U, T> {
+        SuperDangerousGlobalToken::new()
     }
 }
 
 pub trait AccessRef<U: Universe, T: ?Sized>: internal_traits::Access<RefAccessMode, U, T> {
     fn as_dyn(&self) -> &dyn AccessRef<U, T> {
-        &SuperDangerousGlobalToken
+        SuperDangerousGlobalToken::new()
+    }
+
+    fn as_dyn_mut(&mut self) -> &mut dyn AccessRef<U, T> {
+        SuperDangerousGlobalToken::new()
     }
 }
 
@@ -123,11 +131,11 @@ impl<U: Universe, T: ?Sized, K: ?Sized + Access<RefAccessMode, U, T>> AccessRef<
 
 pub trait BehaviorToken<N: Namespace>: Send + Sync {
     fn as_dyn(&self) -> &dyn BehaviorToken<N> {
-        &SuperDangerousGlobalToken
+        SuperDangerousGlobalToken::new()
     }
 
     fn as_dyn_mut(&mut self) -> &mut dyn BehaviorToken<N> {
-        Box::leak(Box::new(SuperDangerousGlobalToken))
+        SuperDangerousGlobalToken::new()
     }
 }
 
@@ -138,6 +146,12 @@ impl<U: Universe, T: ?Sized> Access<MutAccessMode, U, T> for SuperDangerousGloba
 
 impl<N: Namespace> BehaviorToken<N> for SuperDangerousGlobalToken {}
 
+impl SuperDangerousGlobalToken {
+    pub fn new() -> &'static mut Self {
+        Box::leak(Box::new(SuperDangerousGlobalToken))
+    }
+}
+
 // Macros
 #[doc(hidden)]
 pub mod cx_macro_internals {
@@ -147,6 +161,7 @@ pub mod cx_macro_internals {
         crate::{
             internal_traits::{Access, AccessAlias, MutAccessMode, RefAccessMode},
             validator::Mutability::{Immutable, Mutable},
+            SuperDangerousGlobalToken,
         },
         std::{
             any::{type_name, TypeId},
@@ -191,6 +206,9 @@ macro_rules! cx {
 			$($(+ $inherits)*)?
 			$($(+ $crate::cx_macro_internals::Access<$crate::cx!(@__parse_kw $kw), $universe, $ty>)*)?
 		{
+			fn as_dyn(&self) -> &dyn $name;
+
+			fn as_dyn_mut(&mut self) -> &mut dyn $name;
 		}
 
 		impl<T> $name for T
@@ -198,6 +216,13 @@ macro_rules! cx {
 			T: ?Sized $($(+ $inherits)*)?
 			   $($(+ $crate::cx_macro_internals::Access<$crate::cx!(@__parse_kw $kw), $universe, $ty>)*)?
 		{
+			fn as_dyn(&self) -> &dyn $name {
+				$crate::cx_macro_internals::SuperDangerousGlobalToken::new()
+			}
+
+			fn as_dyn_mut(&mut self) -> &mut dyn $name {
+				$crate::cx_macro_internals::SuperDangerousGlobalToken::new()
+			}
 		}
 
 		impl $crate::cx_macro_internals::AccessAlias for dyn $name {
