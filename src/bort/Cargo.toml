@@ -18,6 +18,7 @@ saddle = ["dep:saddle"]
 criterion = "0.5.1"
 fastrand = "2.0.0"  # For "fuzzing"
 glam = "0.24.0"     # For benchmark
+linkme = "0.3.15"
 
 [[bench]]
 name = "access"

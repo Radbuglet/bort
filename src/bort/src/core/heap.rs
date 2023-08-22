@@ -161,7 +161,10 @@ impl<T> Heap<T> {
         other: &Heap<T>,
         other_index: usize,
     ) {
-        // Swap the values contained by both slots
+        // We'd like to move this value into a different heap while preserving which slot points to
+        // which value.
+
+        // We begin by swapping the physical underlying values.
         self.values()[my_index]
             .value
             .swap(token, &other.values()[other_index].value);
@@ -172,20 +175,14 @@ impl<T> Heap<T> {
         let my_slot = my_slot_ref.get(token);
         let other_slot = other_slot_ref.get(token);
 
-        // Swap which heap owns which slot
+        // Now, we need to ensure that each slot is registered in the appropriate heap.
         my_slot_ref.swap(token, other_slot_ref);
 
-        // Swap which slot points to which value
+        // Unfortunately, the pointers on the slots are now stale so we swap those too.
         my_slot
             .indirector
             .value
             .swap(token, &other_slot.indirector.value);
-
-        // Swap which slot owns which value
-        my_slot
-            .indirector
-            .owner
-            .swap(token, &other_slot.indirector.owner);
     }
 
     pub fn slots<'a>(
