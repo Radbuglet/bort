@@ -23,7 +23,7 @@ cfgenius::cond! {
 pub mod prelude {
     pub use crate::{
         behavior::{
-            behavior_kind, delegate, derive_behavior_delegate, BehaviorRegistry, ComponentInjector,
+            behavior_delegate, behavior_kind, delegate, BehaviorRegistry, ComponentInjector,
             ContextlessEventHandler, ContextlessQueryHandler, HasBehavior, NamespacedQueryHandler,
         },
         entity::{storage, CompMut, CompRef, Entity, OwnedEntity, Storage},

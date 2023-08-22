@@ -1,9 +1,4 @@
-use std::{
-    any::{type_name, Any},
-    cell::RefCell,
-    fmt, hash, mem,
-    ops::ControlFlow,
-};
+use std::{any::Any, cell::RefCell, fmt, hash, mem, ops::ControlFlow};
 
 use derive_where::derive_where;
 
@@ -183,15 +178,5 @@ impl<E> ProcessableEventList for VecEventList<E> {
         self.process_list.get_mut().clear();
         self.events.clear();
         self.owned.clear();
-    }
-}
-
-impl<E> Drop for VecEventList<E> {
-    fn drop(&mut self) {
-        debug_assert!(
-            self.is_empty(),
-            "Leaked one or more events from a VecEventList<{}>.",
-            type_name::<E>()
-        );
     }
 }

@@ -405,10 +405,15 @@ pub trait HasBehavior: Sized + 'static {
     type Delegate: BehaviorDelegate;
 }
 
-pub trait BehaviorDelegate: 'static + Sized + Send + Sync {
-    fn pre_register(&mut self, registry: &mut BehaviorRegistry) {
-        let _ = registry;
-    }
+pub trait BehaviorDelegate: Sized {
+    type List: 'static + Send + Sync;
+    type View<'a>;
+
+    fn make_list() -> Self::List;
+
+    fn extend_list(self, list: &mut Self::List);
+
+    fn view<'a>(bhv: &'a BehaviorRegistry, list: Option<&'a Self::List>) -> Self::View<'a>;
 }
 
 // Macro
@@ -431,7 +436,7 @@ pub mod behavior_kind_macro_internals {
 macro_rules! behavior_kind {
 	($(
 		$(#[$meta:meta])*
-		$vis:vis $name:ident($delegate:ty)$(;)?
+		$vis:vis $name:ident of $delegate:ty $(;)?
 	)*) => {$(
 		$(#[$meta])*
 		$vis struct $name { _marker: () }
@@ -473,42 +478,6 @@ macro_rules! behavior_kind {
 
 pub use behavior_kind;
 
-// ExecutableBehaviorDelegate
-pub trait ExecutableBehaviorDelegate<C>: BehaviorDelegate {
-    fn process(delegates: &[Self], registry: &BehaviorRegistry, context: C);
-}
-
-pub trait ContextForExecutableBehaviorDelegate<D: BehaviorDelegate>: Sized {
-    fn process(self, registry: &BehaviorRegistry, delegates: &[D]);
-}
-
-impl<C, D: ExecutableBehaviorDelegate<C>> ContextForExecutableBehaviorDelegate<D> for C {
-    fn process(self, registry: &BehaviorRegistry, delegates: &[D]) {
-        D::process(delegates, registry, self)
-    }
-}
-
-// EventBehaviorDelegate
-pub trait EventBehaviorDelegate<C>:
-    for<'a> ExecutableBehaviorDelegate<(&'a mut Self::EventList, C)>
-{
-    type EventList: ProcessableEventList;
-}
-
-pub trait ContextForEventBehaviorDelegate<D: BehaviorDelegate>: Sized {
-    type EventList: ProcessableEventList;
-
-    fn process(self, registry: &BehaviorRegistry, events: &mut Self::EventList, delegates: &[D]);
-}
-
-impl<C, D: EventBehaviorDelegate<C>> ContextForEventBehaviorDelegate<D> for C {
-    type EventList = D::EventList;
-
-    fn process(self, registry: &BehaviorRegistry, events: &mut Self::EventList, delegates: &[D]) {
-        D::process(delegates, registry, (events, self));
-    }
-}
-
 // BehaviorRegistry
 pub struct BehaviorRegistry {
     behaviors: FxHashMap<NamedTypeId, Box<dyn Any + Send + Sync>>,
@@ -521,15 +490,19 @@ impl BehaviorRegistry {
         }
     }
 
-    pub fn register<B: HasBehavior>(&mut self, mut delegate: B::Delegate) -> &mut Self {
-        delegate.pre_register(self);
-
-        self.behaviors
+    pub fn register<B: HasBehavior>(&mut self, delegate: B::Delegate) -> &mut Self {
+        let own_registry = self
+            .behaviors
             .entry(NamedTypeId::of::<B>())
-            .or_insert_with(|| Box::<Vec<B::Delegate>>::default())
-            .downcast_mut::<Vec<B::Delegate>>()
-            .unwrap()
-            .push(delegate);
+            .or_insert_with(|| {
+                Box::<<B::Delegate as BehaviorDelegate>::List>::new(
+                    <B::Delegate as BehaviorDelegate>::make_list(),
+                )
+            })
+            .downcast_mut::<<B::Delegate as BehaviorDelegate>::List>()
+            .unwrap();
+
+        delegate.extend_list(own_registry);
 
         self
     }
@@ -549,37 +522,14 @@ impl BehaviorRegistry {
         self
     }
 
-    pub fn get<B: HasBehavior>(&self) -> &[B::Delegate] {
+    pub fn get_raw<B: HasBehavior>(&self) -> Option<&<B::Delegate as BehaviorDelegate>::List> {
         self.behaviors
             .get(&NamedTypeId::of::<B>())
-            .map_or(&[], |list| {
-                list.downcast_ref::<Vec<B::Delegate>>().unwrap().as_slice()
-            })
+            .map(|list| list.downcast_ref().unwrap())
     }
 
-    pub fn process<B: HasBehavior>(
-        &self,
-        cx: impl ContextForExecutableBehaviorDelegate<B::Delegate>,
-    ) {
-        cx.process(self, self.get::<B>());
-    }
-
-    pub fn process_events_cx<EL: ProcessableEventList>(
-        &self,
-        events: &mut EL,
-        cx: impl ContextForEventBehaviorDelegate<<EL::Event as HasBehavior>::Delegate, EventList = EL>,
-    ) where
-        EL::Event: HasBehavior,
-    {
-        cx.process(self, events, self.get::<EL::Event>());
-    }
-
-    pub fn process_events<EL: ProcessableEventList>(&self, events: &mut EL)
-    where
-        EL::Event: HasBehavior,
-        (): ContextForEventBehaviorDelegate<<EL::Event as HasBehavior>::Delegate, EventList = EL>,
-    {
-        self.process_events_cx(events, ());
+    pub fn get<B: HasBehavior>(&self) -> <B::Delegate as BehaviorDelegate>::View<'_> {
+        <B::Delegate as BehaviorDelegate>::view(self, self.get_raw::<B>())
     }
 }
 
@@ -605,11 +555,9 @@ impl fmt::Debug for BehaviorRegistry {
 #[doc(hidden)]
 pub mod behavior_derive_macro_internal {
     pub use {
-        super::{
-            BehaviorDelegate, BehaviorRegistry, EventBehaviorDelegate, ExecutableBehaviorDelegate,
-        },
+        super::{BehaviorDelegate, BehaviorRegistry},
         crate::event::ProcessableEventList,
-        std::{compile_error, concat, stringify},
+        std::{boxed::Box, compile_error, concat, option::Option, stringify, vec::Vec},
     };
 
     pub trait FnPointeeInference {
@@ -622,9 +570,9 @@ pub mod behavior_derive_macro_internal {
 }
 
 #[macro_export]
-macro_rules! derive_behavior_delegate {
-    (
-		args { only_base }
+macro_rules! behavior_delegate {
+	(
+		args {}
 
 		$(#[$attr_meta:meta])*
 		$vis:vis fn $name:ident
@@ -641,135 +589,46 @@ macro_rules! derive_behavior_delegate {
 		impl<$($($($fn_lt,)*)? $($generic: 'static,)*)?> $crate::behavior::behavior_derive_macro_internal::BehaviorDelegate for $name<$($($generic),*)?>
 		$(where $($where_token)*)?
 		{
-		}
-	};
-	(
-		args { query }
+			type List = $crate::behavior::behavior_derive_macro_internal::Vec<Self>;
+			type View<'a> = $crate::behavior::behavior_derive_macro_internal::Box<dyn $(for<$($fn_lt,)*>)? Fn($($para),*) + 'a>;
 
-		$(#[$attr_meta:meta])*
-		$vis:vis fn $name:ident
-			$(
-				<$($generic:ident),* $(,)?>
-				$(<$($fn_lt:lifetime),* $(,)?>)?
-			)?
-			(
-				$bhv_name:ident: $bhv_ty:ty
-				$(, $para_name:ident: $para:ty)* $(,)?
-			) $(-> $ret:ty)?
-		$(where $($where_token:tt)*)?
-	) => {
-		$crate::behavior::derive_behavior_delegate! {
-			args { only_base }
+			fn make_list() -> Self::List {
+				$crate::behavior::behavior_derive_macro_internal::Vec::new()
+			}
 
-			$(#[$attr_meta])*
-			$vis fn $name
-				$(
-					<$($generic),*>
-					$(<$($fn_lt),*>)?
-				)?
-				(
-					$bhv_name: $bhv_ty
-					$(, $para_name: $para)*
-				) $(-> $ret)?
-			$(where $($where_token)*)?
-		}
+			fn extend_list(self, list: &mut Self::List) {
+				list.push(self);
+			}
 
-		impl<$($($($fn_lt,)*)? $($generic: 'static,)*)?>
-			$crate::behavior::behavior_derive_macro_internal::ExecutableBehaviorDelegate<($($para,)*)>
-			for $name<$($($generic),*)?>
-		$(where $($where_token)*)?
-		{
-			fn process(
-				delegates: &[$name<$($($generic),*)?>],
-				registry: &$crate::behavior::behavior_derive_macro_internal::BehaviorRegistry,
-				($($para_name,)*): ($($para,)*),
-			) {
-				for delegate in delegates {
-					delegate(registry, $($para_name,)*);
-				}
+			fn view<'a>(
+				bhv: &'a $crate::behavior::behavior_derive_macro_internal::BehaviorRegistry,
+				list: $crate::behavior::behavior_derive_macro_internal::Option<&'a Self::List>,
+			) -> Self::View<'a> {
+				$crate::behavior::behavior_derive_macro_internal::Box::new(move |$($para_name,)*| {
+					for behavior in list.map_or(&[][..], |vec| vec.as_slice()) {
+						behavior(bhv, $($para_name,)*);
+					}
+				})
 			}
 		}
 	};
-	(
-		args { event }
-
-		$(#[$attr_meta:meta])*
-		$vis:vis fn $name:ident
-			$(
-				<$($generic:ident),* $(,)?>
-				$(<$($fn_lt:lifetime),* $(,)?>)?
-			)?
-			(
-				$bhv_name:ident: $bhv_ty:ty,
-				$ev_name:ident: $ev_ty:ty
-				$(, $para_name:ident: $para:ty)* $(,)?
-			) $(-> $ret:ty)?
-		$(where $($where_token:tt)*)?
-	) => {
-		$crate::behavior::derive_behavior_delegate! {
-			args { only_base }
-
-			$(#[$attr_meta])*
-			$vis fn $name
-				$(
-					<$($generic),*>
-					$(<$($fn_lt),*>)?
-				)?
-				(
-					$bhv_name: $bhv_ty,
-					$ev_name: $ev_ty
-					$(, $para_name: $para)*
-				) $(-> $ret)?
-			$(where $($where_token)*)?
-		}
-
-		impl<$($($($fn_lt,)*)? $($generic: 'static,)*)?> $crate::behavior::behavior_derive_macro_internal::ExecutableBehaviorDelegate<($ev_ty, ($($para,)*))> for $name<$($($generic),*)?>
-		$(where $($where_token)*)?
-		{
-			fn process(
-				delegates: &[$name<$($($generic),*)?>],
-				registry: &$crate::behavior::behavior_derive_macro_internal::BehaviorRegistry,
-				($ev_name, ($($para_name,)*)): ($ev_ty, ($($para,)*)),
-			) {
-				for delegate in delegates {
-					delegate(registry, $ev_name, $($para_name,)*);
-				}
-				$crate::behavior::behavior_derive_macro_internal::ProcessableEventList::clear($ev_name);
-			}
-		}
-
-		impl<$($($($fn_lt,)*)? $($generic: 'static,)*)?> $crate::behavior::behavior_derive_macro_internal::EventBehaviorDelegate<($($para,)*)> for $name<$($($generic),*)?>
-		$(where $($where_token)*)?
-		{
-			type EventList = <$($(for<$($fn_lt)*>)?)? fn($ev_ty) as $crate::behavior::behavior_derive_macro_internal::FnPointeeInference>::Pointee;
-		}
-	};
-	( args { $($unexpected:tt)* } $($rest:tt)* ) => {
-		$crate::behavior::behavior_derive_macro_internal::compile_error!(
-			$crate::behavior::behavior_derive_macro_internal::concat!(
-				"Invalid argument to `derive_behavior_delegate!`. Expected `event`, `only_base`, or `query`. Got `",
-				$crate::behavior::behavior_derive_macro_internal::stringify!($($unexpected)*),
-				"`.",
-			),
-		);
-	}
 }
 
-pub use derive_behavior_delegate;
+pub use behavior_delegate;
 
 delegate! {
     pub fn ContextlessEventHandler<EL>(bhv: &BehaviorRegistry, events: &mut EL)
-    as deriving derive_behavior_delegate { event }
+    as deriving behavior_delegate
     where
         EL: ProcessableEventList,
 }
 
 delegate! {
     pub fn ContextlessQueryHandler(bhv: &BehaviorRegistry)
-    as deriving derive_behavior_delegate { query }
+    as deriving behavior_delegate
 }
 
 delegate! {
     pub fn NamespacedQueryHandler(bhv: &BehaviorRegistry, namespace: VirtualTag)
-    as deriving derive_behavior_delegate { query }
+    as deriving behavior_delegate
 }

@@ -88,8 +88,7 @@ fn main() {
     println!("People who have entered my home who are from this world: {people_from_this_world}");
 
     // We just need to make sure to clear the event list once we're sure that everyone interested in
-    // the event has received it. Otherwise, we get a warning in the console in debug builds telling
-    // us that we may have leaked an event inadvertently.
+    // the event has received it. Otherwise, long-living event lists can leak memory.
     on_enter_home.clear();
 
     // The second system is the behavior registry. The behavior registry allows us to register
@@ -106,7 +105,7 @@ fn main() {
         )
         // This transforms our regular delegate into a delegate which can be called by the behavior
         // registry.
-        as deriving derive_behavior_delegate { event }
+        as deriving behavior_delegate
         // This allows this delegate to become a behavior onto its own. Normally, users must define
         // a separate marker type declaring a behavior type using a specific delegate but this macro
         // allows us to define the behavior and the delegate it calls as one and the same.
@@ -128,7 +127,7 @@ fn main() {
 
     // ...and dispatch them in the same way we had done before.
     on_enter_home.fire(player.entity(), EnterHomeEvent, ());
-    bhv.process::<HomeEnterBehavior>((&mut on_enter_home, (in_world, &mut people_from_this_world)));
+    bhv.get::<HomeEnterBehavior>()(&mut on_enter_home, in_world, &mut people_from_this_world);
 
     println!(
         "People who have now entered my home who are from this world: {}",
@@ -171,7 +170,7 @@ fn main() {
             bhv_cx: &mut dyn BehaviorToken<PrintAllTheInfo>,
             target: Entity,
         )
-        as deriving derive_behavior_delegate { query }
+        as deriving behavior_delegate
         // This implicitly defines a `namespace!` for the delegate in saddle-enabled builds.
         as deriving behavior_kind
     }
@@ -208,7 +207,7 @@ fn main() {
         // Here, it is valid to call `PrintAllTheInfo` because our borrows are compatible with the
         // borrows of all of its implementations.
         (cx: [], bhv_cx: [PrintAllTheInfo]) {
-            bhv.process::<PrintAllTheInfo>((bhv_cx.as_dyn_mut(), player.entity()));
+            bhv.get::<PrintAllTheInfo>()(bhv_cx.as_dyn_mut(), player.entity());
         }
     }
 
