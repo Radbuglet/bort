@@ -401,7 +401,7 @@ impl<T: 'static> FuncMethodInjectorMut<T> for ComponentInjector {
 // === Behavior === //
 
 // Core traits
-pub trait HasBehavior: Sized + 'static {
+pub trait BehaviorKind: Sized + 'static {
     type Delegate: BehaviorDelegate;
 }
 
@@ -419,17 +419,7 @@ pub trait BehaviorDelegate: Sized {
 // Macro
 #[doc(hidden)]
 pub mod behavior_kind_macro_internals {
-    pub use {
-        super::{behavior_kind, HasBehavior},
-        crate::HAS_SADDLE_SUPPORT,
-        cfgenius::cond,
-    };
-
-    cfgenius::cond! {
-        if macro(HAS_SADDLE_SUPPORT) {
-            pub use {saddle::namespace, crate::saddle::BortComponents};
-        }
-    }
+    pub use super::{behavior_kind, BehaviorKind};
 }
 
 #[macro_export]
@@ -448,14 +438,6 @@ macro_rules! behavior_kind {
 	)*) => {$(
 		impl $crate::behavior::behavior_kind_macro_internals::HasBehavior for $name {
 			type Delegate = $name;
-		}
-
-		$crate::behavior::behavior_kind_macro_internals::cond! {
-			if macro($crate::behavior::behavior_kind_macro_internals::HAS_SADDLE_SUPPORT) {
-				$crate::behavior::behavior_kind_macro_internals::namespace!(
-					derive $name => $crate::behavior::behavior_kind_macro_internals::BortComponents
-				);
-			}
 		}
 	)*};
 	(
@@ -490,7 +472,7 @@ impl BehaviorRegistry {
         }
     }
 
-    pub fn register<B: HasBehavior>(&mut self, delegate: B::Delegate) -> &mut Self {
+    pub fn register<B: BehaviorKind>(&mut self, delegate: B::Delegate) -> &mut Self {
         let own_registry = self
             .behaviors
             .entry(NamedTypeId::of::<B>())
@@ -512,7 +494,7 @@ impl BehaviorRegistry {
         self
     }
 
-    pub fn with<B: HasBehavior>(mut self, delegate: B::Delegate) -> Self {
+    pub fn with<B: BehaviorKind>(mut self, delegate: B::Delegate) -> Self {
         self.register::<B>(delegate);
         self
     }
@@ -522,13 +504,13 @@ impl BehaviorRegistry {
         self
     }
 
-    pub fn get_raw<B: HasBehavior>(&self) -> Option<&<B::Delegate as BehaviorDelegate>::List> {
+    pub fn get_raw<B: BehaviorKind>(&self) -> Option<&<B::Delegate as BehaviorDelegate>::List> {
         self.behaviors
             .get(&NamedTypeId::of::<B>())
             .map(|list| list.downcast_ref().unwrap())
     }
 
-    pub fn get<B: HasBehavior>(&self) -> <B::Delegate as BehaviorDelegate>::View<'_> {
+    pub fn get<B: BehaviorKind>(&self) -> <B::Delegate as BehaviorDelegate>::View<'_> {
         <B::Delegate as BehaviorDelegate>::view(self, self.get_raw::<B>())
     }
 }
