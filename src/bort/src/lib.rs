@@ -42,7 +42,7 @@ pub mod prelude {
                 ProcCollection, proc_collection,
                 call_cx, CanCallCollection,
                 AccessRef, AccessMut, access_cx,
-                proc,
+                alias, proc,
                 validate, RootCollectionCallToken,
                 saddle_delegate,
             };

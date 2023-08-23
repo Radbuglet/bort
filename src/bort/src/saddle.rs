@@ -3,10 +3,11 @@ use crate::{
     obj::{Obj, OwnedObj},
 };
 
+// Macro internals
 #[doc(hidden)]
 pub mod macro_internals_forwards {
     pub use {
-        super::BortComponents,
+        super::{proc as proc_me, BortComponents},
         saddle::{access_cx, proc, proc_collection},
     };
 }
@@ -100,7 +101,7 @@ macro_rules! access_cx {
 	)*) => {
 		$crate::saddle::macro_internals_forwards::access_cx! {$(
 			$(#[$attr])*
-			$vis trait $name$(: $($inherits),*)? $(= $($kw $component),* : $crat::saddle::::macro_internals_forwards::BortComponents)?;
+			$vis trait $name$(: $($inherits),*)? $(= $($kw $component),* : $crate::saddle::::macro_internals_forwards::BortComponents)?;
 		)*};
 	};
     (
@@ -116,8 +117,16 @@ macro_rules! access_cx {
 
 pub use access_cx;
 
-// Aliases
-// TODO
+// Alias
+#[macro_export]
+macro_rules! alias {
+	($($vis:vis let $name:ident: $ty:ty);*$(;)?) => {$(
+		#[allow(non_camel_case_types)]
+		$vis type $name = $ty;
+	)*};
+}
+
+pub use alias;
 
 // Proc
 #[macro_export]
@@ -133,7 +142,10 @@ macro_rules! proc {
 				$collection_cx_name:ident: [
 					$($out_collection:ty),* $(,)?
 				]
-				$(,)?
+				$(,
+					$($alias_kw:ident $alias_ty:ty $(as $alias_rename:ident)? = $alias_target:expr),*
+					$(,)?
+				)?
 			) {
 				$($body:tt)*
 			}
@@ -145,18 +157,41 @@ macro_rules! proc {
 			$(
 				(
 					$access_cx_name: [
-						$($access_kw $access_component),* : $crate::saddle::macro_internals_forwards::BortComponents
+						$($access_kw $access_component,)* $($($alias_kw $alias_ty,)*)? : $crate::saddle::macro_internals_forwards::BortComponents
 						$(; $($access_inherits),*)?
 					],
 					$collection_cx_name: [
 						$($out_collection),*
 					]
 				) {
+					$($(
+						$crate::saddle::macro_internals_forwards::proc_me!(
+							@__use_first_ident_to_define let [$($alias_rename)? $alias_ty] =
+							$crate::saddle::macro_internals_forwards::proc_me!(
+								@__use_appropriate_getter $access_cx_name $alias_target => $alias_kw $alias_ty
+							);
+						);
+					)*)?
 					$($body)*
+					$($($crate::saddle::macro_internals_forwards::proc_me!(
+						@__use_first_ident_to_drop $($alias_rename)? $alias_ty
+					);)*)?
 				}
 			)*
 		}
     };
+	(@__use_first_ident_to_define let [$first:ident $($rest:tt)*] = $init:expr;) => {
+		let $first = $init;
+	};
+	(@__use_first_ident_to_drop $first:ident $($rest:tt)*) => {
+		let _ = $first;
+	};
+	(@__use_appropriate_getter $access_cx_name:ident $target:expr => ref $ty:ty) => {
+		$target.get_s::<$ty>($access_cx_name)
+	};
+	(@__use_appropriate_getter $access_cx_name:ident $target:expr => mut $ty:ty) => {
+		$target.get_mut_s::<$ty>($access_cx_name)
+	};
 }
 
 pub use proc;
