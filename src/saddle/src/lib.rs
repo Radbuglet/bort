@@ -1,183 +1,268 @@
+use self::validator::Validator;
 use std::{
     marker::PhantomData,
     sync::atomic::{AtomicBool, Ordering::Relaxed},
 };
 
-use self::internal_traits::{Access, MutAccessMode, RefAccessMode};
-use self::validator::Validator;
-
-// === Trait internals === //
-
-// TODO: Deny external implementations of these traits
-
-#[doc(hidden)]
-pub mod internal_traits {
-    use std::any::TypeId;
-
-    use crate::{validator::Mutability, Universe};
-
-    // Namespaces
-    pub trait TrackDefinition {
-        const LOCATION: &'static str;
-    }
-
-    // Access tokens
-    pub trait Access<M, U: Universe, T: ?Sized>: Send + Sync {}
-
-    pub struct MutAccessMode;
-    pub struct RefAccessMode;
-
-    impl<U, T, K> Access<RefAccessMode, U, T> for K
-    where
-        U: Universe,
-        T: ?Sized,
-        K: ?Sized + Access<MutAccessMode, U, T>,
-    {
-    }
-
-    pub trait AccessAlias {
-        type Universe: Universe;
-        type AccessIter: Iterator<Item = (TypeId, &'static str, Mutability)>;
-
-        fn iter_access() -> Self::AccessIter;
-    }
-}
-
 // === Markers === //
 
-pub trait Universe: 'static + Send + Sync {}
-
-pub trait Namespace: 'static + Send + Sync + internal_traits::TrackDefinition {
-    type Universe: Universe;
+// Universe
+mod universe {
+    pub trait Private {
+        const DEF_LOC: &'static str;
+    }
 }
 
+pub trait Universe: Sized + 'static + universe::Private {}
+
 #[doc(hidden)]
-pub mod marker_macro_internals {
+pub mod macro_internals_universe {
     pub use {
-        crate::internal_traits::TrackDefinition,
-        std::{column, concat, file, line, stringify},
+        super::{universe, universe::Private, Universe},
+        std::{column, concat, file, line, primitive::str, stringify},
     };
 }
 
 #[macro_export]
 macro_rules! universe {
-    ($(
-		$(#[$meta:meta])*
-		$vis:vis $name:ident$(;)?
-	)*) => {$(
-		$(#[$meta])*
-		$vis struct $name { _marker: () }
+	($(
+		$(#[$attr:meta])*
+		$vis:vis $name:ident
+	);* $(;)?) => {$(
+		$(#[$attr])*
+		#[non_exhaustive]
+		$vis struct $name;
 
-		impl $crate::Universe for $name {}
-	)*}
+		$crate::macro_internals_universe::universe!(derive for $name);
+	)*};
+	($(derive for $target:ty$(;)?)*) => {$(
+		impl $crate::macro_internals_universe::Private for $target {
+			const DEF_LOC: &'static $crate::macro_internals_universe::str = $crate::macro_internals_universe::concat!(
+				"universe ",
+				$crate::macro_internals_universe::stringify!($target),
+				" defined at ",
+				$crate::macro_internals_universe::file!(),
+				":",
+				$crate::macro_internals_universe::line!(),
+				":",
+				$crate::macro_internals_universe::column!(),
+			);
+		}
+
+		impl $crate::macro_internals_universe::Universe for $target {}
+	)*};
+}
+
+// ProcCollection
+mod proc_collection {
+    pub trait Private {
+        const DEF_LOC: &'static str;
+    }
+}
+
+pub trait ProcCollection: Sized + 'static + proc_collection::Private {}
+
+#[doc(hidden)]
+pub mod macro_internals_proc_collection {
+    pub use {
+        super::{proc_collection, proc_collection::Private, ProcCollection},
+        std::{column, concat, file, line, primitive::str, stringify},
+    };
 }
 
 #[macro_export]
-macro_rules! namespace {
-    ($(
-		$(#[$meta:meta])*
-		$vis:vis $name:ident in $universe:ty$(;)?
-	)*) => {$(
-		$(#[$meta])*
-		$vis struct $name { _marker: () }
+macro_rules! proc_collection {
+	($(
+		$(#[$attr:meta])*
+		$vis:vis $name:ident
+	);* $(;)?) => {$(
+		$(#[$attr])*
+		#[non_exhaustive]
+		$vis struct $name;
 
-		$crate::namespace!(derive $name => $universe);
+		$crate::macro_internals_proc_collection::proc_collection!(derive for $name);
 	)*};
-	($(derive $name:path => $universe:ty$(;)?)*) => {$(
-		impl $crate::Namespace for $name {
-			type Universe = $universe;
-		}
-
-		impl $crate::marker_macro_internals::TrackDefinition for $name {
-			const LOCATION: &'static str = $crate::marker_macro_internals::concat!(
-				$crate::marker_macro_internals::stringify!($name),
-				" (at ",
-				$crate::marker_macro_internals::file!(),
+	($(derive for $target:ty$(;)?)*) => {$(
+		impl $crate::macro_internals_proc_collection::Private for $target {
+			const DEF_LOC: &'static $crate::macro_internals_proc_collection::str = $crate::macro_internals_proc_collection::concat!(
+				"universe ",
+				$crate::macro_internals_proc_collection::stringify!($target),
+				" defined at ",
+				$crate::macro_internals_proc_collection::file!(),
 				":",
-				$crate::marker_macro_internals::line!(),
+				$crate::macro_internals_proc_collection::line!(),
 				":",
-				$crate::marker_macro_internals::column!(),
-				")"
+				$crate::macro_internals_proc_collection::column!(),
 			);
 		}
+
+		impl $crate::macro_internals_proc_collection::ProcCollection for $target {}
 	)*};
+}
+
+// === Global Token === //
+
+#[derive(Debug)]
+pub struct DangerousGlobalAccessToken {
+    _private: (),
+}
+
+impl DangerousGlobalAccessToken {
+    pub fn new() -> &'static mut Self {
+        Box::leak(Box::new(DangerousGlobalAccessToken { _private: () }))
+    }
+}
+
+impl<U, T> access::Private<access::Mutable, U, T> for DangerousGlobalAccessToken
+where
+    U: Universe,
+    T: ?Sized + 'static,
+{
+}
+
+impl<C: ProcCollection> can_call_collection::Private<C> for DangerousGlobalAccessToken {}
+
+impl<C: ProcCollection> CanCallCollection<C> for DangerousGlobalAccessToken {
+    fn as_dyn(&self) -> &dyn CanCallCollection<C> {
+        self
+    }
+
+    fn as_dyn_mut(&mut self) -> &mut dyn CanCallCollection<C> {
+        self
+    }
+}
+
+// === Collection Token === //
+
+mod can_call_collection {
+    use super::*;
+
+    pub trait Private<C: ProcCollection> {}
+}
+
+pub trait CanCallCollection<C: ProcCollection>: can_call_collection::Private<C> {
+    fn as_dyn(&self) -> &dyn CanCallCollection<C>;
+
+    fn as_dyn_mut(&mut self) -> &mut dyn CanCallCollection<C>;
+}
+
+#[doc(hidden)]
+pub mod macro_internals_call_cx {
+    pub use {super::CanCallCollection, std::marker::Sized};
+}
+
+#[macro_export]
+macro_rules! call_cx {
+	($ty:ty $(,)?) => { dyn $crate::macro_internals_call_cx::CanCallCollection<$ty> };
+	($($ty:ty),*$(,)?) => { impl ?Sized $(+ $crate::macro_internals_call_cx::CanCallCollection<$ty>)* };
+	(sized; $($ty:ty),*$(,)?) => {
+		impl $crate::macro_internals_call_cx::Sized
+			$(+ $crate::macro_internals_call_cx::CanCallCollection<$ty>)*
+	};
 }
 
 // === Access Tokens === //
 
 // Traits
-pub trait AccessMut<U: Universe, T: ?Sized>: internal_traits::Access<MutAccessMode, U, T> {
-    fn as_dyn(&self) -> &dyn AccessMut<U, T> {
-        SuperDangerousGlobalToken::new()
+mod access {
+    use super::{
+        validator::{ComponentType, ComponentTypeNames},
+        *,
+    };
+
+    pub struct Immutable;
+
+    pub struct Mutable;
+
+    pub trait Private<M, U: Universe, T: ?Sized + 'static> {}
+
+    impl<K, U, T> Private<Immutable, U, T> for K
+    where
+        K: Private<Mutable, U, T>,
+        U: Universe,
+        T: ?Sized + 'static,
+    {
     }
 
-    fn as_dyn_mut(&mut self) -> &mut dyn AccessMut<U, T> {
-        SuperDangerousGlobalToken::new()
+    pub trait IterableAccessTrait {
+        type AccessIter: Iterator<Item = (ComponentType, ComponentTypeNames, validator::Mutability)>;
+
+        fn iter_access() -> Self::AccessIter;
     }
 }
 
-pub trait AccessRef<U: Universe, T: ?Sized>: internal_traits::Access<RefAccessMode, U, T> {
+pub trait AccessRef<U: Universe, T: ?Sized + 'static>:
+    access::Private<access::Immutable, U, T>
+{
+    fn as_dyn(&self) -> &dyn AccessRef<U, T>;
+
+    fn as_dyn_mut(&mut self) -> &mut dyn AccessRef<U, T>;
+}
+
+pub trait AccessMut<U: Universe, T: ?Sized + 'static>:
+    AccessRef<U, T> + access::Private<access::Mutable, U, T>
+{
+    fn as_dyn(&self) -> &dyn AccessMut<U, T>;
+
+    fn as_dyn_mut(&mut self) -> &mut dyn AccessMut<U, T>;
+}
+
+impl<K, U, T> AccessRef<U, T> for K
+where
+    K: access::Private<access::Immutable, U, T>,
+    U: Universe,
+    T: ?Sized + 'static,
+{
     fn as_dyn(&self) -> &dyn AccessRef<U, T> {
-        SuperDangerousGlobalToken::new()
+        DangerousGlobalAccessToken::new()
     }
 
     fn as_dyn_mut(&mut self) -> &mut dyn AccessRef<U, T> {
-        SuperDangerousGlobalToken::new()
+        DangerousGlobalAccessToken::new()
     }
 }
 
-impl<U: Universe, T: ?Sized, K: ?Sized + Access<MutAccessMode, U, T>> AccessMut<U, T> for K {}
-impl<U: Universe, T: ?Sized, K: ?Sized + Access<RefAccessMode, U, T>> AccessRef<U, T> for K {}
-
-pub trait BehaviorToken<N: Namespace>: Send + Sync {
-    fn as_dyn(&self) -> &dyn BehaviorToken<N> {
-        SuperDangerousGlobalToken::new()
+impl<K, U, T> AccessMut<U, T> for K
+where
+    K: access::Private<access::Mutable, U, T>,
+    U: Universe,
+    T: ?Sized + 'static,
+{
+    fn as_dyn(&self) -> &dyn AccessMut<U, T> {
+        DangerousGlobalAccessToken::new()
     }
 
-    fn as_dyn_mut(&mut self) -> &mut dyn BehaviorToken<N> {
-        SuperDangerousGlobalToken::new()
-    }
-}
-
-// Global token
-pub struct SuperDangerousGlobalToken;
-
-impl<U: Universe, T: ?Sized> Access<MutAccessMode, U, T> for SuperDangerousGlobalToken {}
-
-impl<N: Namespace> BehaviorToken<N> for SuperDangerousGlobalToken {}
-
-impl SuperDangerousGlobalToken {
-    pub fn new() -> &'static mut Self {
-        Box::leak(Box::new(SuperDangerousGlobalToken))
+    fn as_dyn_mut(&mut self) -> &mut dyn AccessMut<U, T> {
+        DangerousGlobalAccessToken::new()
     }
 }
 
-// Macros
+// Builder
 #[doc(hidden)]
-pub mod cx_macro_internals {
-    use crate::{validator::Mutability, Universe};
-
+pub mod macro_internals_access_cx {
     pub use {
-        crate::{
-            internal_traits::{Access, AccessAlias, MutAccessMode, RefAccessMode},
-            validator::Mutability::{Immutable, Mutable},
-            SuperDangerousGlobalToken,
+        super::{
+            access::{Immutable, IterableAccessTrait, Mutable, Private},
+            access_cx,
+            universe::Private as UniversePrivate,
+            validator::{ComponentType, ComponentTypeNames, Mutability},
+            DangerousGlobalAccessToken,
         },
         std::{
             any::{type_name, TypeId},
+            compile_error, concat,
             iter::{IntoIterator, Iterator},
+            stringify,
         },
     };
 
-    // Common
     pub trait Dummy {}
 
     impl<T: ?Sized> Dummy for T {}
 
-    // Trait definition
     pub type TriChain<_Ignored, A, B> = <_Ignored as TriChainInner<A, B>>::Output;
     pub type ArrayIter<const N: usize> =
-        std::array::IntoIter<(TypeId, &'static str, Mutability), N>;
+        std::array::IntoIter<(ComponentType, ComponentTypeNames, Mutability), N>;
 
     pub trait TriChainInner<A, B> {
         type Output;
@@ -190,66 +275,88 @@ pub mod cx_macro_internals {
     pub const fn bind_and_return_one<T: ?Sized>() -> usize {
         1
     }
-
-    pub fn bind_and_ensure_in_universe<U: Universe, T: ?Sized + AccessAlias<Universe = U>>() {}
 }
 
 #[macro_export]
-macro_rules! cx {
-    ($universe:ty; $($kw:ident $ty:ty),*$(,)? $(; $($inherits:ty)*$(,)?)?) => {
-		impl $($crate::cx_macro_internals::Access<$crate::cx!(@__parse_kw $kw), $universe, $ty>+)* $($($inherits+)*)? ?Sized
-	};
+macro_rules! access_cx {
 	($(
-		$vis:vis trait $name:ident($universe:ty) $(: $($inherits:path),*)? $(= $($kw:ident $ty:ty),+)?;
+		$(#[$attr:meta])*
+		$vis:vis trait $name:ident$(: $($inherits:path),*$(,)?)? $(=
+			$(
+				$($kw:ident $component:ty),*$(,)?
+				: $universe:ty
+			),* $(,)?
+		)?
+		;
 	)*) => {$(
-		$vis trait $name: $crate::cx_macro_internals::Dummy
-			$($(+ $inherits)*)?
-			$($(+ $crate::cx_macro_internals::Access<$crate::cx!(@__parse_kw $kw), $universe, $ty>)*)?
+		$(#[$attr])*
+		$vis trait $name:
+			$($($inherits + )*)?
+			$($($(
+				$crate::macro_internals_access_cx::Private<
+					$crate::macro_internals_access_cx::access_cx!(@__decode_kw $kw),
+					$universe,
+					$component,
+				> +
+			)*)*)?
+			$crate::macro_internals_access_cx::Dummy
 		{
 			fn as_dyn(&self) -> &dyn $name;
 
 			fn as_dyn_mut(&mut self) -> &mut dyn $name;
 		}
 
-		impl<T> $name for T
+		impl<K> $name for K
 		where
-			T: ?Sized $($(+ $inherits)*)?
-			   $($(+ $crate::cx_macro_internals::Access<$crate::cx!(@__parse_kw $kw), $universe, $ty>)*)?
+			K: ?Sized $($(+ $inherits)*)?
+			$($($(
+				+ $crate::macro_internals_access_cx::Private<
+					$crate::macro_internals_access_cx::access_cx!(@__decode_kw $kw),
+					$universe,
+					$component,
+				>
+			)*)*)?
 		{
 			fn as_dyn(&self) -> &dyn $name {
-				$crate::cx_macro_internals::SuperDangerousGlobalToken::new()
+				$crate::macro_internals_access_cx::DangerousGlobalAccessToken::new()
 			}
 
 			fn as_dyn_mut(&mut self) -> &mut dyn $name {
-				$crate::cx_macro_internals::SuperDangerousGlobalToken::new()
+				$crate::macro_internals_access_cx::DangerousGlobalAccessToken::new()
 			}
 		}
 
-		impl $crate::cx_macro_internals::AccessAlias for dyn $name {
-			type Universe = $universe;
+		impl $crate::macro_internals_access_cx::IterableAccessTrait for dyn $name {
 			type AccessIter =
 				// N.B. This construction is a bit weird. One may think that the first item in the
 				// list is the inner-most iterator and the last item is the outermost, but this is
 				// reversed because we use the third trailing parameter to define the type, not the
 				// leading one!
-				$($($crate::cx_macro_internals::TriChain<dyn $inherits, )*)?
-				$crate::cx_macro_internals::ArrayIter<{
-					$($($crate::cx_macro_internals::bind_and_return_one::<$ty>() +)*)? 0
+				$($($crate::macro_internals_access_cx::TriChain<dyn $inherits, )*)?
+				$crate::macro_internals_access_cx::ArrayIter<{
+					$($($($crate::macro_internals_access_cx::bind_and_return_one::<$component>() +)*)*)? 0
 				}>
-				$($(, <dyn $inherits as $crate::cx_macro_internals::AccessAlias>::AccessIter> )*)?;
+				$($(, <dyn $inherits as $crate::macro_internals_access_cx::IterableAccessTrait>::AccessIter> )*)?;
 
 			fn iter_access() -> Self::AccessIter {
-				let iter = $crate::cx_macro_internals::IntoIterator::into_iter([$($((
-					$crate::cx_macro_internals::TypeId::of::<$ty>(),
-					$crate::cx_macro_internals::type_name::<$ty>(),
-					$crate::cx!(@__parse_kw_expr $kw),
-				)),*)?]);
+				let iter = $crate::macro_internals_access_cx::IntoIterator::into_iter([$($($(
+					(
+						$crate::macro_internals_access_cx::ComponentType {
+							universe: $crate::macro_internals_access_cx::TypeId::of::<$universe>(),
+							component: $crate::macro_internals_access_cx::TypeId::of::<$component>(),
+						},
+						$crate::macro_internals_access_cx::ComponentTypeNames {
+							universe: <$universe as $crate::macro_internals_access_cx::UniversePrivate>::DEF_LOC,
+							component: $crate::macro_internals_access_cx::type_name::<$component>(),
+						},
+						$crate::macro_internals_access_cx::access_cx!(@__decode_kw_as_enum $kw),
+					),
+				)*)*)?]);
 
 				$($(
-					$crate::cx_macro_internals::bind_and_ensure_in_universe::<$universe, dyn $inherits>();
-					let iter = $crate::cx_macro_internals::Iterator::chain(
+					let iter = $crate::macro_internals_access_cx::Iterator::chain(
 						iter,
-						<dyn $inherits as $crate::cx_macro_internals::AccessAlias>::iter_access(),
+						<dyn $inherits as $crate::macro_internals_access_cx::IterableAccessTrait>::iter_access(),
 					);
 				)*)?
 
@@ -257,65 +364,96 @@ macro_rules! cx {
 			}
 		}
 	)*};
-	(@__parse_kw mut) => { $crate::cx_macro_internals::MutAccessMode };
-	(@__parse_kw ref) => { $crate::cx_macro_internals::RefAccessMode };
-	(@__parse_kw_expr mut) => { $crate::cx_macro_internals::Mutable };
-	(@__parse_kw_expr ref) => { $crate::cx_macro_internals::Immutable };
+    (
+		$(
+			$($kw:ident $component:ty),* $(,)?
+			: $universe:ty
+		),* $(,)?
+
+		$(; $($inherits:path),*$(,)?)?
+	) => {
+		impl ?Sized
+			$($(+ $inherits)*)?
+			$($(+ $crate::macro_internals_access_cx::Private<
+					$crate::macro_internals_access_cx::access!(@__decode_kw $kw),
+					$universe,
+					$component,
+			>)*)*
+	};
+	(@__decode_kw ref) => { $crate::macro_internals_access_cx::Immutable };
+	(@__decode_kw mut) => { $crate::macro_internals_access_cx::Mutable };
+	(@__decode_kw_as_enum ref) => { $crate::macro_internals_access_cx::Mutability::Immutable };
+	(@__decode_kw_as_enum mut) => { $crate::macro_internals_access_cx::Mutability::Mutable };
+	(@__decode_kw $other:ident) => {
+		$crate::macro_internals_access_cx::compile_error!($crate::macro_internals_access_cx::concat!(
+			"Unknown mutability marker `",
+			$crate::macro_internals_access_cx::stringify!($other),
+			"`. Expected `mut` or `ref`.",
+		));
+	}
 }
 
-// === Behavior === //
+// === Proc === //
 
-#[doc(hidden)]
-pub mod behavior_macro_internals {
-    use crate::{BehaviorToken, Namespace};
+mod proc {
+    use super::validator::Validator;
+    use linkme::distributed_slice;
+
+    #[distributed_slice]
+    pub static PROCEDURE_REGISTRARS: [fn(&mut Validator)] = [..];
+}
+
+pub mod macro_internals_proc {
+    use crate::CanCallCollection;
 
     pub use {
-        crate::{
-            internal_traits::{AccessAlias, TrackDefinition},
-            validator::Validator,
-            SuperDangerousGlobalToken,
+        super::{
+            access::IterableAccessTrait, access_cx, call_cx, proc::PROCEDURE_REGISTRARS,
+            proc_collection::Private as ProcCollectionPrivate, validator::Validator,
+            DangerousGlobalAccessToken, ProcCollection,
         },
         linkme::distributed_slice,
         partial_scope::partial_shadow,
-        std::{any::TypeId, column, concat, file, line, marker::Sized},
+        std::{any::TypeId, column, concat, file, line},
     };
 
-    #[distributed_slice]
-    pub static BEHAVIORS: [fn(&mut Validator)] = [..];
-
-    pub trait BehaviorTokenExt<N: Namespace>: BehaviorToken<N> {
-        fn __validate_behavior_token(&mut self) -> BehaviorTokenTyProof<'_, N>;
+    pub trait CanCallCollectionExt<C: ProcCollection>: CanCallCollection<C> {
+        fn __validate_collection_token(&mut self) -> CanCallCollectionTyProof<'_, C>;
     }
 
-    pub struct BehaviorTokenTyProof<'a, N> {
-        _private: ([&'a (); 0], [N; 0]),
+    pub struct CanCallCollectionTyProof<'a, C> {
+        _private: ([&'a (); 0], [C; 0]),
     }
 
-    impl<N: Namespace, T: ?Sized + BehaviorToken<N>> BehaviorTokenExt<N> for T {
-        fn __validate_behavior_token(&mut self) -> BehaviorTokenTyProof<'_, N> {
-            BehaviorTokenTyProof { _private: ([], []) }
+    impl<C: ProcCollection, K: ?Sized + CanCallCollection<C>> CanCallCollectionExt<C> for K {
+        fn __validate_collection_token(&mut self) -> CanCallCollectionTyProof<'_, C> {
+            CanCallCollectionTyProof { _private: ([], []) }
         }
     }
 
-    pub fn validate_behavior_token<N: Namespace>(
-        bhv: BehaviorTokenTyProof<'_, N>,
-    ) -> BehaviorTokenTyProof<'_, N> {
-        bhv
+    pub fn validate_collection_token<C: ProcCollection>(
+        cx: CanCallCollectionTyProof<'_, C>,
+    ) -> CanCallCollectionTyProof<'_, C> {
+        cx
     }
 }
 
 #[macro_export]
-macro_rules! behavior {
+macro_rules! proc {
     (
-		as $namespace:ty[$in_bhv:expr] do
+		as $in_collection:ty[$in_collection_cx:expr] do
 		$(
 			(
-				$cx_name:ident: [
-					$($comp_inherits:ty),*$(,)?
-					$(; $($comp_kw:ident $comp_ty:ty),*$(,)?)*
+				$access_cx_name:ident: [
+					$(
+						$($access_kw:ident $access_component:ty),*
+						: $access_universe:ty
+					),* $(,)?
+
+					$(; $($access_inherits:path),*$(,)?)?
 				],
-				$bhv_name:ident: [
-					$($bhv_ty:ty),*$(,)?
+				$collection_cx_name:ident: [
+					$($out_collection:ty),*$(,)?
 				]
 				$(,)?
 			) {
@@ -324,87 +462,82 @@ macro_rules! behavior {
 			$(,)?
 		)*
 	) => {
-		let __input = {
-			use $crate::behavior_macro_internals::BehaviorTokenExt as _;
+        let mut __input = {
+            use $crate::macro_internals_proc::CanCallCollectionExt as _;
 
-			// Validate the behavior token
-			$crate::behavior_macro_internals::validate_behavior_token::<$namespace>(
-				$in_bhv.__validate_behavior_token()
-			)
-		};
+            // Validate the collection token
+            $crate::macro_internals_proc::validate_collection_token::<$in_collection>(
+                $in_collection_cx.__validate_collection_token(),
+            )
+        };
 
-		$($crate::behavior_macro_internals::partial_shadow! {
-			$cx_name, $bhv_name;
+		$($crate::macro_internals_proc::partial_shadow! {
+			$access_cx_name, $collection_cx_name;
 
-			let __token = {
+			let ($access_cx_name, $collection_cx_name) = {
 				// Define a trait describing the set of components we're acquiring.
-				$crate::cx! {
-					trait BehaviorAccess(<$namespace as $crate::Namespace>::Universe)
-						: $($comp_inherits),*
-						$(= $($comp_kw $comp_ty),*)?;
+				$crate::macro_internals_proc::access_cx! {
+					trait ProcAccess$(: $($access_inherits),*)? = $(
+						$($access_kw $access_component),*
+						: $access_universe
+					),*;
 				};
 
 				// Define a registration method
-				#[$crate::behavior_macro_internals::distributed_slice($crate::behavior_macro_internals::BEHAVIORS)]
-				fn register(validator: &mut $crate::behavior_macro_internals::Validator) {
-					validator.add_behavior(
-						/* namespace: */ (
-							$crate::behavior_macro_internals::TypeId::of::<$namespace>(),
-							<$namespace as $crate::behavior_macro_internals::TrackDefinition>::LOCATION,
+				#[$crate::macro_internals_proc::distributed_slice($crate::macro_internals_proc::PROCEDURE_REGISTRARS)]
+				static __THIS_PROCEDURE: fn(&mut $crate::macro_internals_proc::Validator) = |validator| {
+					validator.add_procedure(
+						/* collection: */ (
+							$crate::macro_internals_proc::TypeId::of::<$in_collection>(),
+							<$in_collection as $crate::macro_internals_proc::ProcCollectionPrivate>::DEF_LOC,
 						),
-						/* my_path: */ $crate::behavior_macro_internals::concat!(
-							$crate::behavior_macro_internals::file!(),
+						/* my_path: */ $crate::macro_internals_proc::concat!(
+							$crate::macro_internals_proc::file!(),
 							":",
-							$crate::behavior_macro_internals::line!(),
+							$crate::macro_internals_proc::line!(),
 							":",
-							$crate::behavior_macro_internals::column!(),
+							$crate::macro_internals_proc::column!(),
 						),
-						/* borrows: */ <dyn BehaviorAccess as $crate::behavior_macro_internals::AccessAlias>::iter_access(),
+						/* borrows: */ <dyn ProcAccess as $crate::macro_internals_proc::IterableAccessTrait>::iter_access(),
 						/* calls: */ [$((
-							$crate::behavior_macro_internals::TypeId::of::<$bhv_ty>(),
-							<$bhv_ty as $crate::behavior_macro_internals::TrackDefinition>::LOCATION,
+							$crate::macro_internals_proc::TypeId::of::<$out_collection>(),
+							<$out_collection as $crate::macro_internals_proc::ProcCollectionPrivate>::DEF_LOC,
 						)),*],
 					);
+				};
+
+				// Fetch the tokens
+				fn get_token<'a, C>(_input: &'a mut $crate::macro_internals_proc::CanCallCollectionTyProof<'_, C>) -> (
+					&'a mut impl ProcAccess,
+					&'a mut $crate::macro_internals_proc::call_cx![$($out_collection),*],
+				)
+				where
+					C: $crate::macro_internals_proc::ProcCollection,
+				{
+					(
+						$crate::macro_internals_proc::DangerousGlobalAccessToken::new(),
+						$crate::macro_internals_proc::DangerousGlobalAccessToken::new(),
+					)
 				}
 
-				// Fetch a token
-				fn get_token<'a>() -> impl BehaviorAccess {
-					$crate::behavior_macro_internals::SuperDangerousGlobalToken
-				}
-
-				get_token()
+				get_token(&mut __input)
 			};
-
-			let $cx_name = &__token;
-
-			let mut __bhv = {
-				fn get_token() -> impl $($crate::BehaviorToken<$bhv_ty> +)* $crate::behavior_macro_internals::Sized {
-					$crate::behavior_macro_internals::SuperDangerousGlobalToken
-				}
-
-				get_token()
-			};
-			let $bhv_name = &mut __bhv;
 
 			$($body)*
-
-			let _ = (__token, __bhv);
 		})*
-
-		let _ = __input;
-	};
+    };
 }
 
 // === Validation === //
 
-pub mod validator;
+mod validator;
 
 impl Validator {
     pub fn global() -> Self {
         let mut validator = Validator::default();
 
-        for bhv in behavior_macro_internals::BEHAVIORS {
-            bhv(&mut validator);
+        for proc_register in proc::PROCEDURE_REGISTRARS {
+            proc_register(&mut validator);
         }
 
         validator
@@ -422,16 +555,24 @@ pub fn validate() -> Result<(), String> {
     Ok(())
 }
 
-// === Entry === //
-
-pub struct RootBehaviorToken<U: Universe> {
-    _private: PhantomData<fn() -> U>,
+pub struct RootBehaviorToken<C: ProcCollection> {
+    _private: PhantomData<C>,
 }
 
-impl<U: Universe, N: Namespace<Universe = U>> BehaviorToken<N> for RootBehaviorToken<U> {}
+impl<C: ProcCollection> can_call_collection::Private<C> for RootBehaviorToken<C> {}
 
-impl<U: Universe> RootBehaviorToken<U> {
-    // TODO: Enforce singleton rules
+impl<C: ProcCollection> CanCallCollection<C> for RootBehaviorToken<C> {
+    fn as_dyn(&self) -> &dyn CanCallCollection<C> {
+        DangerousGlobalAccessToken::new()
+    }
+
+    fn as_dyn_mut(&mut self) -> &mut dyn CanCallCollection<C> {
+        DangerousGlobalAccessToken::new()
+    }
+}
+
+impl<C: ProcCollection> RootBehaviorToken<C> {
+    // TODO: Enforce overlap rules
     pub fn acquire() -> Self {
         if let Err(err) = validate() {
             panic!("{err}");
@@ -443,7 +584,7 @@ impl<U: Universe> RootBehaviorToken<U> {
     }
 }
 
-impl<U: Universe> Drop for RootBehaviorToken<U> {
+impl<C: ProcCollection> Drop for RootBehaviorToken<C> {
     fn drop(&mut self) {
         // (no-op for now, kept for forwards compatibility)
     }

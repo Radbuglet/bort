@@ -68,61 +68,72 @@ const INDENT_SIZE: u32 = 4;
 
 #[derive(Debug, Default)]
 pub struct Validator {
-    /// The graph of behavior namespaces connected by the behaviors which could possibly call into
-    /// other namespaces.
-    graph: Graph<Namespace, Rc<Behavior>>,
+    /// The graph of collections connected by the procedures which could possibly call into other
+    /// collections.
+    graph: Graph<Collection, Rc<Procedure>>,
 
-    /// A map from namespace types to namespace nodes.
-    namespace_ty_map: FxHashMap<TypeId, NodeIndex>,
+    /// A map from collection types to collection nodes.
+    collection_ty_map: FxHashMap<TypeId, NodeIndex>,
 
     /// A map from component type IDs to component type names.
-    component_names: FxHashMap<TypeId, &'static str>,
+    component_names: FxHashMap<ComponentType, ComponentTypeNames>,
+}
+
+#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq)]
+pub struct ComponentType {
+    pub universe: TypeId,
+    pub component: TypeId,
+}
+#[derive(Debug, Copy, Clone)]
+pub struct ComponentTypeNames {
+    pub universe: &'static str,
+    pub component: &'static str,
 }
 
 #[derive(Debug)]
-struct Namespace {
-    /// The location where this namespace was defined.
+struct Collection {
+    /// The location where this collection was defined.
     my_def: &'static str,
 
-    /// The set of behaviors which borrow data in the namespace but don't actually call into any other
-    /// behaviors.
-    terminal_behaviors: Vec<Behavior>,
+    /// The set of procedures which borrow data in the collection but don't actually call into any other
+    /// procedures.
+    terminal_procedures: Vec<Procedure>,
 }
 
 #[derive(Debug)]
-struct Behavior {
-    /// The location where the behavior was defined.
+struct Procedure {
+    /// The location where the procedure was defined.
     def_path: &'static str,
 
-    /// The set of components borrowed by the behavior.
-    borrows: FxHashMap<TypeId, Mutability>,
+    /// The set of components borrowed by the procedure.
+    borrows: FxHashMap<ComponentType, Mutability>,
 }
 
 impl Validator {
-    fn get_namespace(&mut self, namespace: (TypeId, &'static str)) -> NodeIndex {
-        match self.namespace_ty_map.entry(namespace.0) {
+    fn get_collection(&mut self, collection: (TypeId, &'static str)) -> NodeIndex {
+        match self.collection_ty_map.entry(collection.0) {
             std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
             std::collections::hash_map::Entry::Vacant(entry) => {
-                let graph = self.graph.add_node(Namespace {
-                    my_def: namespace.1,
-                    terminal_behaviors: Vec::new(),
+                let graph = self.graph.add_node(Collection {
+                    my_def: collection.1,
+                    terminal_procedures: Vec::new(),
                 });
                 *entry.insert(graph)
             }
         }
     }
 
-    pub fn add_behavior(
+    pub fn add_procedure(
         &mut self,
-        namespace: (TypeId, &'static str),
+        collection: (TypeId, &'static str),
         my_path: &'static str,
-        borrows: impl IntoIterator<Item = (TypeId, &'static str, Mutability)>,
+        borrows: impl IntoIterator<Item = (ComponentType, ComponentTypeNames, Mutability)>,
         calls: impl IntoIterator<Item = (TypeId, &'static str)>,
     ) {
-        // Create the namespace node
-        let src_idx = self.get_namespace(namespace);
+        // Create the collection node
+        let src_idx = self.get_collection(collection);
 
-        // Construct the behavior
+        // Construct the procedure
         let borrows = borrows
             .into_iter()
             .map(|(id, name, perms)| {
@@ -131,39 +142,39 @@ impl Validator {
             })
             .collect();
 
-        let behavior = Behavior {
+        let procedure = Procedure {
             def_path: my_path,
             borrows,
         };
 
-        // Construct an edge for every call or register the behavior as terminal
+        // Construct an edge for every call or register the procedure as terminal
         {
             let mut iter = calls.into_iter();
             let mut curr = iter.next();
 
             if curr.is_some() {
-                let behavior = Rc::new(behavior);
+                let procedure = Rc::new(procedure);
 
                 // We have edges to connect
                 while let Some(call) = curr {
-                    let dst_idx = self.get_namespace(call);
-                    self.graph.add_edge(src_idx, dst_idx, behavior.clone());
+                    let dst_idx = self.get_collection(call);
+                    self.graph.add_edge(src_idx, dst_idx, procedure.clone());
                     curr = iter.next();
                 }
             } else {
                 // This is a terminal edge
-                self.graph[src_idx].terminal_behaviors.push(behavior);
+                self.graph[src_idx].terminal_procedures.push(procedure);
             }
         }
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        // Assuming our graph is a DAG, toposort the namespaces.
+        // Assuming our graph is a DAG, toposort the collections.
         let Ok(topos) = toposort(&self.graph, None) else {
 			// If the graph is not a DAG, we know that it is invalid since a dependency issue could
 			// be induced by taking the same borrowing edge several times.
 			//
-			// We generate a list of offending namespaces using "Tarjan's strongly connected components
+			// We generate a list of offending collections using "Tarjan's strongly connected components
 			// algorithm." A strongly connected component (or SCC) is a set of nodes in a graph
 			// where each node in the set has a path to another node in that set. We know that
 			// finding the SCCs in a graph is an effective way of finding portions of the graph
@@ -185,10 +196,10 @@ impl Validator {
 			let mut f = String::new();
 			write!(
 				f,
-				"Failed to validate behavior graph: behaviors may be called in a cycle, which could \
+				"Failed to validate procedure graph: procedures may be called in a cycle, which could \
 				 cause borrow violations.\n\
 				 \n\
-				 The following behavior namespaces form cycles:\n\n",
+				 The following procedure collections form cycles:\n\n",
 			).unwrap();
 
 			let mut i = 1;
@@ -208,17 +219,17 @@ impl Validator {
 
 				let scc = scc.into_iter().collect::<FxHashSet<_>>();
 
-				for &namespace in &scc {
-					writeln!(f, " - Namespace {}, which could call into...", self.graph[namespace].my_def).unwrap();
+				for &collection in &scc {
+					writeln!(f, " - Collection {}, which could call into...", self.graph[collection].my_def).unwrap();
 
-					for caller in self.graph.edges_directed(namespace, Direction::Outgoing) {
+					for caller in self.graph.edges_directed(collection, Direction::Outgoing) {
 						if !scc.contains(&caller.target()) {
 							continue;
 						}
 
 						writeln!(
 							f,
-							"    - Namespace {} using the behavior defined at {}",
+							"    - Collection {} using the procedure defined at {}",
 							self.graph[caller.target()].my_def,
 							caller.weight().def_path,
 						).unwrap();
@@ -232,10 +243,10 @@ impl Validator {
 		};
 
         // Working in topological order, we populate the set of all components which could possibly
-        // be borrowed when a namespace is called.
+        // be borrowed when a collection is called.
         struct ValidationCx<'a> {
             validator: &'a Validator,
-            potentially_borrowed: Vec<FxHashMap<TypeId, Mutability>>,
+            potentially_borrowed: Vec<FxHashMap<ComponentType, Mutability>>,
             err_msg_or_empty: String,
         }
 
@@ -248,11 +259,11 @@ impl Validator {
                 }
             }
 
-            pub fn validate_behavior(&mut self, node: NodeIndex, behavior: &Behavior) {
+            pub fn validate_procedure(&mut self, node: NodeIndex, procedure: &Procedure) {
                 let f = &mut self.err_msg_or_empty;
                 let pbs = &self.potentially_borrowed[node.index()];
 
-                for (&req_ty, &req_mut) in &behavior.borrows {
+                for (&req_ty, &req_mut) in &procedure.borrows {
                     // If the request is compatible with the PBS, ignore it.
                     let Some(pre_mut) = pbs.get(&req_ty) else { continue };
 
@@ -261,12 +272,14 @@ impl Validator {
                     }
 
                     // Otherwise, log out the error chain.
+                    let comp_name = &self.validator.component_names[&req_ty];
                     writeln!(
                         f,
-                        "The behavior in namespace {} defined at {} borrows component {} {} even though it may have already been borrowed {}.",
+                        "The procedure in collection {} defined at {} borrows component {} in universe {} {} even though it may have already been borrowed {}.",
 						self.validator.graph[node].my_def,
-						behavior.def_path,
-						self.validator.component_names[&req_ty],
+						procedure.def_path,
+						comp_name.component,
+						comp_name.universe,
 						req_mut.adjective(),
 						pre_mut.adjective(),
                     )
@@ -275,8 +288,8 @@ impl Validator {
                     fn print_tree(
                         f: &mut String,
                         validator: &Validator,
-                        potentially_borrowed: &[FxHashMap<TypeId, Mutability>],
-                        desired_comp: TypeId,
+                        potentially_borrowed: &[FxHashMap<ComponentType, Mutability>],
+                        desired_comp: ComponentType,
                         desired_mut: Mutability,
                         target: NodeIndex,
                         indent: u32,
@@ -295,7 +308,7 @@ impl Validator {
 
                             writeln!(
 								f,
-								"{}- The behavior in namespace {} defined at {} may have called it while holding the component {}.",
+								"{}- The procedure in collection {} defined at {} may have called it while holding the component {}.",
 								Indent(indent),
 								validator.graph[caller.source()].my_def,
 								caller.weight().def_path,
@@ -321,8 +334,8 @@ impl Validator {
 
                             writeln!(
                                 f,
-                                "{}- The namespace {} may have called it while an ancestor was holding the component {}.\n\
-								 {}  Hint: the following behaviors may have been responsible for the aforementioned call...",
+                                "{}- The collection {} may have called it while an ancestor was holding the component {}.\n\
+								 {}  Hint: the following procedures may have been responsible for the aforementioned call...",
                                 Indent(indent),
                                 validator.graph[caller].my_def,
                                 caller_mut.adjective(),
@@ -372,7 +385,7 @@ impl Validator {
             pub fn extend_borrows(
                 &mut self,
                 caller: NodeIndex,
-                calling_bhv: &Behavior,
+                calling_bhv: &Procedure,
                 callee: NodeIndex,
             ) {
                 let (caller_pbs, callee_pbs) = borrow_two(
@@ -387,7 +400,7 @@ impl Validator {
                     *pbs_mut = pbs_mut.strictest(req_mut);
                 }
 
-                // Propagate behavior borrows
+                // Propagate procedure borrows
                 for (&req_ty, &req_mut) in &calling_bhv.borrows {
                     let pbs_mut = callee_pbs.entry(req_ty).or_insert(Mutability::Immutable);
                     *pbs_mut = pbs_mut.strictest(req_mut);
@@ -400,16 +413,16 @@ impl Validator {
         for src_idx in topos {
             let src = &self.graph[src_idx];
 
-            // For every terminal behavior, check it against the PBS.
-            for terminal in &src.terminal_behaviors {
-                cx.validate_behavior(src_idx, terminal);
+            // For every terminal procedure, check it against the PBS.
+            for terminal in &src.terminal_procedures {
+                cx.validate_procedure(src_idx, terminal);
             }
 
-            // For every non-terminal behavior, check it against the PBS and then extend the future
+            // For every non-terminal procedure, check it against the PBS and then extend the future
             // nodes.
             for edge in self.graph.edges_directed(src_idx, Direction::Outgoing) {
                 let edge_bhv = &self.graph[edge.id()];
-                cx.validate_behavior(src_idx, edge_bhv);
+                cx.validate_procedure(src_idx, edge_bhv);
                 cx.extend_borrows(src_idx, edge_bhv, edge.target());
             }
         }
@@ -417,7 +430,7 @@ impl Validator {
         // If we had any errors while validating this graph
         if !cx.err_msg_or_empty.is_empty() {
             return Err(format!(
-                "Failed to validate behavior graph:\n\n{}",
+                "Failed to validate procedure graph:\n\n{}",
                 cx.err_msg_or_empty,
             ));
         }
