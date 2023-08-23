@@ -164,6 +164,51 @@ pub use proc;
 // Validation
 pub use saddle::{validate, RootCollectionCallToken};
 
+// `saddle_delegate!`
+#[doc(hidden)]
+pub mod macro_internals_saddle_delegate {
+    pub use {
+        super::{call_cx, proc_collection},
+        crate::behavior::{behavior_delegate, behavior_kind, delegate, BehaviorRegistry},
+    };
+}
+
+#[macro_export]
+macro_rules! saddle_delegate {
+    (
+		$(#[$attr_meta:meta])*
+		$vis:vis fn $name:ident
+			$(
+				<$($generic:ident),* $(,)?>
+				$(<$($fn_lt:lifetime),* $(,)?>)?
+			)?
+			($($para_name:ident: $para:ty),* $(,)?) $(-> $ret:ty)?
+		$(as deriving $deriving:path $({ $($deriving_args:tt)* })? )*
+		$(where $($where_token:tt)*)?
+	) => {
+		$crate::saddle::macro_internals_saddle_delegate::delegate!(
+			$(#[$attr_meta])*
+			$vis fn $name
+				$(
+					<$($generic),*>
+					$(<$($fn_lt),*>)?
+				)?
+				(
+					bhv: &$crate::saddle::macro_internals_saddle_delegate::BehaviorRegistry,
+					call_cx: &mut $crate::saddle::macro_internals_saddle_delegate::call_cx![$name],
+					$($para_name: $para),*
+				) $(-> $ret)?
+			as deriving $crate::saddle::macro_internals_saddle_delegate::behavior_kind
+			as deriving $crate::saddle::macro_internals_saddle_delegate::behavior_delegate
+			as deriving $crate::saddle::macro_internals_saddle_delegate::proc_collection
+			$(as deriving $deriving $({ $($deriving_args)* })? )*
+			$(where $($where_token)*)?
+		);
+	};
+}
+
+pub use saddle_delegate;
+
 // Safe method variants
 impl Entity {
     #[track_caller]

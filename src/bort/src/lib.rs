@@ -44,6 +44,7 @@ pub mod prelude {
                 AccessRef, AccessMut, access_cx,
                 proc,
                 validate, RootCollectionCallToken,
+                saddle_delegate,
             };
         }
     }
