@@ -375,7 +375,7 @@ macro_rules! access_cx {
 		impl ?Sized
 			$($(+ $inherits)*)?
 			$($(+ $crate::macro_internals_access_cx::Private<
-					$crate::macro_internals_access_cx::access!(@__decode_kw $kw),
+					$crate::macro_internals_access_cx::access_cx!(@__decode_kw $kw),
 					$universe,
 					$component,
 			>)*)*
@@ -446,7 +446,7 @@ macro_rules! proc {
 			(
 				$access_cx_name:ident: [
 					$(
-						$($access_kw:ident $access_component:ty),*
+						$($access_kw:ident $access_component:ty),* $(,)?
 						: $access_universe:ty
 					),* $(,)?
 
@@ -555,13 +555,13 @@ pub fn validate() -> Result<(), String> {
     Ok(())
 }
 
-pub struct RootBehaviorToken<C: ProcCollection> {
+pub struct RootCollectionCallToken<C: ProcCollection> {
     _private: PhantomData<C>,
 }
 
-impl<C: ProcCollection> can_call_collection::Private<C> for RootBehaviorToken<C> {}
+impl<C: ProcCollection> can_call_collection::Private<C> for RootCollectionCallToken<C> {}
 
-impl<C: ProcCollection> CanCallCollection<C> for RootBehaviorToken<C> {
+impl<C: ProcCollection> CanCallCollection<C> for RootCollectionCallToken<C> {
     fn as_dyn(&self) -> &dyn CanCallCollection<C> {
         DangerousGlobalAccessToken::new()
     }
@@ -571,7 +571,7 @@ impl<C: ProcCollection> CanCallCollection<C> for RootBehaviorToken<C> {
     }
 }
 
-impl<C: ProcCollection> RootBehaviorToken<C> {
+impl<C: ProcCollection> RootCollectionCallToken<C> {
     // TODO: Enforce overlap rules
     pub fn acquire() -> Self {
         if let Err(err) = validate() {
@@ -584,7 +584,7 @@ impl<C: ProcCollection> RootBehaviorToken<C> {
     }
 }
 
-impl<C: ProcCollection> Drop for RootBehaviorToken<C> {
+impl<C: ProcCollection> Drop for RootCollectionCallToken<C> {
     fn drop(&mut self) {
         // (no-op for now, kept for forwards compatibility)
     }

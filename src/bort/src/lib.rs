@@ -35,6 +35,18 @@ pub mod prelude {
             RawTag, Tag, VirtualTag,
         },
     };
+
+    cfgenius::cond! {
+        if macro(super::HAS_SADDLE_SUPPORT) {
+            pub use crate::saddle::{
+                ProcCollection, proc_collection,
+                call_cx, CanCallCollection,
+                AccessRef, AccessMut, access_cx,
+                proc,
+                validate, RootCollectionCallToken,
+            };
+        }
+    }
 }
 
 pub use prelude::*;

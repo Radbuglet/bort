@@ -436,7 +436,7 @@ macro_rules! behavior_kind {
 	($(
 		derive $name:path => $delegate:ty  $(;)?
 	)*) => {$(
-		impl $crate::behavior::behavior_kind_macro_internals::HasBehavior for $name {
+		impl $crate::behavior::behavior_kind_macro_internals::BehaviorKind for $name {
 			type Delegate = $name;
 		}
 	)*};
