@@ -9,7 +9,30 @@ pub mod macro_internals_forwards {
     pub use {
         super::{proc as proc_me, BortComponents},
         saddle::{access_cx, proc, proc_collection},
+        std::mem::drop,
     };
+
+    pub trait Cons {
+        type PushBack<T>;
+
+        fn push_back<T>(self, value: T) -> Self::PushBack<T>;
+    }
+
+    impl Cons for () {
+        type PushBack<T> = (T, ());
+
+        fn push_back<T>(self, value: T) -> Self::PushBack<T> {
+            (value, ())
+        }
+    }
+
+    impl<V, R: Cons> Cons for (V, R) {
+        type PushBack<T> = (V, R::PushBack<T>);
+
+        fn push_back<T>(self, value: T) -> Self::PushBack<T> {
+            (self.0, self.1.push_back(value))
+        }
+    }
 }
 
 // Universes
@@ -101,8 +124,8 @@ macro_rules! access_cx {
 	)*) => {
 		$crate::saddle::macro_internals_forwards::access_cx! {$(
 			$(#[$attr])*
-			$vis trait $name$(: $($inherits),*)? $(= $($kw $component),* : $crate::saddle::::macro_internals_forwards::BortComponents)?;
-		)*};
+			$vis trait $name$(: $($inherits),*)? $(= $($kw $component),* : $crate::saddle::macro_internals_forwards::BortComponents)?;
+		)*}
 	};
     (
 		$($kw:ident $component:ty),* $(,)?
@@ -164,33 +187,52 @@ macro_rules! proc {
 						$($out_collection),*
 					]
 				) {
+					// Collect borrows
+					let __borrows = ();
 					$($(
 						$crate::saddle::macro_internals_forwards::proc_me!(
-							@__use_first_ident_to_define let [$($alias_rename)? $alias_ty] =
-							$crate::saddle::macro_internals_forwards::proc_me!(
-								@__use_appropriate_getter $access_cx_name $alias_target => $alias_kw $alias_ty
-							);
+							@fetch_alias __borrows $access_cx_name $alias_target => $alias_kw $alias_ty
 						);
 					)*)?
+
+					// Reborrow
+					let mut __borrows = __borrows;
+
+					#[allow(unused)]
+					let __accum = &mut __borrows;
+					$($(
+						$crate::saddle::macro_internals_forwards::proc_me!(
+							@dump_alias __accum $alias_kw [$($alias_rename)? $alias_ty]
+						);
+					)*)?
+
 					$($body)*
-					$($($crate::saddle::macro_internals_forwards::proc_me!(
-						@__use_first_ident_to_drop $($alias_rename)? $alias_ty
-					);)*)?
+					$crate::saddle::macro_internals_forwards::drop(__borrows);
 				}
 			)*
 		}
     };
-	(@__use_first_ident_to_define let [$first:ident $($rest:tt)*] = $init:expr;) => {
-		let $first = $init;
+	(@fetch_alias $borrows:ident $access_cx_name:ident $target:expr => ref $ty:ty) => {
+		let $borrows = $crate::saddle::macro_internals_forwards::Cons::push_back(
+			$borrows,
+			$target.get_s::<$ty>($access_cx_name),
+		);
 	};
-	(@__use_first_ident_to_drop $first:ident $($rest:tt)*) => {
-		let _ = $first;
+	(@fetch_alias $borrows:ident $access_cx_name:ident $target:expr => mut $ty:ty) => {
+		let $borrows = $crate::saddle::macro_internals_forwards::Cons::push_back(
+			$borrows,
+			$target.get_mut_s::<$ty>($access_cx_name),
+		);
 	};
-	(@__use_appropriate_getter $access_cx_name:ident $target:expr => ref $ty:ty) => {
-		$target.get_s::<$ty>($access_cx_name)
+	(@dump_alias $accum:ident ref [$first:ident $($rest:tt)*]) => {
+		let $first = &*$accum.0;
+		#[allow(unused)]
+		let $accum = &mut $accum.1;
 	};
-	(@__use_appropriate_getter $access_cx_name:ident $target:expr => mut $ty:ty) => {
-		$target.get_mut_s::<$ty>($access_cx_name)
+	(@dump_alias $accum:ident mut [$first:ident $($rest:tt)*]) => {
+		let $first = &mut *$accum.0;
+		#[allow(unused)]
+		let $accum = &mut $accum.1;
 	};
 }
 

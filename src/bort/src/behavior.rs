@@ -503,6 +503,11 @@ impl BehaviorRegistry {
         self
     }
 
+	pub fn with_combined<B: BehaviorKind<Delegate = B>>(mut self, delegate: B) -> Self {
+        self.register_combined(delegate);
+        self
+    }
+
     pub fn with_many(mut self, registrar: impl FnOnce(&mut Self)) -> Self {
         self.register_many(registrar);
         self
