@@ -499,6 +499,7 @@ impl<T> OptRefCell<T> {
 
     // === Replace === //
 
+    // FIXME: This is currently unsound and incorrect
     #[track_caller]
     pub fn try_replace_with<F>(&self, f: F) -> Result<Option<T>, BorrowMutError>
     where
@@ -551,8 +552,16 @@ impl<T> OptRefCell<T> {
 
     #[track_caller]
     pub fn swap(&self, other: &OptRefCell<T>) {
-        let value = self.take();
-        self.replace(other.replace(value));
+        // This check is necessary because, if the cell is the same full cell, `value_from_other`
+        // will resolve to `None` as it places the value back in, causing `self.replace` to set the
+        // value back to null.
+        if self.as_ptr() == other.as_ptr() {
+            return;
+        }
+
+        let value_from_me = self.take();
+        let value_from_other = other.replace(value_from_me);
+        self.replace(value_from_other);
     }
 }
 

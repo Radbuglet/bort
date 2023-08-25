@@ -503,6 +503,13 @@ macro_rules! query {
 			// Handle all our heaps
 			let mut i = chunk.heap_count();
 
+			// N.B. the following while loop's pattern may be empty if no components
+			// are being borrowed or entities are being read, which could cause an
+			// underflow when `i` is subtracted. We guard against that scenario here.
+			if i == 0 {
+				continue;
+			}
+
 			while let (
 				$($crate::query::query_internals::Option::Some($name),)*
 				$($crate::query::query_internals::Option::Some($entity),)?
