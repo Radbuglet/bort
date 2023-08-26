@@ -266,9 +266,10 @@ impl Entity {
 
     pub fn is_tagged(self, tag: impl Into<RawTag>) -> bool {
         let tag = tag.into().0;
-        match DbRoot::get(MainThreadToken::acquire_fmt("query entity tags"))
-            .is_entity_tagged(self.inert, tag)
-        {
+        let is_tagged = DbRoot::get(MainThreadToken::acquire_fmt("query entity tags"))
+            .is_entity_tagged(self.inert, tag);
+
+        match is_tagged {
             Ok(result) => result,
             Err(EntityDeadError) => panic!("Attempted to query tags of dead entity {self:?}"),
         }

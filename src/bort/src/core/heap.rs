@@ -232,7 +232,7 @@ impl<T> Drop for Heap<T> {
         }
 
         // Drop the boxed slice of heap values.
-        unsafe { Box::from_raw(self.values.as_ptr()) };
+        let _ = unsafe { Box::from_raw(self.values.as_ptr()) };
     }
 }
 
