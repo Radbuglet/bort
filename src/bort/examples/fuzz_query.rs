@@ -82,6 +82,11 @@ fn main() {
             assert_eq!(&queried, &alive_set);
         }
 
+        // Validate entity-less query
+        query! {
+            for (slot _value in my_tag) {}
+        }
+
         // Validate partial list
         {
             let mut queried = FxHashSet::default();

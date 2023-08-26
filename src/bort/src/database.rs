@@ -111,13 +111,20 @@ struct DbTag {
 trait DbAnyStorage: fmt::Debug + Sync {
     fn as_any(&self) -> &(dyn Any + Sync);
 
-    fn move_entity_into_empty_never_contract(
+    fn move_entity_into_empty_never_truncate(
         &self,
         token: &'static MainThreadToken,
         target: InertEntity,
         completed_target_info: &DbEntity,
         src_arch: DbArchetypeRef,
         dst_arch_info: &DbArchetype,
+    );
+
+    fn truncate_archetype_heap_len(
+        &self,
+        token: &'static MainThreadToken,
+        arch: DbArchetypeRef,
+        heap_count: usize,
     );
 }
 
@@ -596,6 +603,8 @@ impl DbRoot {
             .try_borrow_mut(token)
             .map_err(|_| ConcurrentFlushError)?;
 
+        let mut may_need_truncation = FxHashSet::default();
+
         // Begin by removing dead entities.
         'delete_dead: for info in mem::take(&mut self.dead_dirty_entities) {
             // We know this won't happen because we check for it before adding the entity to the
@@ -603,15 +612,13 @@ impl DbRoot {
             debug_assert_ne!(info.physical_arch, *self.arch_map.root());
 
             // Determine the archetype we'll be working on.
-            let archetype = self
-                .arch_map
-                .arena_mut()
-                .get_mut(&info.physical_arch)
-                .value_mut();
+            let mut did_truncate = false;
+            let arch_id = info.physical_arch;
+            let arch = self.arch_map.arena_mut().get_mut(&arch_id).value_mut();
 
             // Determine the right candidate for the swap-remove.
             let (last_entity, last_entity_info) = {
-                let Some(mut sub_heap) = archetype.entity_heaps.last() else {
+                let Some(mut sub_heap) = arch.entity_heaps.last() else {
                     // There are no more heaps to work with because there are no more entities in this
                     // archetype.
                     continue 'delete_dead;
@@ -622,7 +629,7 @@ impl DbRoot {
 
                     // We know this index will succeed because we'll never have a trailing heap whose
                     // length is zero by invariant.
-                    let last_entity = sub_heap[archetype.last_heap_len - 1].get(token);
+                    let last_entity = sub_heap[arch.last_heap_len - 1].get(token);
 
                     // If this `last_entity` is alive, use it for the swap-remove.
                     if let Some(last_entity_info) = self.alive_entities.get_mut(&last_entity) {
@@ -630,23 +637,24 @@ impl DbRoot {
                     }
 
                     #[cfg(debug_assertions)]
-                    sub_heap[archetype.last_heap_len - 1].set(token, InertEntity::PLACEHOLDER);
+                    sub_heap[arch.last_heap_len - 1].set(token, InertEntity::PLACEHOLDER);
 
                     // Otherwise, remove it from the list. This action is fine because we're trying
                     // to get rid of these anyways and it is super dangerous to move these dead
                     // entities around.
-                    archetype.last_heap_len -= 1;
+                    arch.last_heap_len -= 1;
+                    did_truncate = true;
 
-                    if archetype.last_heap_len == 0 {
-                        archetype.entity_heaps.pop();
+                    if arch.last_heap_len == 0 {
+                        arch.entity_heaps.pop();
 
-                        let Some(new_sub_heap) = archetype.entity_heaps.last() else {
+                        let Some(new_sub_heap) = arch.entity_heaps.last() else {
                             // If we managed to consume all the entities in this archetype, we know
                             // our target entity is already dead
                             continue 'delete_dead;
                         };
 
-                        archetype.last_heap_len = new_sub_heap.len();
+                        arch.last_heap_len = new_sub_heap.len();
                         sub_heap = new_sub_heap;
                     }
                 }
@@ -654,13 +662,13 @@ impl DbRoot {
 
             // Determine whether our target entity is still in the archetype. We can use this static
             // index to find the dead entity because dead entities never move.
-            if info.heap_index == archetype.entity_heaps.len() - 1
-                && info.slot_index >= archetype.last_heap_len
+            if info.heap_index == arch.entity_heaps.len() - 1
+                && info.slot_index >= arch.last_heap_len
             {
                 continue;
             }
 
-            let replace_target = archetype
+            let replace_target = arch
                 .entity_heaps
                 .get_mut(info.heap_index)
                 .map(|heap| &heap[info.slot_index]);
@@ -678,36 +686,42 @@ impl DbRoot {
                 last_entity_info.slot_index = info.slot_index;
 
                 // Pop from the list.
-                archetype.last_heap_len -= 1;
+                arch.last_heap_len -= 1;
+                did_truncate = true;
 
                 #[cfg(debug_assertions)]
-                archetype.entity_heaps.last_mut().unwrap()[archetype.last_heap_len]
+                arch.entity_heaps.last_mut().unwrap()[arch.last_heap_len]
                     .set(token, InertEntity::PLACEHOLDER);
 
-                if archetype.last_heap_len == 0 {
-                    archetype.entity_heaps.pop();
+                if arch.last_heap_len == 0 {
+                    arch.entity_heaps.pop();
 
-                    if let Some(new_last) = archetype.entity_heaps.last() {
-                        archetype.last_heap_len = new_last.len();
+                    if let Some(new_last) = arch.entity_heaps.last() {
+                        arch.last_heap_len = new_last.len();
                     }
                 }
 
                 // Move the swap-remove "filler" entity's heap data into the target slot.
-                for &managed_ty in &archetype.managed {
+                for &managed_ty in &arch.managed {
                     let Some(storage) = self.storages.get(&managed_ty) else {
                         // If this fails, it merely means that we never attached this managed type to any
                         // entity, including our own.
                         continue;
                     };
 
-                    storage.move_entity_into_empty_never_contract(
+                    storage.move_entity_into_empty_never_truncate(
                         token,
                         last_entity,
                         &last_entity_info,
                         info.physical_arch,
-                        &archetype,
+                        &arch,
                     );
                 }
+            }
+
+            // Register the archetype for truncation.
+            if did_truncate {
+                may_need_truncation.insert(arch_id);
             }
         }
 
@@ -779,9 +793,7 @@ impl DbRoot {
                         continue;
                     };
 
-                    // We don't have to contract the heap here because we're about to do it during
-                    // the swap remove.
-                    storage.move_entity_into_empty_never_contract(
+                    storage.move_entity_into_empty_never_truncate(
                         token,
                         target,
                         target_info,
@@ -824,6 +836,7 @@ impl DbRoot {
                         last_entity_info.slot_index = src_target_slot;
 
                         // Now, move the component data to the appropriate position
+                        may_need_truncation.insert(src_arch_id);
                         for &managed_ty in &src_arch.managed {
                             let Some(storage) = self.storages.get(&managed_ty) else {
                                 // If this fails, it merely means that we never attached this managed type to any
@@ -831,7 +844,7 @@ impl DbRoot {
                                 continue;
                             };
 
-                            storage.move_entity_into_empty_never_contract(
+                            storage.move_entity_into_empty_never_truncate(
                                 token,
                                 last_entity,
                                 last_entity_info,
@@ -856,6 +869,18 @@ impl DbRoot {
                         }
                     }
                 }
+            }
+        }
+
+        // Truncate storages which need it
+        for arch_id in may_need_truncation {
+            let arch = self.arch_map.arena().get(&arch_id).value();
+            for &managed in &arch.managed {
+                let Some(storage) = self.storages.get(&managed) else {
+                    continue;
+                };
+
+                storage.truncate_archetype_heap_len(token, arch_id, arch.entity_heaps.len());
             }
         }
 
@@ -1080,7 +1105,7 @@ impl<T: 'static> DbAnyStorage for DbStorage<T> {
         self
     }
 
-    fn move_entity_into_empty_never_contract(
+    fn move_entity_into_empty_never_truncate(
         &self,
         token: &'static MainThreadToken,
         target: InertEntity,
@@ -1176,6 +1201,20 @@ impl<T: 'static> DbAnyStorage for DbStorage<T> {
                 mapping.heap = DbEntityMappingHeap::Anonymous(resv);
             }
         }
+    }
+
+    fn truncate_archetype_heap_len(
+        &self,
+        token: &'static MainThreadToken,
+        arch: DbArchetypeRef,
+        heap_count: usize,
+    ) {
+        let storage = &mut *self.borrow_mut(token);
+        let Some(heap_list) = storage.heaps.get_mut(&arch) else {
+            return;
+        };
+
+        heap_list.truncate(heap_count);
     }
 }
 
