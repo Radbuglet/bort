@@ -593,8 +593,8 @@ impl DbRoot {
             .try_borrow_mut(token)
             .map_err(|_| ConcurrentFlushError)?;
 
-        // Throughout this process, we keep track of which entities have been moved around and they
-        // archetype they currently reside.
+        // Throughout this process, we keep track of which entities have been moved around and the
+        // archetype in which they currently reside.
         let mut moved = NopHashMap::default();
 
         #[derive(Debug, Copy, Clone)]
@@ -605,7 +605,7 @@ impl DbRoot {
 
         // Begin by removing dead entities
         'delete_dead: for info in mem::take(&mut self.dead_dirty_entities) {
-            // N.B. we know this won't happen because we check for it before adding the entity to the
+            // We know this won't happen because we check for it before adding the entity to the
             // `dead_dirty_entities` list.
             debug_assert_ne!(info.physical_arch, *self.arch_map.root());
 
@@ -636,6 +636,9 @@ impl DbRoot {
                         break (last_entity, last_entity_info);
                     }
 
+                    #[cfg(debug_assertions)]
+                    sub_heap[archetype.last_heap_len - 1].set(token, InertEntity::PLACEHOLDER);
+
                     // Otherwise, remove it from the list. This action is fine because we're trying
                     // to get rid of these anyways and it is super dangerous to move these dead
                     // entities around.
@@ -656,11 +659,18 @@ impl DbRoot {
                 }
             };
 
-            // Determine whether our target entity is still in the archetype.
+            // Determine whether our target entity is still in the archetype. We can use this static
+            // index to find the dead entity because dead entities never move.
+            if info.heap_index == archetype.entity_heaps.len() - 1
+                && info.slot_index >= archetype.last_heap_len
+            {
+                continue;
+            }
+
             let replace_target = archetype
                 .entity_heaps
                 .get_mut(info.heap_index)
-                .and_then(|heap| heap.get(info.slot_index));
+                .map(|heap| &heap[info.slot_index]);
 
             if let Some(replace_target) = replace_target {
                 // If it is, commit the swap-replace. Otherwise, ignore everything that went on here.
@@ -687,6 +697,10 @@ impl DbRoot {
 
                 // Pop from the list.
                 archetype.last_heap_len -= 1;
+
+                #[cfg(debug_assertions)]
+                archetype.entity_heaps.last_mut().unwrap()[archetype.last_heap_len]
+                    .set(token, InertEntity::PLACEHOLDER);
 
                 if archetype.last_heap_len == 0 {
                     archetype.entity_heaps.pop();
@@ -739,7 +753,8 @@ impl DbRoot {
 
                 // Mark the swap-remove "filler" as moved. We only insert this entry if it hasn't
                 // already been marked as moving before since a) we wouldn't be updating the
-                // destination field in any useful way and b) we could clobber the src field.
+                // destination field in any useful way since it has been moved within the same
+                // archetype and b) we could clobber the src field if we proceeded anyways.
                 if let hashbrown::hash_map::Entry::Vacant(entry) = moved.entry(last_entity) {
                     entry.insert(Moved {
                         src: src_arch_id,
@@ -749,6 +764,9 @@ impl DbRoot {
 
                 // Pop the end
                 arch.last_heap_len -= 1;
+                #[cfg(debug_assertions)]
+                arch.entity_heaps.last_mut().unwrap()[arch.last_heap_len]
+                    .set(token, InertEntity::PLACEHOLDER);
 
                 if arch.last_heap_len == 0 {
                     arch.entity_heaps.pop();
@@ -793,7 +811,8 @@ impl DbRoot {
                 entity,
                 Moved {
                     // We know this entity came from this tag because non-finalized entities are only
-                    // moved into other archetypes when it's their turn to be processed.
+                    // moved into other archetypes than their starting archetypes when it's their
+                    // turn to be processed.
                     src: src_arch_id,
                     dst: dest_arch_id,
                 },

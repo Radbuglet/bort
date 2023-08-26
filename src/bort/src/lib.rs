@@ -43,7 +43,7 @@ pub mod prelude {
                 call_cx, CanCallCollection,
                 AccessRef, AccessMut, access_cx,
                 alias, proc,
-                validate, RootCollectionCallToken,
+                validate, RootCollectionCallToken, DangerousGlobalAccessToken,
                 saddle_delegate,
             };
         }

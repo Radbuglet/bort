@@ -239,7 +239,7 @@ macro_rules! proc {
 pub use proc;
 
 // Validation
-pub use saddle::{validate, RootCollectionCallToken};
+pub use saddle::{validate, DangerousGlobalAccessToken, RootCollectionCallToken};
 
 // `saddle_delegate!`
 #[doc(hidden)]
