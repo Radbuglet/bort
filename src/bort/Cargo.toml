@@ -13,6 +13,7 @@ saddle = { path = "../saddle", optional = true }
 [features]
 default = ["saddle"]
 saddle = ["dep:saddle"]
+disable-saddle-static-validation = ["saddle/disable-static-validation"]
 
 [dev-dependencies]
 criterion = "0.5.1"

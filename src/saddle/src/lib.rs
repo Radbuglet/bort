@@ -1,8 +1,31 @@
-use self::validator::Validator;
-use std::{
-    marker::PhantomData,
-    sync::atomic::{AtomicBool, Ordering::Relaxed},
-};
+use std::marker::PhantomData;
+
+// === CFG === //
+
+cfgenius::define! {
+    pub IS_STATIC_VALIDATION_DISABLED = cfg(any(
+        feature = "disable-static-validation",
+        target_arch = "wasm32",
+    ));
+}
+
+cfgenius::cond! {
+    if macro(IS_STATIC_VALIDATION_DISABLED) {
+        #[warn(deprecated)]
+        #[allow(dead_code)]
+        mod saddle {
+            #[deprecated(note = "Saddle static validation is disabled in this build because the \
+                                 `disable-static-validation` feature was enabled or because the \
+                                 build target is a WebAssembly module.")]
+
+            fn hack_to_issue_warning() {}
+
+            fn whee() {
+                hack_to_issue_warning();
+            }
+        }
+    }
+}
 
 // === Markers === //
 
@@ -396,11 +419,15 @@ macro_rules! access_cx {
 // === Proc === //
 
 mod proc {
-    use super::validator::Validator;
-    use linkme::distributed_slice;
+    cfgenius::cond! {
+        if not(macro(super::IS_STATIC_VALIDATION_DISABLED)) {
+            use super::validator::Validator;
+            use linkme::distributed_slice;
 
-    #[distributed_slice]
-    pub static PROCEDURE_REGISTRARS: [fn(&mut Validator)] = [..];
+            #[distributed_slice]
+            pub static PROCEDURE_REGISTRARS: [fn(&mut Validator)] = [..];
+        }
+    }
 }
 
 pub mod macro_internals_proc {
@@ -408,14 +435,21 @@ pub mod macro_internals_proc {
 
     pub use {
         super::{
-            access::IterableAccessTrait, access_cx, call_cx, proc::PROCEDURE_REGISTRARS,
+            access::IterableAccessTrait, access_cx, call_cx,
             proc_collection::Private as ProcCollectionPrivate, validator::Validator,
-            DangerousGlobalAccessToken, ProcCollection,
+            DangerousGlobalAccessToken, ProcCollection, IS_STATIC_VALIDATION_DISABLED,
         },
+        cfgenius::cond,
         linkme::distributed_slice,
         partial_scope::partial_shadow,
         std::{any::TypeId, column, concat, file, line},
     };
+
+    cfgenius::cond! {
+        if not(macro(super::IS_STATIC_VALIDATION_DISABLED)) {
+            pub use super::proc::PROCEDURE_REGISTRARS;
+        }
+    }
 
     pub trait CanCallCollectionExt<C: ProcCollection>: CanCallCollection<C> {
         fn __validate_collection_token(&mut self) -> CanCallCollectionTyProof<'_, C>;
@@ -484,27 +518,31 @@ macro_rules! proc {
 				};
 
 				// Define a registration method
-				#[$crate::macro_internals_proc::distributed_slice($crate::macro_internals_proc::PROCEDURE_REGISTRARS)]
-				static __THIS_PROCEDURE: fn(&mut $crate::macro_internals_proc::Validator) = |validator| {
-					validator.add_procedure(
-						/* collection: */ (
-							$crate::macro_internals_proc::TypeId::of::<$in_collection>(),
-							<$in_collection as $crate::macro_internals_proc::ProcCollectionPrivate>::DEF_LOC,
-						),
-						/* my_path: */ $crate::macro_internals_proc::concat!(
-							$crate::macro_internals_proc::file!(),
-							":",
-							$crate::macro_internals_proc::line!(),
-							":",
-							$crate::macro_internals_proc::column!(),
-						),
-						/* borrows: */ <dyn ProcAccess as $crate::macro_internals_proc::IterableAccessTrait>::iter_access(),
-						/* calls: */ [$((
-							$crate::macro_internals_proc::TypeId::of::<$out_collection>(),
-							<$out_collection as $crate::macro_internals_proc::ProcCollectionPrivate>::DEF_LOC,
-						)),*],
-					);
-				};
+				$crate::macro_internals_proc::cond! {
+					if not(macro($crate::macro_internals_proc::IS_STATIC_VALIDATION_DISABLED)) {
+						#[$crate::macro_internals_proc::distributed_slice($crate::macro_internals_proc::PROCEDURE_REGISTRARS)]
+						static __THIS_PROCEDURE: fn(&mut $crate::macro_internals_proc::Validator) = |validator| {
+							validator.add_procedure(
+								/* collection: */ (
+									$crate::macro_internals_proc::TypeId::of::<$in_collection>(),
+									<$in_collection as $crate::macro_internals_proc::ProcCollectionPrivate>::DEF_LOC,
+								),
+								/* my_path: */ $crate::macro_internals_proc::concat!(
+									$crate::macro_internals_proc::file!(),
+									":",
+									$crate::macro_internals_proc::line!(),
+									":",
+									$crate::macro_internals_proc::column!(),
+								),
+								/* borrows: */ <dyn ProcAccess as $crate::macro_internals_proc::IterableAccessTrait>::iter_access(),
+								/* calls: */ [$((
+									$crate::macro_internals_proc::TypeId::of::<$out_collection>(),
+									<$out_collection as $crate::macro_internals_proc::ProcCollectionPrivate>::DEF_LOC,
+								)),*],
+							);
+						};
+					}
+				}
 
 				// Fetch the tokens
 				fn get_token<'a, C>(_input: &'a mut $crate::macro_internals_proc::CanCallCollectionTyProof<'_, C>) -> (
@@ -532,27 +570,39 @@ macro_rules! proc {
 
 mod validator;
 
-impl Validator {
-    pub fn global() -> Self {
-        let mut validator = Validator::default();
+cfgenius::cond! {
+    if not(macro(IS_STATIC_VALIDATION_DISABLED)) {
+        impl validator::Validator {
+            pub fn global() -> Self {
+                let mut validator = validator::Validator::default();
 
-        for proc_register in proc::PROCEDURE_REGISTRARS {
-            proc_register(&mut validator);
+                for proc_register in proc::PROCEDURE_REGISTRARS {
+                    proc_register(&mut validator);
+                }
+
+                validator
+            }
         }
-
-        validator
     }
 }
 
 pub fn validate() -> Result<(), String> {
-    static HAS_VALIDATED: AtomicBool = AtomicBool::new(false);
+    cfgenius::cond_expr! {
+        if macro(IS_STATIC_VALIDATION_DISABLED) {
+            Ok(())
+        } else {
+            use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
-    if !HAS_VALIDATED.load(Relaxed) {
-        Validator::global().validate()?;
-        HAS_VALIDATED.store(true, Relaxed);
+            static HAS_VALIDATED: AtomicBool = AtomicBool::new(false);
+
+            if !HAS_VALIDATED.load(Relaxed) {
+                validator::Validator::global().validate()?;
+                HAS_VALIDATED.store(true, Relaxed);
+            }
+
+            Ok(())
+        }
     }
-
-    Ok(())
 }
 
 pub struct RootCollectionCallToken<C: ProcCollection> {
