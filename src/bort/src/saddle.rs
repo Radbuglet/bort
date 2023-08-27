@@ -132,7 +132,7 @@ macro_rules! access_cx {
 		$(; $($inherits:path),*$(,)?)?
 	) => {
 		$crate::saddle::macro_internals_forwards::access_cx![
-			$($kw $component)* : $crate::saddle::macro_internals_forwards::BortComponents
+			$($kw $component),* : $crate::saddle::macro_internals_forwards::BortComponents
 			$(; $($inherits),*)?
 		]
 	};
