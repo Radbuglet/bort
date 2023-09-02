@@ -1,4 +1,4 @@
-use std::{any::Any, cell::RefCell, fmt, hash, mem, ops::ControlFlow};
+use std::{any::Any, cell::RefCell, fmt, hash, marker::PhantomData, mem, ops::ControlFlow};
 
 use derive_where::derive_where;
 
@@ -104,7 +104,7 @@ pub trait QueryableEventList {
         F: FnMut(Entity, &Self::Event) -> ControlFlow<()>;
 }
 
-pub trait ProcessableEventList: QueryableEventList {
+pub trait ProcessableEventList {
     fn is_empty(&self) -> bool;
 
     fn clear(&mut self);
@@ -177,6 +177,70 @@ impl<E> ProcessableEventList for VecEventList<E> {
     fn clear(&mut self) {
         self.process_list.get_mut().clear();
         self.events.clear();
+        self.owned.clear();
+    }
+}
+
+// === CountingEvent === //
+
+#[derive(Debug, Default)]
+pub struct CountingEvent<E> {
+    _ty: PhantomData<fn() -> E>,
+    process_list: RefCell<QueryVersionMap<usize>>,
+    owned: Vec<OwnedEntity>,
+    count: u64,
+}
+
+impl<E> CountingEvent<E> {
+    pub const fn new() -> Self {
+        Self {
+            _ty: PhantomData,
+            process_list: RefCell::new(QueryVersionMap::new()),
+            owned: Vec::new(),
+            count: 0,
+        }
+    }
+
+    pub fn take_all_events(&mut self) -> bool {
+        let had_event = self.has_event();
+        self.count = 0;
+        had_event
+    }
+
+	pub fn take_one_event(&mut self) -> bool {
+        let had_event = self.has_event();
+        self.count -= 1;
+        had_event
+    }
+
+    pub fn has_event(&self) -> bool {
+        self.count > 0
+    }
+
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+}
+
+impl<E> EventTarget<E> for CountingEvent<E> {
+    fn fire(&mut self, _target: Entity, _event: E, _context: ()) {
+        self.count += 1;
+    }
+
+    fn fire_owned(&mut self, target: OwnedEntity, _event: E, _context: ()) {
+        self.count += 1;
+        self.owned.push(target);
+    }
+}
+
+impl<E> ProcessableEventList for CountingEvent<E> {
+    fn is_empty(&self) -> bool {
+        !self.has_event()
+    }
+
+    fn clear(&mut self) {
+        self.process_list.get_mut().clear();
+        self.count = 0;
         self.owned.clear();
     }
 }

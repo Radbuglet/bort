@@ -43,36 +43,36 @@ pub use saddle::ProcCollection;
 
 #[macro_export]
 macro_rules! proc_collection {
-	($(
-		$(#[$attr:meta])*
-		$vis:vis $name:ident
-	);* $(;)?) => {
-		$crate::saddle::macro_internals_forwards::proc_collection! {$(
-			$(#[$attr])*
-			$vis $name;
-		)*}
-	};
-	($(derive for $target:ty$(;)?)*) => {
-		$crate::saddle::macro_internals_forwards::proc_collection! {$(
-			derive for $target;
-		)*}
-	};
-	(
-		args {}
+    ($(
+        $(#[$attr:meta])*
+        $vis:vis $name:ident
+    );* $(;)?) => {
+        $crate::saddle::macro_internals_forwards::proc_collection! {$(
+            $(#[$attr])*
+            $vis $name;
+        )*}
+    };
+    ($(derive for $target:ty$(;)?)*) => {
+        $crate::saddle::macro_internals_forwards::proc_collection! {$(
+            derive for $target;
+        )*}
+    };
+    (
+        args {}
 
-		$(#[$attr_meta:meta])*
-		$vis:vis fn $name:ident
-			$(
-				<$($generic:ident),* $(,)?>
-				$(<$($fn_lt:lifetime),* $(,)?>)?
-			)?
-			(
-				$($para_name:ident: $para:ty),* $(,)?
-			) $(-> $ret:ty)?
-		$(where $($where_token:tt)*)?
-	) => {
-		$crate::saddle::macro_internals_forwards::proc_collection!(derive for $name);
-	};
+        $(#[$attr_meta:meta])*
+        $vis:vis fn $name:ident
+            $(
+                <$($generic:ident),* $(,)?>
+                $(<$($fn_lt:lifetime),* $(,)?>)?
+            )?
+            (
+                $($para_name:ident: $para:ty),* $(,)?
+            ) $(-> $ret:ty)?
+        $(where $($where_token:tt)*)?
+    ) => {
+        $crate::saddle::macro_internals_forwards::proc_collection!(derive for $name);
+    };
 }
 
 pub use proc_collection;
@@ -116,26 +116,26 @@ impl<T: 'static, K: ?Sized + saddle::AccessMut<BortComponents, T>> AccessMut<T> 
 #[macro_export]
 macro_rules! access_cx {
     ($(
-		$(#[$attr:meta])*
-		$vis:vis trait $name:ident$(: $($inherits:path),*$(,)?)? $(=
-			$($kw:ident $component:ty),*$(,)?
-		)?
-		;
-	)*) => {
-		$crate::saddle::macro_internals_forwards::access_cx! {$(
-			$(#[$attr])*
-			$vis trait $name$(: $($inherits),*)? $(= $($kw $component),* : $crate::saddle::macro_internals_forwards::BortComponents)?;
-		)*}
-	};
+        $(#[$attr:meta])*
+        $vis:vis trait $name:ident$(: $($inherits:path),*$(,)?)? $(=
+            $($kw:ident $component:ty),*$(,)?
+        )?
+        ;
+    )*) => {
+        $crate::saddle::macro_internals_forwards::access_cx! {$(
+            $(#[$attr])*
+            $vis trait $name$(: $($inherits),*)? $(= $($kw $component),* : $crate::saddle::macro_internals_forwards::BortComponents)?;
+        )*}
+    };
     (
-		$($kw:ident $component:ty),* $(,)?
-		$(; $($inherits:path),*$(,)?)?
-	) => {
-		$crate::saddle::macro_internals_forwards::access_cx![
-			$($kw $component),* : $crate::saddle::macro_internals_forwards::BortComponents
-			$(; $($inherits),*)?
-		]
-	};
+        $($kw:ident $component:ty),* $(,)?
+        $(; $($inherits:path),*$(,)?)?
+    ) => {
+        $crate::saddle::macro_internals_forwards::access_cx![
+            $($kw $component),* : $crate::saddle::macro_internals_forwards::BortComponents
+            $(; $($inherits),*)?
+        ]
+    };
 }
 
 pub use access_cx;
@@ -143,10 +143,10 @@ pub use access_cx;
 // Alias
 #[macro_export]
 macro_rules! alias {
-	($($vis:vis let $name:ident: $ty:ty);*$(;)?) => {$(
-		#[allow(non_camel_case_types)]
-		$vis type $name = $ty;
-	)*};
+    ($($vis:vis let $name:ident: $ty:ty);*$(;)?) => {$(
+        #[allow(non_camel_case_types)]
+        $vis type $name = $ty;
+    )*};
 }
 
 pub use alias;
@@ -155,85 +155,85 @@ pub use alias;
 #[macro_export]
 macro_rules! proc {
     (
-		as $in_collection:ty[$in_collection_cx:expr] do
-		$(
-			(
-				$access_cx_name:ident: [
-					$($access_kw:ident $access_component:ty),* $(,)?
-					$(; $($access_inherits:path),* $(,)?)?
-				],
-				$collection_cx_name:ident: [
-					$($out_collection:ty),* $(,)?
-				]
-				$(,
-					$($alias_kw:ident $alias_ty:ty $(as $alias_rename:ident)? = $alias_target:expr),*
-					$(,)?
-				)?
-			) {
-				$($body:tt)*
-			}
-			$(,)?
-		)*
-	) => {
+        as $in_collection:ty[$in_collection_cx:expr] do
+        $(
+            (
+                $access_cx_name:ident: [
+                    $($access_kw:ident $access_component:ty),* $(,)?
+                    $(; $($access_inherits:path),* $(,)?)?
+                ],
+                $collection_cx_name:ident: [
+                    $($out_collection:ty),* $(,)?
+                ]
+                $(,
+                    $($alias_kw:ident $alias_ty:ty $(as $alias_rename:ident)? = $alias_target:expr),*
+                    $(,)?
+                )?
+            ) {
+                $($body:tt)*
+            }
+            $(,)?
+        )*
+    ) => {
         $crate::saddle::macro_internals_forwards::proc! {
-			as $in_collection[$in_collection_cx] do
-			$(
-				(
-					$access_cx_name: [
-						$($access_kw $access_component,)* $($($alias_kw $alias_ty,)*)? : $crate::saddle::macro_internals_forwards::BortComponents
-						$(; $($access_inherits),*)?
-					],
-					$collection_cx_name: [
-						$($out_collection),*
-					]
-				) {
-					// Collect borrows
-					let __borrows = ();
-					$($(
-						$crate::saddle::macro_internals_forwards::proc_me!(
-							@fetch_alias __borrows $access_cx_name $alias_target => $alias_kw $alias_ty
-						);
-					)*)?
+            as $in_collection[$in_collection_cx] do
+            $(
+                (
+                    $access_cx_name: [
+                        $($access_kw $access_component,)* $($($alias_kw $alias_ty,)*)? : $crate::saddle::macro_internals_forwards::BortComponents
+                        $(; $($access_inherits),*)?
+                    ],
+                    $collection_cx_name: [
+                        $($out_collection),*
+                    ]
+                ) {
+                    // Collect borrows
+                    let __borrows = ();
+                    $($(
+                        $crate::saddle::macro_internals_forwards::proc_me!(
+                            @fetch_alias __borrows $access_cx_name $alias_target => $alias_kw $alias_ty
+                        );
+                    )*)?
 
-					// Reborrow
-					let mut __borrows = __borrows;
+                    // Reborrow
+                    let mut __borrows = __borrows;
 
-					#[allow(unused)]
-					let __accum = &mut __borrows;
-					$($(
-						$crate::saddle::macro_internals_forwards::proc_me!(
-							@dump_alias __accum $alias_kw [$($alias_rename)? $alias_ty]
-						);
-					)*)?
+                    #[allow(unused)]
+                    let __accum = &mut __borrows;
+                    $($(
+                        $crate::saddle::macro_internals_forwards::proc_me!(
+                            @dump_alias __accum $alias_kw [$($alias_rename)? $alias_ty]
+                        );
+                    )*)?
 
-					$($body)*
-					$crate::saddle::macro_internals_forwards::drop(__borrows);
-				}
-			)*
-		}
+                    $($body)*
+                    $crate::saddle::macro_internals_forwards::drop(__borrows);
+                }
+            )*
+        }
     };
-	(@fetch_alias $borrows:ident $access_cx_name:ident $target:expr => ref $ty:ty) => {
-		let $borrows = $crate::saddle::macro_internals_forwards::Cons::push_back(
-			$borrows,
-			$target.get_s::<$ty>($access_cx_name),
-		);
-	};
-	(@fetch_alias $borrows:ident $access_cx_name:ident $target:expr => mut $ty:ty) => {
-		let $borrows = $crate::saddle::macro_internals_forwards::Cons::push_back(
-			$borrows,
-			$target.get_mut_s::<$ty>($access_cx_name),
-		);
-	};
-	(@dump_alias $accum:ident ref [$first:ident $($rest:tt)*]) => {
-		let $first = &*$accum.0;
-		#[allow(unused)]
-		let $accum = &mut $accum.1;
-	};
-	(@dump_alias $accum:ident mut [$first:ident $($rest:tt)*]) => {
-		let $first = &mut *$accum.0;
-		#[allow(unused)]
-		let $accum = &mut $accum.1;
-	};
+    (@fetch_alias $borrows:ident $access_cx_name:ident $target:expr => ref $ty:ty) => {
+        let $borrows = $crate::saddle::macro_internals_forwards::Cons::push_back(
+            $borrows,
+            $target.get_s::<$ty>($access_cx_name),
+        );
+    };
+    (@fetch_alias $borrows:ident $access_cx_name:ident $target:expr => mut $ty:ty) => {
+        let $borrows = $crate::saddle::macro_internals_forwards::Cons::push_back(
+            $borrows,
+            $target.get_mut_s::<$ty>($access_cx_name),
+        );
+    };
+    (@dump_alias $accum:ident ref [$first:ident $($rest:tt)*]) => {
+        let $first = &*$accum.0;
+        #[allow(unused)]
+        let $accum = &mut $accum.1;
+    };
+    (@dump_alias $accum:ident mut [$first:ident $($rest:tt)*]) => {
+        let $first = &mut *$accum.0;
+        #[allow(unused)]
+        let $accum = &mut $accum.1;
+    };
 }
 
 pub use proc;
@@ -253,35 +253,35 @@ pub mod macro_internals_saddle_delegate {
 #[macro_export]
 macro_rules! saddle_delegate {
     (
-		$(#[$attr_meta:meta])*
-		$vis:vis fn $name:ident
-			$(
-				<$($generic:ident),* $(,)?>
-				$(<$($fn_lt:lifetime),* $(,)?>)?
-			)?
-			($($para_name:ident: $para:ty),* $(,)?) $(-> $ret:ty)?
-		$(as deriving $deriving:path $({ $($deriving_args:tt)* })? )*
-		$(where $($where_token:tt)*)?
-	) => {
-		$crate::saddle::macro_internals_saddle_delegate::delegate!(
-			$(#[$attr_meta])*
-			$vis fn $name
-				$(
-					<$($generic),*>
-					$(<$($fn_lt),*>)?
-				)?
-				(
-					bhv: &$crate::saddle::macro_internals_saddle_delegate::BehaviorRegistry,
-					call_cx: &mut $crate::saddle::macro_internals_saddle_delegate::call_cx![$name],
-					$($para_name: $para),*
-				) $(-> $ret)?
-			as deriving $crate::saddle::macro_internals_saddle_delegate::behavior_kind
-			as deriving $crate::saddle::macro_internals_saddle_delegate::behavior_delegate
-			as deriving $crate::saddle::macro_internals_saddle_delegate::proc_collection
-			$(as deriving $deriving $({ $($deriving_args)* })? )*
-			$(where $($where_token)*)?
-		);
-	};
+        $(#[$attr_meta:meta])*
+        $vis:vis fn $name:ident
+            $(
+                <$($generic:ident),* $(,)?>
+                $(<$($fn_lt:lifetime),* $(,)?>)?
+            )?
+            ($($para_name:ident: $para:ty),* $(,)?) $(-> $ret:ty)?
+        $(as deriving $deriving:path $({ $($deriving_args:tt)* })? )*
+        $(where $($where_token:tt)*)?
+    ) => {
+        $crate::saddle::macro_internals_saddle_delegate::delegate!(
+            $(#[$attr_meta])*
+            $vis fn $name
+                $(
+                    <$($generic),*>
+                    $(<$($fn_lt),*>)?
+                )?
+                (
+                    bhv: &$crate::saddle::macro_internals_saddle_delegate::BehaviorRegistry,
+                    call_cx: &mut $crate::saddle::macro_internals_saddle_delegate::call_cx![$name],
+                    $($para_name: $para),*
+                ) $(-> $ret)?
+            as deriving $crate::saddle::macro_internals_saddle_delegate::behavior_kind
+            as deriving $crate::saddle::macro_internals_saddle_delegate::behavior_delegate
+            as deriving $crate::saddle::macro_internals_saddle_delegate::proc_collection
+            $(as deriving $deriving $({ $($deriving_args)* })? )*
+            $(where $($where_token)*)?
+        );
+    };
 }
 
 pub use saddle_delegate;

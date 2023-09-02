@@ -48,32 +48,32 @@ pub mod macro_internals_universe {
 
 #[macro_export]
 macro_rules! universe {
-	($(
-		$(#[$attr:meta])*
-		$vis:vis $name:ident
-	);* $(;)?) => {$(
-		$(#[$attr])*
-		#[non_exhaustive]
-		$vis struct $name;
+    ($(
+        $(#[$attr:meta])*
+        $vis:vis $name:ident
+    );* $(;)?) => {$(
+        $(#[$attr])*
+        #[non_exhaustive]
+        $vis struct $name;
 
-		$crate::macro_internals_universe::universe!(derive for $name);
-	)*};
-	($(derive for $target:ty$(;)?)*) => {$(
-		impl $crate::macro_internals_universe::Private for $target {
-			const DEF_LOC: &'static $crate::macro_internals_universe::str = $crate::macro_internals_universe::concat!(
-				"universe ",
-				$crate::macro_internals_universe::stringify!($target),
-				" defined at ",
-				$crate::macro_internals_universe::file!(),
-				":",
-				$crate::macro_internals_universe::line!(),
-				":",
-				$crate::macro_internals_universe::column!(),
-			);
-		}
+        $crate::macro_internals_universe::universe!(derive for $name);
+    )*};
+    ($(derive for $target:ty$(;)?)*) => {$(
+        impl $crate::macro_internals_universe::Private for $target {
+            const DEF_LOC: &'static $crate::macro_internals_universe::str = $crate::macro_internals_universe::concat!(
+                "universe ",
+                $crate::macro_internals_universe::stringify!($target),
+                " defined at ",
+                $crate::macro_internals_universe::file!(),
+                ":",
+                $crate::macro_internals_universe::line!(),
+                ":",
+                $crate::macro_internals_universe::column!(),
+            );
+        }
 
-		impl $crate::macro_internals_universe::Universe for $target {}
-	)*};
+        impl $crate::macro_internals_universe::Universe for $target {}
+    )*};
 }
 
 // ProcCollection
@@ -95,32 +95,32 @@ pub mod macro_internals_proc_collection {
 
 #[macro_export]
 macro_rules! proc_collection {
-	($(
-		$(#[$attr:meta])*
-		$vis:vis $name:ident
-	);* $(;)?) => {$(
-		$(#[$attr])*
-		#[non_exhaustive]
-		$vis struct $name;
+    ($(
+        $(#[$attr:meta])*
+        $vis:vis $name:ident
+    );* $(;)?) => {$(
+        $(#[$attr])*
+        #[non_exhaustive]
+        $vis struct $name;
 
-		$crate::macro_internals_proc_collection::proc_collection!(derive for $name);
-	)*};
-	($(derive for $target:ty$(;)?)*) => {$(
-		impl $crate::macro_internals_proc_collection::Private for $target {
-			const DEF_LOC: &'static $crate::macro_internals_proc_collection::str = $crate::macro_internals_proc_collection::concat!(
-				"universe ",
-				$crate::macro_internals_proc_collection::stringify!($target),
-				" defined at ",
-				$crate::macro_internals_proc_collection::file!(),
-				":",
-				$crate::macro_internals_proc_collection::line!(),
-				":",
-				$crate::macro_internals_proc_collection::column!(),
-			);
-		}
+        $crate::macro_internals_proc_collection::proc_collection!(derive for $name);
+    )*};
+    ($(derive for $target:ty$(;)?)*) => {$(
+        impl $crate::macro_internals_proc_collection::Private for $target {
+            const DEF_LOC: &'static $crate::macro_internals_proc_collection::str = $crate::macro_internals_proc_collection::concat!(
+                "universe ",
+                $crate::macro_internals_proc_collection::stringify!($target),
+                " defined at ",
+                $crate::macro_internals_proc_collection::file!(),
+                ":",
+                $crate::macro_internals_proc_collection::line!(),
+                ":",
+                $crate::macro_internals_proc_collection::column!(),
+            );
+        }
 
-		impl $crate::macro_internals_proc_collection::ProcCollection for $target {}
-	)*};
+        impl $crate::macro_internals_proc_collection::ProcCollection for $target {}
+    )*};
 }
 
 // === Global Token === //
@@ -176,12 +176,12 @@ pub mod macro_internals_call_cx {
 
 #[macro_export]
 macro_rules! call_cx {
-	($ty:ty $(,)?) => { dyn $crate::macro_internals_call_cx::CanCallCollection<$ty> };
-	($($ty:ty),*$(,)?) => { impl ?Sized $(+ $crate::macro_internals_call_cx::CanCallCollection<$ty>)* };
-	(sized; $($ty:ty),*$(,)?) => {
-		impl $crate::macro_internals_call_cx::Sized
-			$(+ $crate::macro_internals_call_cx::CanCallCollection<$ty>)*
-	};
+    ($ty:ty $(,)?) => { dyn $crate::macro_internals_call_cx::CanCallCollection<$ty> };
+    ($($ty:ty),*$(,)?) => { impl ?Sized $(+ $crate::macro_internals_call_cx::CanCallCollection<$ty>)* };
+    (sized; $($ty:ty),*$(,)?) => {
+        impl $crate::macro_internals_call_cx::Sized
+            $(+ $crate::macro_internals_call_cx::CanCallCollection<$ty>)*
+    };
 }
 
 // === Access Tokens === //
@@ -302,118 +302,118 @@ pub mod macro_internals_access_cx {
 
 #[macro_export]
 macro_rules! access_cx {
-	($(
-		$(#[$attr:meta])*
-		$vis:vis trait $name:ident$(: $($inherits:path),*$(,)?)? $(=
-			$(
-				$($kw:ident $component:ty),*$(,)?
-				: $universe:ty
-			),* $(,)?
-		)?
-		;
-	)*) => {$(
-		$(#[$attr])*
-		$vis trait $name:
-			$($($inherits + )*)?
-			$($($(
-				$crate::macro_internals_access_cx::Private<
-					$crate::macro_internals_access_cx::access_cx!(@__decode_kw $kw),
-					$universe,
-					$component,
-				> +
-			)*)*)?
-			$crate::macro_internals_access_cx::Dummy
-		{
-			fn as_dyn(&self) -> &dyn $name;
+    ($(
+        $(#[$attr:meta])*
+        $vis:vis trait $name:ident$(: $($inherits:path),*$(,)?)? $(=
+            $(
+                $($kw:ident $component:ty),*$(,)?
+                : $universe:ty
+            ),* $(,)?
+        )?
+        ;
+    )*) => {$(
+        $(#[$attr])*
+        $vis trait $name:
+            $($($inherits + )*)?
+            $($($(
+                $crate::macro_internals_access_cx::Private<
+                    $crate::macro_internals_access_cx::access_cx!(@__decode_kw $kw),
+                    $universe,
+                    $component,
+                > +
+            )*)*)?
+            $crate::macro_internals_access_cx::Dummy
+        {
+            fn as_dyn(&self) -> &dyn $name;
 
-			fn as_dyn_mut(&mut self) -> &mut dyn $name;
-		}
+            fn as_dyn_mut(&mut self) -> &mut dyn $name;
+        }
 
-		impl<K> $name for K
-		where
-			K: ?Sized $($(+ $inherits)*)?
-			$($($(
-				+ $crate::macro_internals_access_cx::Private<
-					$crate::macro_internals_access_cx::access_cx!(@__decode_kw $kw),
-					$universe,
-					$component,
-				>
-			)*)*)?
-		{
-			fn as_dyn(&self) -> &dyn $name {
-				$crate::macro_internals_access_cx::DangerousGlobalAccessToken::new()
-			}
+        impl<K> $name for K
+        where
+            K: ?Sized $($(+ $inherits)*)?
+            $($($(
+                + $crate::macro_internals_access_cx::Private<
+                    $crate::macro_internals_access_cx::access_cx!(@__decode_kw $kw),
+                    $universe,
+                    $component,
+                >
+            )*)*)?
+        {
+            fn as_dyn(&self) -> &dyn $name {
+                $crate::macro_internals_access_cx::DangerousGlobalAccessToken::new()
+            }
 
-			fn as_dyn_mut(&mut self) -> &mut dyn $name {
-				$crate::macro_internals_access_cx::DangerousGlobalAccessToken::new()
-			}
-		}
+            fn as_dyn_mut(&mut self) -> &mut dyn $name {
+                $crate::macro_internals_access_cx::DangerousGlobalAccessToken::new()
+            }
+        }
 
-		impl $crate::macro_internals_access_cx::IterableAccessTrait for dyn $name {
-			type AccessIter =
-				// N.B. This construction is a bit weird. One may think that the first item in the
-				// list is the inner-most iterator and the last item is the outermost, but this is
-				// reversed because we use the third trailing parameter to define the type, not the
-				// leading one!
-				$($($crate::macro_internals_access_cx::TriChain<dyn $inherits, )*)?
-				$crate::macro_internals_access_cx::ArrayIter<{
-					$($($($crate::macro_internals_access_cx::bind_and_return_one::<$component>() +)*)*)? 0
-				}>
-				$($(, <dyn $inherits as $crate::macro_internals_access_cx::IterableAccessTrait>::AccessIter> )*)?;
+        impl $crate::macro_internals_access_cx::IterableAccessTrait for dyn $name {
+            type AccessIter =
+                // N.B. This construction is a bit weird. One may think that the first item in the
+                // list is the inner-most iterator and the last item is the outermost, but this is
+                // reversed because we use the third trailing parameter to define the type, not the
+                // leading one!
+                $($($crate::macro_internals_access_cx::TriChain<dyn $inherits, )*)?
+                $crate::macro_internals_access_cx::ArrayIter<{
+                    $($($($crate::macro_internals_access_cx::bind_and_return_one::<$component>() +)*)*)? 0
+                }>
+                $($(, <dyn $inherits as $crate::macro_internals_access_cx::IterableAccessTrait>::AccessIter> )*)?;
 
-			fn iter_access() -> Self::AccessIter {
-				let iter = $crate::macro_internals_access_cx::IntoIterator::into_iter([$($($(
-					(
-						$crate::macro_internals_access_cx::ComponentType {
-							universe: $crate::macro_internals_access_cx::TypeId::of::<$universe>(),
-							component: $crate::macro_internals_access_cx::TypeId::of::<$component>(),
-						},
-						$crate::macro_internals_access_cx::ComponentTypeNames {
-							universe: <$universe as $crate::macro_internals_access_cx::UniversePrivate>::DEF_LOC,
-							component: $crate::macro_internals_access_cx::type_name::<$component>(),
-						},
-						$crate::macro_internals_access_cx::access_cx!(@__decode_kw_as_enum $kw),
-					),
-				)*)*)?]);
+            fn iter_access() -> Self::AccessIter {
+                let iter = $crate::macro_internals_access_cx::IntoIterator::into_iter([$($($(
+                    (
+                        $crate::macro_internals_access_cx::ComponentType {
+                            universe: $crate::macro_internals_access_cx::TypeId::of::<$universe>(),
+                            component: $crate::macro_internals_access_cx::TypeId::of::<$component>(),
+                        },
+                        $crate::macro_internals_access_cx::ComponentTypeNames {
+                            universe: <$universe as $crate::macro_internals_access_cx::UniversePrivate>::DEF_LOC,
+                            component: $crate::macro_internals_access_cx::type_name::<$component>(),
+                        },
+                        $crate::macro_internals_access_cx::access_cx!(@__decode_kw_as_enum $kw),
+                    ),
+                )*)*)?]);
 
-				$($(
-					let iter = $crate::macro_internals_access_cx::Iterator::chain(
-						iter,
-						<dyn $inherits as $crate::macro_internals_access_cx::IterableAccessTrait>::iter_access(),
-					);
-				)*)?
+                $($(
+                    let iter = $crate::macro_internals_access_cx::Iterator::chain(
+                        iter,
+                        <dyn $inherits as $crate::macro_internals_access_cx::IterableAccessTrait>::iter_access(),
+                    );
+                )*)?
 
-				iter
-			}
-		}
-	)*};
+                iter
+            }
+        }
+    )*};
     (
-		$(
-			$($kw:ident $component:ty),* $(,)?
-			: $universe:ty
-		),* $(,)?
+        $(
+            $($kw:ident $component:ty),* $(,)?
+            : $universe:ty
+        ),* $(,)?
 
-		$(; $($inherits:path),*$(,)?)?
-	) => {
-		impl ?Sized
-			$($(+ $inherits)*)?
-			$($(+ $crate::macro_internals_access_cx::Private<
-					$crate::macro_internals_access_cx::access_cx!(@__decode_kw $kw),
-					$universe,
-					$component,
-			>)*)*
-	};
-	(@__decode_kw ref) => { $crate::macro_internals_access_cx::Immutable };
-	(@__decode_kw mut) => { $crate::macro_internals_access_cx::Mutable };
-	(@__decode_kw_as_enum ref) => { $crate::macro_internals_access_cx::Mutability::Immutable };
-	(@__decode_kw_as_enum mut) => { $crate::macro_internals_access_cx::Mutability::Mutable };
-	(@__decode_kw $other:ident) => {
-		$crate::macro_internals_access_cx::compile_error!($crate::macro_internals_access_cx::concat!(
-			"Unknown mutability marker `",
-			$crate::macro_internals_access_cx::stringify!($other),
-			"`. Expected `mut` or `ref`.",
-		));
-	}
+        $(; $($inherits:path),*$(,)?)?
+    ) => {
+        impl ?Sized
+            $($(+ $inherits)*)?
+            $($(+ $crate::macro_internals_access_cx::Private<
+                    $crate::macro_internals_access_cx::access_cx!(@__decode_kw $kw),
+                    $universe,
+                    $component,
+            >)*)*
+    };
+    (@__decode_kw ref) => { $crate::macro_internals_access_cx::Immutable };
+    (@__decode_kw mut) => { $crate::macro_internals_access_cx::Mutable };
+    (@__decode_kw_as_enum ref) => { $crate::macro_internals_access_cx::Mutability::Immutable };
+    (@__decode_kw_as_enum mut) => { $crate::macro_internals_access_cx::Mutability::Mutable };
+    (@__decode_kw $other:ident) => {
+        $crate::macro_internals_access_cx::compile_error!($crate::macro_internals_access_cx::concat!(
+            "Unknown mutability marker `",
+            $crate::macro_internals_access_cx::stringify!($other),
+            "`. Expected `mut` or `ref`.",
+        ));
+    }
 }
 
 // === Proc === //
@@ -475,27 +475,27 @@ pub mod macro_internals_proc {
 #[macro_export]
 macro_rules! proc {
     (
-		as $in_collection:ty[$in_collection_cx:expr] do
-		$(
-			(
-				$access_cx_name:ident: [
-					$(
-						$($access_kw:ident $access_component:ty),* $(,)?
-						: $access_universe:ty
-					),* $(,)?
+        as $in_collection:ty[$in_collection_cx:expr] do
+        $(
+            (
+                $access_cx_name:ident: [
+                    $(
+                        $($access_kw:ident $access_component:ty),* $(,)?
+                        : $access_universe:ty
+                    ),* $(,)?
 
-					$(; $($access_inherits:path),*$(,)?)?
-				],
-				$collection_cx_name:ident: [
-					$($out_collection:ty),*$(,)?
-				]
-				$(,)?
-			) {
-				$($body:tt)*
-			}
-			$(,)?
-		)*
-	) => {
+                    $(; $($access_inherits:path),*$(,)?)?
+                ],
+                $collection_cx_name:ident: [
+                    $($out_collection:ty),*$(,)?
+                ]
+                $(,)?
+            ) {
+                $($body:tt)*
+            }
+            $(,)?
+        )*
+    ) => {
         let mut __input = {
             use $crate::macro_internals_proc::CanCallCollectionExt as _;
 
@@ -505,64 +505,64 @@ macro_rules! proc {
             )
         };
 
-		$($crate::macro_internals_proc::partial_shadow! {
-			$access_cx_name, $collection_cx_name;
+        $($crate::macro_internals_proc::partial_shadow! {
+            $access_cx_name, $collection_cx_name;
 
-			let ($access_cx_name, $collection_cx_name) = {
-				// Define a trait describing the set of components we're acquiring.
-				$crate::macro_internals_proc::access_cx! {
-					trait ProcAccess$(: $($access_inherits),*)? = $(
-						$($access_kw $access_component),*
-						: $access_universe
-					),*;
-				};
+            let ($access_cx_name, $collection_cx_name) = {
+                // Define a trait describing the set of components we're acquiring.
+                $crate::macro_internals_proc::access_cx! {
+                    trait ProcAccess$(: $($access_inherits),*)? = $(
+                        $($access_kw $access_component),*
+                        : $access_universe
+                    ),*;
+                };
 
-				// Define a registration method
-				$crate::macro_internals_proc::cond! {
-					if not(macro($crate::macro_internals_proc::IS_STATIC_VALIDATION_DISABLED)) {
-						#[$crate::macro_internals_proc::distributed_slice($crate::macro_internals_proc::PROCEDURE_REGISTRARS)]
-						static __THIS_PROCEDURE: fn(&mut $crate::macro_internals_proc::Validator) = |validator| {
-							validator.add_procedure(
-								/* collection: */ (
-									$crate::macro_internals_proc::TypeId::of::<$in_collection>(),
-									<$in_collection as $crate::macro_internals_proc::ProcCollectionPrivate>::DEF_LOC,
-								),
-								/* my_path: */ $crate::macro_internals_proc::concat!(
-									$crate::macro_internals_proc::file!(),
-									":",
-									$crate::macro_internals_proc::line!(),
-									":",
-									$crate::macro_internals_proc::column!(),
-								),
-								/* borrows: */ <dyn ProcAccess as $crate::macro_internals_proc::IterableAccessTrait>::iter_access(),
-								/* calls: */ [$((
-									$crate::macro_internals_proc::TypeId::of::<$out_collection>(),
-									<$out_collection as $crate::macro_internals_proc::ProcCollectionPrivate>::DEF_LOC,
-								)),*],
-							);
-						};
-					}
-				}
+                // Define a registration method
+                $crate::macro_internals_proc::cond! {
+                    if not(macro($crate::macro_internals_proc::IS_STATIC_VALIDATION_DISABLED)) {
+                        #[$crate::macro_internals_proc::distributed_slice($crate::macro_internals_proc::PROCEDURE_REGISTRARS)]
+                        static __THIS_PROCEDURE: fn(&mut $crate::macro_internals_proc::Validator) = |validator| {
+                            validator.add_procedure(
+                                /* collection: */ (
+                                    $crate::macro_internals_proc::TypeId::of::<$in_collection>(),
+                                    <$in_collection as $crate::macro_internals_proc::ProcCollectionPrivate>::DEF_LOC,
+                                ),
+                                /* my_path: */ $crate::macro_internals_proc::concat!(
+                                    $crate::macro_internals_proc::file!(),
+                                    ":",
+                                    $crate::macro_internals_proc::line!(),
+                                    ":",
+                                    $crate::macro_internals_proc::column!(),
+                                ),
+                                /* borrows: */ <dyn ProcAccess as $crate::macro_internals_proc::IterableAccessTrait>::iter_access(),
+                                /* calls: */ [$((
+                                    $crate::macro_internals_proc::TypeId::of::<$out_collection>(),
+                                    <$out_collection as $crate::macro_internals_proc::ProcCollectionPrivate>::DEF_LOC,
+                                )),*],
+                            );
+                        };
+                    }
+                }
 
-				// Fetch the tokens
-				fn get_token<'a, C>(_input: &'a mut $crate::macro_internals_proc::CanCallCollectionTyProof<'_, C>) -> (
-					&'a mut impl ProcAccess,
-					&'a mut $crate::macro_internals_proc::call_cx![$($out_collection),*],
-				)
-				where
-					C: $crate::macro_internals_proc::ProcCollection,
-				{
-					(
-						$crate::macro_internals_proc::DangerousGlobalAccessToken::new(),
-						$crate::macro_internals_proc::DangerousGlobalAccessToken::new(),
-					)
-				}
+                // Fetch the tokens
+                fn get_token<'a, C>(_input: &'a mut $crate::macro_internals_proc::CanCallCollectionTyProof<'_, C>) -> (
+                    &'a mut impl ProcAccess,
+                    &'a mut $crate::macro_internals_proc::call_cx![$($out_collection),*],
+                )
+                where
+                    C: $crate::macro_internals_proc::ProcCollection,
+                {
+                    (
+                        $crate::macro_internals_proc::DangerousGlobalAccessToken::new(),
+                        $crate::macro_internals_proc::DangerousGlobalAccessToken::new(),
+                    )
+                }
 
-				get_token(&mut __input)
-			};
+                get_token(&mut __input)
+            };
 
-			$($body)*
-		})*
+            $($body)*
+        })*
     };
 }
 

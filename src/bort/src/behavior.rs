@@ -89,292 +89,292 @@ pub mod delegate_macro_internal {
 
 #[macro_export]
 macro_rules! delegate {
-	// === With injector === //
-	(
-		$(#[$attr_meta:meta])*
-		$vis:vis fn $name:ident
-			$(
-				<$($generic:ident),* $(,)?>
-				$(<$($fn_lt:lifetime),* $(,)?>)?
-			)?
-			(
-				&$inj_lt:lifetime self [$($inj_name:ident: $inj:ty),* $(,)?]
-				$(, $para_name:ident: $para:ty)* $(,)?
-			) $(-> $ret:ty)?
-		$(as deriving $deriving:path $({ $($deriving_args:tt)* })? )*
-		$(where $($where_token:tt)*)?
-	) => {
-		$crate::behavior::delegate! {
-			$(#[$attr_meta])*
-			$vis fn $name
-				< $($($generic),*)? >
-				< $inj_lt, $($($($fn_lt),*)?)? >
-				(
-					$($inj_name: $inj,)*
-					$($para_name: $para,)*
-				) $(-> $ret)?
-			$(as deriving $deriving $({ $($deriving_args)* })? )*
-			$(where $($where_token)*)?
-		}
+    // === With injector === //
+    (
+        $(#[$attr_meta:meta])*
+        $vis:vis fn $name:ident
+            $(
+                <$($generic:ident),* $(,)?>
+                $(<$($fn_lt:lifetime),* $(,)?>)?
+            )?
+            (
+                &$inj_lt:lifetime self [$($inj_name:ident: $inj:ty),* $(,)?]
+                $(, $para_name:ident: $para:ty)* $(,)?
+            ) $(-> $ret:ty)?
+        $(as deriving $deriving:path $({ $($deriving_args:tt)* })? )*
+        $(where $($where_token:tt)*)?
+    ) => {
+        $crate::behavior::delegate! {
+            $(#[$attr_meta])*
+            $vis fn $name
+                < $($($generic),*)? >
+                < $inj_lt, $($($($fn_lt),*)?)? >
+                (
+                    $($inj_name: $inj,)*
+                    $($para_name: $para,)*
+                ) $(-> $ret)?
+            $(as deriving $deriving $({ $($deriving_args)* })? )*
+            $(where $($where_token)*)?
+        }
 
-		impl$(<$($generic),*>)? $name $(<$($generic),*>)?
-		$(where
-			$($where_token)*
-		)? {
-			#[allow(unused)]
-			pub fn new_method_ref<Injector, Receiver, Func>(_injector: Injector, handler: Func) -> Self
-			where
-				Injector: 'static + $crate::behavior::delegate_macro_internal::FuncMethodInjectorRefGetGuard<Receiver>,
-				Injector: $crate::behavior::delegate_macro_internal::FuncMethodInjectorRef<
-					Receiver,
-					Injector = for<
-						$inj_lt
-						$($(
-							$(,$fn_lt)*
-						)?)?
-					> fn(
-						&$inj_lt (),
-						$(&mut $inj),*
-					) -> Injector::GuardHelper<$inj_lt>>,
-				Receiver: ?Sized + 'static,
-				Func: 'static
-					+ $crate::behavior::delegate_macro_internal::Send
-					+ $crate::behavior::delegate_macro_internal::Sync
-					+ for<$inj_lt $($( $(,$fn_lt)* )?)?> Fn(
-						&Receiver,
-						$($inj,)*
-						$($para,)*
-					) $(-> $ret)?,
-			{
-				Self::new(move |$(mut $inj_name,)* $($para_name,)*| {
-					let guard = Injector::INJECTOR(&(), $(&mut $inj_name,)*);
+        impl$(<$($generic),*>)? $name $(<$($generic),*>)?
+        $(where
+            $($where_token)*
+        )? {
+            #[allow(unused)]
+            pub fn new_method_ref<Injector, Receiver, Func>(_injector: Injector, handler: Func) -> Self
+            where
+                Injector: 'static + $crate::behavior::delegate_macro_internal::FuncMethodInjectorRefGetGuard<Receiver>,
+                Injector: $crate::behavior::delegate_macro_internal::FuncMethodInjectorRef<
+                    Receiver,
+                    Injector = for<
+                        $inj_lt
+                        $($(
+                            $(,$fn_lt)*
+                        )?)?
+                    > fn(
+                        &$inj_lt (),
+                        $(&mut $inj),*
+                    ) -> Injector::GuardHelper<$inj_lt>>,
+                Receiver: ?Sized + 'static,
+                Func: 'static
+                    + $crate::behavior::delegate_macro_internal::Send
+                    + $crate::behavior::delegate_macro_internal::Sync
+                    + for<$inj_lt $($( $(,$fn_lt)* )?)?> Fn(
+                        &Receiver,
+                        $($inj,)*
+                        $($para,)*
+                    ) $(-> $ret)?,
+            {
+                Self::new(move |$(mut $inj_name,)* $($para_name,)*| {
+                    let guard = Injector::INJECTOR(&(), $(&mut $inj_name,)*);
 
-					handler(&*guard, $($inj_name,)* $($para_name,)*)
-				})
-			}
+                    handler(&*guard, $($inj_name,)* $($para_name,)*)
+                })
+            }
 
-			#[allow(unused)]
-			pub fn new_method_mut<Injector, Receiver, Func>(_injector: Injector, handler: Func) -> Self
-			where
-				Injector: 'static + $crate::behavior::delegate_macro_internal::FuncMethodInjectorMutGetGuard<Receiver>,
-				Injector: $crate::behavior::delegate_macro_internal::FuncMethodInjectorMut<
-					Receiver,
-					Injector = for<
-						$inj_lt
-						$($(
-							$(,$fn_lt)*
-						)?)?
-					> fn(
-						&$inj_lt (),
-						$(&mut $inj),*
-					) -> Injector::GuardHelper<$inj_lt>>,
-				Receiver: ?Sized + 'static,
-				Func: 'static
-					+ $crate::behavior::delegate_macro_internal::Send
-					+ $crate::behavior::delegate_macro_internal::Sync
-					+ for<$inj_lt $($( $(,$fn_lt)* )?)?> Fn(
-						&mut Receiver,
-						$($inj,)*
-						$($para,)*
-					) $(-> $ret)?,
-			{
-				Self::new(move |$(mut $inj_name,)* $($para_name,)*| {
-					let mut guard = Injector::INJECTOR(&(), $(&mut $inj_name,)*);
+            #[allow(unused)]
+            pub fn new_method_mut<Injector, Receiver, Func>(_injector: Injector, handler: Func) -> Self
+            where
+                Injector: 'static + $crate::behavior::delegate_macro_internal::FuncMethodInjectorMutGetGuard<Receiver>,
+                Injector: $crate::behavior::delegate_macro_internal::FuncMethodInjectorMut<
+                    Receiver,
+                    Injector = for<
+                        $inj_lt
+                        $($(
+                            $(,$fn_lt)*
+                        )?)?
+                    > fn(
+                        &$inj_lt (),
+                        $(&mut $inj),*
+                    ) -> Injector::GuardHelper<$inj_lt>>,
+                Receiver: ?Sized + 'static,
+                Func: 'static
+                    + $crate::behavior::delegate_macro_internal::Send
+                    + $crate::behavior::delegate_macro_internal::Sync
+                    + for<$inj_lt $($( $(,$fn_lt)* )?)?> Fn(
+                        &mut Receiver,
+                        $($inj,)*
+                        $($para,)*
+                    ) $(-> $ret)?,
+            {
+                Self::new(move |$(mut $inj_name,)* $($para_name,)*| {
+                    let mut guard = Injector::INJECTOR(&(), $(&mut $inj_name,)*);
 
-					handler(&mut *guard, $($inj_name,)* $($para_name,)*)
-				})
-			}
-		}
-	};
+                    handler(&mut *guard, $($inj_name,)* $($para_name,)*)
+                })
+            }
+        }
+    };
 
-	// === Without injector === //
-	(
-		$(#[$attr_meta:meta])*
-		$vis:vis fn $name:ident
-			$(
-				<$($generic:ident),* $(,)?>
-				$(<$($fn_lt:lifetime),* $(,)?>)?
-			)?
-			($($para_name:ident: $para:ty),* $(,)?) $(-> $ret:ty)?
-		$(as deriving $deriving:path $({ $($deriving_args:tt)* })? )*
-		$(where $($where_token:tt)*)?
-	) => {
-		$(#[$attr_meta])*
-		$vis struct $name $(<$($generic),*>)?
-		$(where
-			$($where_token)*
-		)? {
-			_ty: ($($($crate::behavior::delegate_macro_internal::PhantomData<fn() -> $generic>,)*)?),
-			handler: $crate::behavior::delegate_macro_internal::Arc<
-				dyn
-					$($(for<$($fn_lt),*>)?)?
-					Fn($($para),*) $(-> $ret)? +
-						$crate::behavior::delegate_macro_internal::Send +
-						$crate::behavior::delegate_macro_internal::Sync
-			>,
-		}
+    // === Without injector === //
+    (
+        $(#[$attr_meta:meta])*
+        $vis:vis fn $name:ident
+            $(
+                <$($generic:ident),* $(,)?>
+                $(<$($fn_lt:lifetime),* $(,)?>)?
+            )?
+            ($($para_name:ident: $para:ty),* $(,)?) $(-> $ret:ty)?
+        $(as deriving $deriving:path $({ $($deriving_args:tt)* })? )*
+        $(where $($where_token:tt)*)?
+    ) => {
+        $(#[$attr_meta])*
+        $vis struct $name $(<$($generic),*>)?
+        $(where
+            $($where_token)*
+        )? {
+            _ty: ($($($crate::behavior::delegate_macro_internal::PhantomData<fn() -> $generic>,)*)?),
+            handler: $crate::behavior::delegate_macro_internal::Arc<
+                dyn
+                    $($(for<$($fn_lt),*>)?)?
+                    Fn($($para),*) $(-> $ret)? +
+                        $crate::behavior::delegate_macro_internal::Send +
+                        $crate::behavior::delegate_macro_internal::Sync
+            >,
+        }
 
-		impl$(<$($generic),*>)? $name $(<$($generic),*>)?
-		$(where
-			$($where_token)*
-		)? {
-			#[allow(unused)]
-			pub fn new<Func>(handler: Func) -> Self
-			where
-				Func: 'static +
-					$crate::behavior::delegate_macro_internal::Send +
-					$crate::behavior::delegate_macro_internal::Sync +
-					$($(for<$($fn_lt),*>)?)?
-						Fn($($para),*) $(-> $ret)?,
-			{
-				Self {
-					_ty: ($($($crate::behavior::delegate_macro_internal::PhantomData::<fn() -> $generic>,)*)?),
-					handler: $crate::behavior::delegate_macro_internal::Arc::new(handler),
-				}
-			}
-		}
+        impl$(<$($generic),*>)? $name $(<$($generic),*>)?
+        $(where
+            $($where_token)*
+        )? {
+            #[allow(unused)]
+            pub fn new<Func>(handler: Func) -> Self
+            where
+                Func: 'static +
+                    $crate::behavior::delegate_macro_internal::Send +
+                    $crate::behavior::delegate_macro_internal::Sync +
+                    $($(for<$($fn_lt),*>)?)?
+                        Fn($($para),*) $(-> $ret)?,
+            {
+                Self {
+                    _ty: ($($($crate::behavior::delegate_macro_internal::PhantomData::<fn() -> $generic>,)*)?),
+                    handler: $crate::behavior::delegate_macro_internal::Arc::new(handler),
+                }
+            }
+        }
 
-		impl<
-			Func: 'static +
-				$crate::behavior::delegate_macro_internal::Send +
-				$crate::behavior::delegate_macro_internal::Sync +
-				$($(for<$($fn_lt),*>)?)?
-					Fn($($para),*) $(-> $ret)?
-			$(, $($generic),*)?
-		> $crate::behavior::delegate_macro_internal::From<Func> for $name $(<$($generic),*>)?
-		$(where
-			$($where_token)*
-		)? {
-			fn from(handler: Func) -> Self {
-				Self::new(handler)
-			}
-		}
+        impl<
+            Func: 'static +
+                $crate::behavior::delegate_macro_internal::Send +
+                $crate::behavior::delegate_macro_internal::Sync +
+                $($(for<$($fn_lt),*>)?)?
+                    Fn($($para),*) $(-> $ret)?
+            $(, $($generic),*)?
+        > $crate::behavior::delegate_macro_internal::From<Func> for $name $(<$($generic),*>)?
+        $(where
+            $($where_token)*
+        )? {
+            fn from(handler: Func) -> Self {
+                Self::new(handler)
+            }
+        }
 
-		impl$(<$($generic),*>)? $crate::behavior::delegate_macro_internal::Deref for $name $(<$($generic),*>)?
-		$(where
-			$($where_token)*
-		)? {
-			type Target = dyn $($(for<$($fn_lt),*>)?)? Fn($($para),*) $(-> $ret)? +
-				$crate::behavior::delegate_macro_internal::Send +
-				$crate::behavior::delegate_macro_internal::Sync;
+        impl$(<$($generic),*>)? $crate::behavior::delegate_macro_internal::Deref for $name $(<$($generic),*>)?
+        $(where
+            $($where_token)*
+        )? {
+            type Target = dyn $($(for<$($fn_lt),*>)?)? Fn($($para),*) $(-> $ret)? +
+                $crate::behavior::delegate_macro_internal::Send +
+                $crate::behavior::delegate_macro_internal::Sync;
 
-			fn deref(&self) -> &Self::Target {
-				&*self.handler
-			}
-		}
+            fn deref(&self) -> &Self::Target {
+                &*self.handler
+            }
+        }
 
-		impl<$($($($fn_lt,)*)? $($generic: 'static,)*)?> $crate::behavior::delegate_macro_internal::Dispatchable<($($para,)*)> for $name $(<$($generic),*>)?
-		$(where
-			$($where_token)*
-		)? {
-			type Output = $crate::behavior::delegate!(@__internal_or_unit $($ret)?);
+        impl<$($($($fn_lt,)*)? $($generic: 'static,)*)?> $crate::behavior::delegate_macro_internal::Dispatchable<($($para,)*)> for $name $(<$($generic),*>)?
+        $(where
+            $($where_token)*
+        )? {
+            type Output = $crate::behavior::delegate!(@__internal_or_unit $($ret)?);
 
-			fn dispatch(&self, ($($para_name,)*): ($($para,)*)) -> Self::Output {
-				self($($para_name,)*)
-			}
-		}
+            fn dispatch(&self, ($($para_name,)*): ($($para,)*)) -> Self::Output {
+                self($($para_name,)*)
+            }
+        }
 
-		impl$(<$($generic),*>)? $crate::behavior::delegate_macro_internal::fmt::Debug for $name $(<$($generic),*>)?
-		$(where
-			$($where_token)*
-		)? {
-			fn fmt(&self, fmt: &mut $crate::behavior::delegate_macro_internal::fmt::Formatter) -> $crate::behavior::delegate_macro_internal::fmt::Result {
-				fmt.write_str("delegate::")?;
-				fmt.write_str($crate::behavior::delegate_macro_internal::stringify!($name))?;
-				fmt.write_str("(")?;
-				$(
-					fmt.write_str($crate::behavior::delegate_macro_internal::stringify!($para))?;
-				)*
-				fmt.write_str(")")?;
+        impl$(<$($generic),*>)? $crate::behavior::delegate_macro_internal::fmt::Debug for $name $(<$($generic),*>)?
+        $(where
+            $($where_token)*
+        )? {
+            fn fmt(&self, fmt: &mut $crate::behavior::delegate_macro_internal::fmt::Formatter) -> $crate::behavior::delegate_macro_internal::fmt::Result {
+                fmt.write_str("delegate::")?;
+                fmt.write_str($crate::behavior::delegate_macro_internal::stringify!($name))?;
+                fmt.write_str("(")?;
+                $(
+                    fmt.write_str($crate::behavior::delegate_macro_internal::stringify!($para))?;
+                )*
+                fmt.write_str(")")?;
 
-				Ok(())
-			}
-		}
+                Ok(())
+            }
+        }
 
-		impl$(<$($generic),*>)? $crate::behavior::delegate_macro_internal::Clone for $name $(<$($generic),*>)?
-		$(where
-			$($where_token)*
-		)? {
-			fn clone(&self) -> Self {
-				Self {
-					_ty: ($($($crate::behavior::delegate_macro_internal::PhantomData::<fn() -> $generic>,)*)?),
-					handler: $crate::behavior::delegate_macro_internal::Clone::clone(&self.handler),
-				}
-			}
-		}
+        impl$(<$($generic),*>)? $crate::behavior::delegate_macro_internal::Clone for $name $(<$($generic),*>)?
+        $(where
+            $($where_token)*
+        )? {
+            fn clone(&self) -> Self {
+                Self {
+                    _ty: ($($($crate::behavior::delegate_macro_internal::PhantomData::<fn() -> $generic>,)*)?),
+                    handler: $crate::behavior::delegate_macro_internal::Clone::clone(&self.handler),
+                }
+            }
+        }
 
-		$crate::behavior::delegate! {
-			@__internal_forward_derives
+        $crate::behavior::delegate! {
+            @__internal_forward_derives
 
-			$(#[$attr_meta])*
-			$vis fn $name
-				$(
-					<$($generic,)*>
-					$(<$($fn_lt,)*>)?
-				)?
-				($($para_name: $para,)*) $(-> $ret)?
-			$(as deriving $deriving $({ $($deriving_args)* })? )*
-			$(where $($where_token)*)?
-		}
-	};
+            $(#[$attr_meta])*
+            $vis fn $name
+                $(
+                    <$($generic,)*>
+                    $(<$($fn_lt,)*>)?
+                )?
+                ($($para_name: $para,)*) $(-> $ret)?
+            $(as deriving $deriving $({ $($deriving_args)* })? )*
+            $(where $($where_token)*)?
+        }
+    };
 
-	// === Helpers === //
-	(
-		@__internal_forward_derives
+    // === Helpers === //
+    (
+        @__internal_forward_derives
 
-		$(#[$attr_meta:meta])*
-		$vis:vis fn $name:ident
-			$(
-				<$($generic:ident),* $(,)?>
-				$(<$($fn_lt:lifetime),* $(,)?>)?
-			)?
-			($($para_name:ident: $para:ty),* $(,)?) $(-> $ret:ty)?
-		as deriving $first_deriving:path $({ $($first_deriving_args:tt)* })?
-		$(as deriving $next_deriving:path $({ $($next_deriving_args:tt)* })? )*
-		$(where $($where_token:tt)*)?
-	) => {
-		$first_deriving! {
-			args { $($($first_deriving_args)*)? }
+        $(#[$attr_meta:meta])*
+        $vis:vis fn $name:ident
+            $(
+                <$($generic:ident),* $(,)?>
+                $(<$($fn_lt:lifetime),* $(,)?>)?
+            )?
+            ($($para_name:ident: $para:ty),* $(,)?) $(-> $ret:ty)?
+        as deriving $first_deriving:path $({ $($first_deriving_args:tt)* })?
+        $(as deriving $next_deriving:path $({ $($next_deriving_args:tt)* })? )*
+        $(where $($where_token:tt)*)?
+    ) => {
+        $first_deriving! {
+            args { $($($first_deriving_args)*)? }
 
-			$(#[$attr_meta])*
-			$vis fn $name
-				$(
-					<$($generic,)*>
-					$(<$($fn_lt,)*>)?
-				)?
-				($($para_name: $para,)*) $(-> $ret)?
-			$(where $($where_token)*)?
-		}
+            $(#[$attr_meta])*
+            $vis fn $name
+                $(
+                    <$($generic,)*>
+                    $(<$($fn_lt,)*>)?
+                )?
+                ($($para_name: $para,)*) $(-> $ret)?
+            $(where $($where_token)*)?
+        }
 
-		$crate::behavior::delegate! {
-			@__internal_forward_derives
+        $crate::behavior::delegate! {
+            @__internal_forward_derives
 
-			$(#[$attr_meta])*
-			$vis fn $name
-				$(
-					<$($generic,)*>
-					$(<$($fn_lt,)*>)?
-				)?
-				($($para_name: $para,)*) $(-> $ret)?
-			$(as deriving $next_deriving $({ $($next_deriving_args)* })?)*
-			$(where $($where_token)*)?
-		}
-	};
-	(
-		@__internal_forward_derives
+            $(#[$attr_meta])*
+            $vis fn $name
+                $(
+                    <$($generic,)*>
+                    $(<$($fn_lt,)*>)?
+                )?
+                ($($para_name: $para,)*) $(-> $ret)?
+            $(as deriving $next_deriving $({ $($next_deriving_args)* })?)*
+            $(where $($where_token)*)?
+        }
+    };
+    (
+        @__internal_forward_derives
 
-		$(#[$attr_meta:meta])*
-		$vis:vis fn $name:ident
-			$(
-				<$($generic:ident),* $(,)?>
-				$(<$($fn_lt:lifetime),* $(,)?>)?
-			)?
-			($($para_name:ident: $para:ty),* $(,)?) $(-> $ret:ty)?
-		$(where $($where_token:tt)*)?
-	) => { /* base case */};
+        $(#[$attr_meta:meta])*
+        $vis:vis fn $name:ident
+            $(
+                <$($generic:ident),* $(,)?>
+                $(<$($fn_lt:lifetime),* $(,)?>)?
+            )?
+            ($($para_name:ident: $para:ty),* $(,)?) $(-> $ret:ty)?
+        $(where $($where_token:tt)*)?
+    ) => { /* base case */};
 
-	(@__internal_or_unit $ty:ty) => { $ty };
-	(@__internal_or_unit) => { () };
+    (@__internal_or_unit $ty:ty) => { $ty };
+    (@__internal_or_unit) => { () };
 }
 
 pub use delegate;
@@ -424,38 +424,38 @@ pub mod behavior_kind_macro_internals {
 
 #[macro_export]
 macro_rules! behavior_kind {
-	($(
-		$(#[$meta:meta])*
-		$vis:vis $name:ident of $delegate:ty $(;)?
-	)*) => {$(
-		$(#[$meta])*
-		$vis struct $name { _marker: () }
+    ($(
+        $(#[$meta:meta])*
+        $vis:vis $name:ident of $delegate:ty $(;)?
+    )*) => {$(
+        $(#[$meta])*
+        $vis struct $name { _marker: () }
 
-		$crate::behavior::behavior_kind_macro_internals::behavior_kind!(derive $name => $delegate);
-	)*};
-	($(
-		derive $name:path => $delegate:ty  $(;)?
-	)*) => {$(
-		impl $crate::behavior::behavior_kind_macro_internals::BehaviorKind for $name {
-			type Delegate = $name;
-		}
-	)*};
-	(
-		args {}
+        $crate::behavior::behavior_kind_macro_internals::behavior_kind!(derive $name => $delegate);
+    )*};
+    ($(
+        derive $name:path => $delegate:ty  $(;)?
+    )*) => {$(
+        impl $crate::behavior::behavior_kind_macro_internals::BehaviorKind for $name {
+            type Delegate = $name;
+        }
+    )*};
+    (
+        args {}
 
-		$(#[$attr_meta:meta])*
-		$vis:vis fn $name:ident
-			$(
-				<$($generic:ident),* $(,)?>
-				$(<$($fn_lt:lifetime),* $(,)?>)?
-			)?
-			(
-				$($para_name:ident: $para:ty),* $(,)?
-			) $(-> $ret:ty)?
-		$(where $($where_token:tt)*)?
-	) => {
-		$crate::behavior::behavior_kind_macro_internals::behavior_kind!(derive $name => $name);
-	};
+        $(#[$attr_meta:meta])*
+        $vis:vis fn $name:ident
+            $(
+                <$($generic:ident),* $(,)?>
+                $(<$($fn_lt:lifetime),* $(,)?>)?
+            )?
+            (
+                $($para_name:ident: $para:ty),* $(,)?
+            ) $(-> $ret:ty)?
+        $(where $($where_token:tt)*)?
+    ) => {
+        $crate::behavior::behavior_kind_macro_internals::behavior_kind!(derive $name => $name);
+    };
 }
 
 pub use behavior_kind;
@@ -503,7 +503,7 @@ impl BehaviorRegistry {
         self
     }
 
-	pub fn with_combined<B: BehaviorKind<Delegate = B>>(mut self, delegate: B) -> Self {
+    pub fn with_combined<B: BehaviorKind<Delegate = B>>(mut self, delegate: B) -> Self {
         self.register_combined(delegate);
         self
     }
@@ -562,47 +562,47 @@ pub mod behavior_derive_macro_internal {
 
 #[macro_export]
 macro_rules! behavior_delegate {
-	(
-		args {}
+    (
+        args {}
 
-		$(#[$attr_meta:meta])*
-		$vis:vis fn $name:ident
-			$(
-				<$($generic:ident),* $(,)?>
-				$(<$($fn_lt:lifetime),* $(,)?>)?
-			)?
-			(
-				$bhv_name:ident: $bhv_ty:ty
-				$(, $para_name:ident: $para:ty)* $(,)?
-			) $(-> $ret:ty)?
-		$(where $($where_token:tt)*)?
-	) => {
-		impl<$($($($fn_lt,)*)? $($generic: 'static,)*)?> $crate::behavior::behavior_derive_macro_internal::BehaviorDelegate for $name<$($($generic),*)?>
-		$(where $($where_token)*)?
-		{
-			type List = $crate::behavior::behavior_derive_macro_internal::Vec<Self>;
-			type View<'a> = $crate::behavior::behavior_derive_macro_internal::Box<dyn $(for<$($fn_lt,)*>)? Fn($($para),*) + 'a>;
+        $(#[$attr_meta:meta])*
+        $vis:vis fn $name:ident
+            $(
+                <$($generic:ident),* $(,)?>
+                $(<$($fn_lt:lifetime),* $(,)?>)?
+            )?
+            (
+                $bhv_name:ident: $bhv_ty:ty
+                $(, $para_name:ident: $para:ty)* $(,)?
+            ) $(-> $ret:ty)?
+        $(where $($where_token:tt)*)?
+    ) => {
+        impl<$($($($fn_lt,)*)? $($generic: 'static,)*)?> $crate::behavior::behavior_derive_macro_internal::BehaviorDelegate for $name<$($($generic),*)?>
+        $(where $($where_token)*)?
+        {
+            type List = $crate::behavior::behavior_derive_macro_internal::Vec<Self>;
+            type View<'a> = $crate::behavior::behavior_derive_macro_internal::Box<dyn $(for<$($fn_lt,)*>)? Fn($($para),*) + 'a>;
 
-			fn make_list() -> Self::List {
-				$crate::behavior::behavior_derive_macro_internal::Vec::new()
-			}
+            fn make_list() -> Self::List {
+                $crate::behavior::behavior_derive_macro_internal::Vec::new()
+            }
 
-			fn extend_list(self, list: &mut Self::List) {
-				list.push(self);
-			}
+            fn extend_list(self, list: &mut Self::List) {
+                list.push(self);
+            }
 
-			fn view<'a>(
-				bhv: &'a $crate::behavior::behavior_derive_macro_internal::BehaviorRegistry,
-				list: $crate::behavior::behavior_derive_macro_internal::Option<&'a Self::List>,
-			) -> Self::View<'a> {
-				$crate::behavior::behavior_derive_macro_internal::Box::new(move |$($para_name,)*| {
-					for behavior in list.map_or(&[][..], |vec| vec.as_slice()) {
-						behavior(bhv, $($para_name,)*);
-					}
-				})
-			}
-		}
-	};
+            fn view<'a>(
+                bhv: &'a $crate::behavior::behavior_derive_macro_internal::BehaviorRegistry,
+                list: $crate::behavior::behavior_derive_macro_internal::Option<&'a Self::List>,
+            ) -> Self::View<'a> {
+                $crate::behavior::behavior_derive_macro_internal::Box::new(move |$($para_name,)*| {
+                    for behavior in list.map_or(&[][..], |vec| vec.as_slice()) {
+                        behavior(bhv, $($para_name,)*);
+                    }
+                })
+            }
+        }
+    };
 }
 
 pub use behavior_delegate;

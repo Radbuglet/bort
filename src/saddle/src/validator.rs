@@ -171,76 +171,84 @@ impl Validator {
     pub fn validate(&self) -> Result<(), String> {
         // Assuming our graph is a DAG, toposort the collections.
         let Ok(topos) = toposort(&self.graph, None) else {
-			// If the graph is not a DAG, we know that it is invalid since a dependency issue could
-			// be induced by taking the same borrowing edge several times.
-			//
-			// We generate a list of offending collections using "Tarjan's strongly connected components
-			// algorithm." A strongly connected component (or SCC) is a set of nodes in a graph
-			// where each node in the set has a path to another node in that set. We know that
-			// finding the SCCs in a graph is an effective way of finding portions of the graph
-			// containing cycles because:
-			//
-			// 1. If the graph contains a cycle, that cycle will be part of an SCC (although the SCC may
-			//    contain more nodes than just it).
-			// 2. If the graph contains an SCC, within that SCC, we can construct many simple cycles
-			//    by taking any of the paths from any of the nodes to itself.
-			//
-			// Hence, determining SCCs is an effective way of printing out portions of the graph with
-			// offending cycles.
-			//
-			// We decided to list out SCCs rather than simple cycles because, in the worst case scenario,
-			// the number of simple cycles in a graph grows factorially w.r.t the number of vertices.
-			// This is because, in a K^n graph, our cycles would be at least all possible permutations of
-			// those `n` nodes.
-			let sccs = petgraph::algo::tarjan_scc(&self.graph);
-			let mut f = String::new();
-			write!(
-				f,
-				"Failed to validate procedure graph: procedures may be called in a cycle, which could \
-				 cause borrow violations.\n\
-				 \n\
-				 The following procedure collections form cycles:\n\n",
-			).unwrap();
+            // If the graph is not a DAG, we know that it is invalid since a dependency issue could
+            // be induced by taking the same borrowing edge several times.
+            //
+            // We generate a list of offending collections using "Tarjan's strongly connected components
+            // algorithm." A strongly connected component (or SCC) is a set of nodes in a graph
+            // where each node in the set has a path to another node in that set. We know that
+            // finding the SCCs in a graph is an effective way of finding portions of the graph
+            // containing cycles because:
+            //
+            // 1. If the graph contains a cycle, that cycle will be part of an SCC (although the SCC may
+            //    contain more nodes than just it).
+            // 2. If the graph contains an SCC, within that SCC, we can construct many simple cycles
+            //    by taking any of the paths from any of the nodes to itself.
+            //
+            // Hence, determining SCCs is an effective way of printing out portions of the graph with
+            // offending cycles.
+            //
+            // We decided to list out SCCs rather than simple cycles because, in the worst case scenario,
+            // the number of simple cycles in a graph grows factorially w.r.t the number of vertices.
+            // This is because, in a K^n graph, our cycles would be at least all possible permutations of
+            // those `n` nodes.
+            let sccs = petgraph::algo::tarjan_scc(&self.graph);
+            let mut f = String::new();
+            write!(
+                f,
+                "Failed to validate procedure graph: procedures may be called in a cycle, which could \
+                 cause borrow violations.\n\
+                 \n\
+                 The following procedure collections form cycles:\n\n",
+            ).unwrap();
 
-			let mut i = 1;
+            let mut i = 1;
 
-			for scc in sccs.into_iter() {
-				// If the SCC is just an individual node without any self-edges, ignore it.
-				if
-					scc.len() == 1 &&
-					!self.graph.edges_directed(scc[0], Direction::Outgoing).any(|edge| edge.source() == edge.target())
-				{
-					continue;
-				}
+            for scc in sccs.into_iter() {
+                // If the SCC is just an individual node without any self-edges, ignore it.
+                if scc.len() == 1
+                    && !self
+                        .graph
+                        .edges_directed(scc[0], Direction::Outgoing)
+                        .any(|edge| edge.source() == edge.target())
+                {
+                    continue;
+                }
 
-				// Otherwise, print out the SCCs nodes and the way they connect to one another.
-				writeln!(f, "Cycle {}:", i).unwrap();
-				i += 1;
+                // Otherwise, print out the SCCs nodes and the way they connect to one another.
+                writeln!(f, "Cycle {}:", i).unwrap();
+                i += 1;
 
-				let scc = scc.into_iter().collect::<FxHashSet<_>>();
+                let scc = scc.into_iter().collect::<FxHashSet<_>>();
 
-				for &collection in &scc {
-					writeln!(f, " - Collection {}, which could call into...", self.graph[collection].my_def).unwrap();
+                for &collection in &scc {
+                    writeln!(
+                        f,
+                        " - Collection {}, which could call into...",
+                        self.graph[collection].my_def
+                    )
+                    .unwrap();
 
-					for caller in self.graph.edges_directed(collection, Direction::Outgoing) {
-						if !scc.contains(&caller.target()) {
-							continue;
-						}
+                    for caller in self.graph.edges_directed(collection, Direction::Outgoing) {
+                        if !scc.contains(&caller.target()) {
+                            continue;
+                        }
 
-						writeln!(
-							f,
-							"    - Collection {} using the procedure defined at {}",
-							self.graph[caller.target()].my_def,
-							caller.weight().def_path,
-						).unwrap();
-					}
-				}
+                        writeln!(
+                            f,
+                            "    - Collection {} using the procedure defined at {}",
+                            self.graph[caller.target()].my_def,
+                            caller.weight().def_path,
+                        )
+                        .unwrap();
+                    }
+                }
 
-				writeln!(f).unwrap();
-			}
+                writeln!(f).unwrap();
+            }
 
-			return Err(f);
-		};
+            return Err(f);
+        };
 
         // Working in topological order, we populate the set of all components which could possibly
         // be borrowed when a collection is called.
@@ -265,7 +273,9 @@ impl Validator {
 
                 for (&req_ty, &req_mut) in &procedure.borrows {
                     // If the request is compatible with the PBS, ignore it.
-                    let Some(pre_mut) = pbs.get(&req_ty) else { continue };
+                    let Some(pre_mut) = pbs.get(&req_ty) else {
+                        continue;
+                    };
 
                     if pre_mut.is_compatible_with(req_mut) {
                         return;
@@ -276,12 +286,12 @@ impl Validator {
                     writeln!(
                         f,
                         "The procedure in collection {} defined at {} borrows component {} in universe {} {} even though it may have already been borrowed {}.",
-						self.validator.graph[node].my_def,
-						procedure.def_path,
-						comp_name.component,
-						comp_name.universe,
-						req_mut.adjective(),
-						pre_mut.adjective(),
+                        self.validator.graph[node].my_def,
+                        procedure.def_path,
+                        comp_name.component,
+                        comp_name.universe,
+                        req_mut.adjective(),
+                        pre_mut.adjective(),
                     )
                     .unwrap();
 
@@ -304,16 +314,18 @@ impl Validator {
                                 .borrows
                                 .get(&desired_comp)
                                 .filter(|v| !v.is_compatible_with(desired_mut))
-							else { continue };
+                            else {
+                                continue;
+                            };
 
                             writeln!(
-								f,
-								"{}- The procedure in collection {} defined at {} may have called it while holding the component {}.",
-								Indent(indent),
-								validator.graph[caller.source()].my_def,
-								caller.weight().def_path,
-								caller_mut.adjective(),
-							)
+                                f,
+                                "{}- The procedure in collection {} defined at {} may have called it while holding the component {}.",
+                                Indent(indent),
+                                validator.graph[caller.source()].my_def,
+                                caller.weight().def_path,
+                                caller_mut.adjective(),
+                            )
                             .unwrap();
                         }
 
@@ -330,16 +342,18 @@ impl Validator {
                             let Some(&caller_mut) = potentially_borrowed[caller.index()]
                                 .get(&desired_comp)
                                 .filter(|v| !v.is_compatible_with(desired_mut))
-							else { continue };
+                            else {
+                                continue;
+                            };
 
                             writeln!(
                                 f,
                                 "{}- The collection {} may have called it while an ancestor was holding the component {}.\n\
-								 {}  Hint: the following procedures may have been responsible for the aforementioned call...",
+                                 {}  Hint: the following procedures may have been responsible for the aforementioned call...",
                                 Indent(indent),
                                 validator.graph[caller].my_def,
                                 caller_mut.adjective(),
-								Indent(indent),
+                                Indent(indent),
                             )
                             .unwrap();
 

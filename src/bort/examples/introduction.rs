@@ -58,7 +58,7 @@ fn main() {
 
     fn greeter_system(on_enter_home: &mut VecEventList<EnterHomeEvent>) {
         query! {
-            for (_event in *on_enter_home; ref name in GlobalTag::<Name>) {
+            for (_event in on_enter_home; ref name in GlobalTag::<Name>) {
                 println!("A person with the name {} just entered my home!", name.0);
             }
         }
@@ -70,7 +70,7 @@ fn main() {
         tracker: &mut u32,
     ) {
         query! {
-            for (_event in *on_enter_home;) + [in_world] {
+            for (_event in on_enter_home) + [in_world] {
                 *tracker += 1;
             }
         }

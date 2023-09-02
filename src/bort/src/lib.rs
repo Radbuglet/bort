@@ -28,7 +28,9 @@ pub mod prelude {
             NamespacedQueryHandler,
         },
         entity::{storage, CompMut, CompRef, Entity, OwnedEntity, Storage},
-        event::{EventTarget, ProcessableEventList, QueryableEventList, VecEventList},
+        event::{
+            CountingEvent, EventTarget, ProcessableEventList, QueryableEventList, VecEventList,
+        },
         obj::{Obj, OwnedObj},
         query::{
             flush, query, GlobalTag, GlobalVirtualTag, HasGlobalManagedTag, HasGlobalVirtualTag,

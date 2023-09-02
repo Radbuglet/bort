@@ -280,7 +280,7 @@ impl<T> NOptRefCell<T> {
             Err(err) => {
                 panic!(
                     "Failed to release NOptRefCell from namespace {:?}; dynamic borrows are still \
-				     ongoing: {err}",
+                     ongoing: {err}",
                     self.namespace(),
                 );
             }

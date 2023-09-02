@@ -359,7 +359,7 @@ impl MainThreadToken {
         assert!(
             try_become_main_thread(),
             "Attempted to {attempted_verb} on non-main thread. See the \"multi-threading\"
-			 section of the module documentation for details.",
+             section of the module documentation for details.",
         );
 
         &Self {
@@ -445,8 +445,8 @@ impl ParallelTokenSource {
         match self.borrows().entry((NamedTypeId::of::<T>(), None)) {
             HashMapEntry::Occupied(mut entry) => {
                 let (rc, Some(owner)) = entry.get_mut() else {
-					unreachable!();
-				};
+                    unreachable!();
+                };
 
                 // Validate thread ID
                 let ty_name = type_name::<T>();
@@ -456,7 +456,7 @@ impl ParallelTokenSource {
                     owner.id(),
                     current.id(),
                     "Cannot acquire a `TypeExclusiveToken<{ty_name}>` to a type already acquired by
-					 the thread {owner:?} (current thread: {current:?})",
+                     the thread {owner:?} (current thread: {current:?})",
                 );
 
                 // Increment rc
@@ -534,9 +534,10 @@ impl<T: ?Sized + 'static> Drop for TypeExclusiveToken<'_, T> {
     fn drop(&mut self) {
         if let Some(session) = self.session {
             let mut borrows = session.borrows();
-            let HashMapEntry::Occupied(mut entry) = borrows.entry((NamedTypeId::of::<T>(), None)) else {
-				unreachable!()
-			};
+            let HashMapEntry::Occupied(mut entry) = borrows.entry((NamedTypeId::of::<T>(), None))
+            else {
+                unreachable!()
+            };
 
             let (rc, _) = entry.get_mut();
             *rc -= 1;
@@ -590,9 +591,10 @@ impl<T: ?Sized + 'static> Clone for TypeSharedToken<'_, T> {
 impl<T: ?Sized + 'static> Drop for TypeSharedToken<'_, T> {
     fn drop(&mut self) {
         let mut borrows = self.session.borrows();
-        let HashMapEntry::Occupied(mut entry) = borrows.entry((NamedTypeId::of::<T>(), None)) else {
-			unreachable!()
-		};
+        let HashMapEntry::Occupied(mut entry) = borrows.entry((NamedTypeId::of::<T>(), None))
+        else {
+            unreachable!()
+        };
 
         let (rc, _) = entry.get_mut();
         *rc += 1;
