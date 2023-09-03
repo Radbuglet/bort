@@ -406,14 +406,37 @@ pub trait BehaviorKind: Sized + 'static {
 }
 
 pub trait BehaviorDelegate: Sized {
-    type List: 'static + Send + Sync;
+    type List: BehaviorList;
     type View<'a>;
 
-    fn make_list() -> Self::List;
-
-    fn extend_list(self, list: &mut Self::List);
-
     fn view<'a>(bhv: &'a BehaviorRegistry, list: Option<&'a Self::List>) -> Self::View<'a>;
+}
+
+pub trait BehaviorList: 'static + Send + Sync + Default {
+    type Element;
+    type ElementIter<'a>: Iterator<Item = &'a Self::Element>;
+
+    fn iter(&self) -> Self::ElementIter<'_>;
+}
+
+pub trait BehaviorListExtendElement<L: BehaviorList> {
+    fn push_to(self, list: &mut L);
+}
+
+// Standard behavior lists
+impl<D: 'static + Send + Sync> BehaviorList for Vec<D> {
+    type Element = D;
+    type ElementIter<'a> = std::slice::Iter<'a, D>;
+
+    fn iter(&self) -> Self::ElementIter<'_> {
+        self.as_slice().iter()
+    }
+}
+
+impl<D: 'static + Send + Sync> BehaviorListExtendElement<Vec<D>> for D {
+    fn push_to(self, list: &mut Vec<D>) {
+        list.push(self);
+    }
 }
 
 // Macro
@@ -472,24 +495,26 @@ impl BehaviorRegistry {
         }
     }
 
-    pub fn register<B: BehaviorKind>(&mut self, delegate: B::Delegate) -> &mut Self {
+    pub fn register<B: BehaviorKind>(
+        &mut self,
+        delegate: impl BehaviorListExtendElement<<B::Delegate as BehaviorDelegate>::List>,
+    ) -> &mut Self {
         let own_registry = self
             .behaviors
             .entry(NamedTypeId::of::<B>())
-            .or_insert_with(|| {
-                Box::<<B::Delegate as BehaviorDelegate>::List>::new(
-                    <B::Delegate as BehaviorDelegate>::make_list(),
-                )
-            })
+            .or_insert_with(|| Box::<<B::Delegate as BehaviorDelegate>::List>::default())
             .downcast_mut::<<B::Delegate as BehaviorDelegate>::List>()
             .unwrap();
 
-        delegate.extend_list(own_registry);
+        delegate.push_to(own_registry);
 
         self
     }
 
-    pub fn register_combined<B: BehaviorKind<Delegate = B>>(&mut self, delegate: B) -> &mut Self {
+    pub fn register_combined<B>(&mut self, delegate: B) -> &mut Self
+    where
+        B: BehaviorKind<Delegate = B> + BehaviorDelegate + BehaviorListExtendElement<B::List>,
+    {
         self.register::<B>(delegate)
     }
 
@@ -498,12 +523,18 @@ impl BehaviorRegistry {
         self
     }
 
-    pub fn with<B: BehaviorKind>(mut self, delegate: B::Delegate) -> Self {
+    pub fn with<B: BehaviorKind>(
+        mut self,
+        delegate: impl BehaviorListExtendElement<<B::Delegate as BehaviorDelegate>::List>,
+    ) -> Self {
         self.register::<B>(delegate);
         self
     }
 
-    pub fn with_combined<B: BehaviorKind<Delegate = B>>(mut self, delegate: B) -> Self {
+    pub fn with_combined<B>(mut self, delegate: B) -> Self
+    where
+        B: BehaviorKind<Delegate = B> + BehaviorDelegate + BehaviorListExtendElement<B::List>,
+    {
         self.register_combined(delegate);
         self
     }
@@ -546,7 +577,7 @@ impl fmt::Debug for BehaviorRegistry {
 #[doc(hidden)]
 pub mod behavior_derive_macro_internal {
     pub use {
-        super::{BehaviorDelegate, BehaviorRegistry},
+        super::{behavior_delegate, BehaviorDelegate, BehaviorList, BehaviorRegistry},
         crate::event::ProcessableEventList,
         std::{boxed::Box, compile_error, concat, option::Option, stringify, vec::Vec},
     };
@@ -563,7 +594,7 @@ pub mod behavior_derive_macro_internal {
 #[macro_export]
 macro_rules! behavior_delegate {
     (
-        args {}
+        args { $($ty:ty)? }
 
         $(#[$attr_meta:meta])*
         $vis:vis fn $name:ident
@@ -580,29 +611,26 @@ macro_rules! behavior_delegate {
         impl<$($($($fn_lt,)*)? $($generic: 'static,)*)?> $crate::behavior::behavior_derive_macro_internal::BehaviorDelegate for $name<$($($generic),*)?>
         $(where $($where_token)*)?
         {
-            type List = $crate::behavior::behavior_derive_macro_internal::Vec<Self>;
+            type List = $crate::behavior::behavior_derive_macro_internal::behavior_delegate!(
+				@__internal_choose_first $({ $ty })? {$crate::behavior::behavior_derive_macro_internal::Vec<Self>}
+			);
             type View<'a> = $crate::behavior::behavior_derive_macro_internal::Box<dyn $(for<$($fn_lt,)*>)? Fn($($para),*) + 'a>;
-
-            fn make_list() -> Self::List {
-                $crate::behavior::behavior_derive_macro_internal::Vec::new()
-            }
-
-            fn extend_list(self, list: &mut Self::List) {
-                list.push(self);
-            }
 
             fn view<'a>(
                 bhv: &'a $crate::behavior::behavior_derive_macro_internal::BehaviorRegistry,
                 list: $crate::behavior::behavior_derive_macro_internal::Option<&'a Self::List>,
             ) -> Self::View<'a> {
                 $crate::behavior::behavior_derive_macro_internal::Box::new(move |$($para_name,)*| {
-                    for behavior in list.map_or(&[][..], |vec| vec.as_slice()) {
+					let Some(list) = list else { return };
+
+                    for behavior in $crate::behavior::behavior_derive_macro_internal::BehaviorList::iter(list) {
                         behavior(bhv, $($para_name,)*);
                     }
                 })
             }
         }
     };
+	(@__internal_choose_first {$($first:tt)*} $({ $($ignored:ty)* })*) => { $($first)* };
 }
 
 pub use behavior_delegate;
