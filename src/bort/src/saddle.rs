@@ -260,6 +260,7 @@ macro_rules! saddle_delegate {
                 $(<$($fn_lt:lifetime),* $(,)?>)?
             )?
             ($($para_name:ident: $para:ty),* $(,)?) $(-> $ret:ty)?
+		$(as list $list:ty)?
         $(as deriving $deriving:path $({ $($deriving_args:tt)* })? )*
         $(where $($where_token:tt)*)?
     ) => {
@@ -276,7 +277,7 @@ macro_rules! saddle_delegate {
                     $($para_name: $para),*
                 ) $(-> $ret)?
             as deriving $crate::saddle::macro_internals_saddle_delegate::behavior_kind
-            as deriving $crate::saddle::macro_internals_saddle_delegate::behavior_delegate
+            as deriving $crate::saddle::macro_internals_saddle_delegate::behavior_delegate { $($list)? }
             as deriving $crate::saddle::macro_internals_saddle_delegate::proc_collection
             $(as deriving $deriving $({ $($deriving_args)* })? )*
             $(where $($where_token)*)?

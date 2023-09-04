@@ -1,5 +1,7 @@
 use std::{hash, marker::PhantomData};
 
+use derive_where::derive_where;
+
 pub type NopHashBuilder = ConstSafeBuildHasherDefault<NoOpHasher>;
 pub type NopHashMap<K, V> = hashbrown::HashMap<K, V, NopHashBuilder>;
 pub type NopHashSet<T> = hashbrown::HashSet<T, NopHashBuilder>;
@@ -8,17 +10,12 @@ pub type FxHashBuilder = ConstSafeBuildHasherDefault<rustc_hash::FxHasher>;
 pub type FxHashMap<K, V> = hashbrown::HashMap<K, V, FxHashBuilder>;
 pub type FxHashSet<T> = hashbrown::HashSet<T, FxHashBuilder>;
 
+#[derive_where(Debug, Copy, Clone, Default)]
 pub struct ConstSafeBuildHasherDefault<T>(PhantomData<fn(T) -> T>);
 
 impl<T> ConstSafeBuildHasherDefault<T> {
     pub const fn new() -> Self {
         Self(PhantomData)
-    }
-}
-
-impl<T> Default for ConstSafeBuildHasherDefault<T> {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

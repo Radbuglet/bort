@@ -9,9 +9,12 @@ use crate::{
     CompMut, CompRef,
 };
 
+use derive_where::derive_where;
+use petgraph::{stable_graph::NodeIndex, Graph};
+
 use std::{
-    any::Any,
-    fmt,
+    any::{Any, TypeId},
+    fmt, hash,
     ops::{Deref, DerefMut},
 };
 
@@ -419,23 +422,143 @@ pub trait BehaviorList: 'static + Send + Sync + Default {
     fn iter(&self) -> Self::ElementIter<'_>;
 }
 
-pub trait BehaviorListExtendElement<L: BehaviorList> {
+pub trait PushToBehaviorList<L: BehaviorList> {
     fn push_to(self, list: &mut L);
 }
 
-// Standard behavior lists
-impl<D: 'static + Send + Sync> BehaviorList for Vec<D> {
+// DAG behavior list
+#[derive(Debug, Clone)]
+#[derive_where(Default)]
+pub struct DagBehaviorList<D, I = BehaviorBarrierId> {
+    graph: Graph<DagGraphNode<D, I>, ()>,
+    id_map: FxHashMap<I, NodeIndex>,
+}
+
+#[derive(Debug, Clone)]
+enum DagGraphNode<D, I> {
+    Terminal(D),
+    NonTerminal { _id: I, delegate: Option<D> },
+}
+
+// TODO: Error handling
+impl<D, I> BehaviorList for DagBehaviorList<D, I>
+where
+    D: 'static + Sync + Send,
+    I: 'static + Sync + Send + Copy + fmt::Debug,
+{
     type Element = D;
-    type ElementIter<'a> = std::slice::Iter<'a, D>;
+    type ElementIter<'a> = DagBehaviorListIter<'a, D, I>;
 
     fn iter(&self) -> Self::ElementIter<'_> {
-        self.as_slice().iter()
+        DagBehaviorListIter {
+            graph: &self.graph,
+            exec_order: petgraph::algo::toposort(&self.graph, None)
+                .unwrap()
+                .into_iter(),
+        }
     }
 }
 
-impl<D: 'static + Send + Sync> BehaviorListExtendElement<Vec<D>> for D {
-    fn push_to(self, list: &mut Vec<D>) {
-        list.push(self);
+#[derive(Debug)]
+pub struct DagBehaviorListIter<'a, D, I> {
+    graph: &'a Graph<DagGraphNode<D, I>, ()>,
+    exec_order: std::vec::IntoIter<NodeIndex>,
+}
+
+impl<'a, D, I> Iterator for DagBehaviorListIter<'a, D, I>
+where
+    I: fmt::Debug,
+{
+    type Item = &'a D;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.exec_order.next().map(|v| match &self.graph[v] {
+            DagGraphNode::Terminal(delegate) => delegate,
+            DagGraphNode::NonTerminal { delegate, .. } => delegate.as_ref().unwrap(),
+        })
+    }
+}
+
+impl<D, I> PushToBehaviorList<DagBehaviorList<D, I>> for D
+where
+    D: 'static + Sync + Send,
+    I: 'static + Sync + Send + Copy + fmt::Debug + Eq + hash::Hash,
+{
+    fn push_to(self, list: &mut DagBehaviorList<D, I>) {
+        list.graph.add_node(DagGraphNode::Terminal(self));
+    }
+}
+
+#[derive(Debug)]
+pub struct DagBehaviorOrdering<D, I, IL> {
+    pub delegate: D,
+    pub id: I,
+    pub deps: IL,
+}
+
+impl<D, I, IL> PushToBehaviorList<DagBehaviorList<D, I>> for DagBehaviorOrdering<D, I, IL>
+where
+    D: 'static + Sync + Send,
+    I: 'static + Sync + Send + Copy + fmt::Debug + Eq + hash::Hash,
+    IL: IntoIterator<Item = I>,
+{
+    fn push_to(self, list: &mut DagBehaviorList<D, I>) {
+        let index = list.graph.add_node(DagGraphNode::NonTerminal {
+            _id: self.id,
+            delegate: Some(self.delegate),
+        });
+        list.id_map.insert(self.id, index);
+
+        for dep in self.deps {
+            let dep_index = *list.id_map.entry(dep).or_insert_with(|| {
+                list.graph.add_node(DagGraphNode::NonTerminal {
+                    _id: self.id,
+                    delegate: None,
+                })
+            });
+
+            list.graph.add_edge(dep_index, index, ());
+        }
+    }
+}
+
+pub trait DagBehaviorOrderingCtorExt: Sized {
+    type Id;
+
+    fn with_ordering<IL>(self, id: Self::Id, deps: IL) -> DagBehaviorOrdering<Self, Self::Id, IL>
+    where
+        IL: IntoIterator<Item = Self::Id>;
+}
+
+impl<D, I> DagBehaviorOrderingCtorExt for D
+where
+    D: BehaviorDelegate<List = DagBehaviorList<D, I>>,
+{
+    type Id = I;
+
+    fn with_ordering<IL>(self, id: Self::Id, deps: IL) -> DagBehaviorOrdering<Self, Self::Id, IL>
+    where
+        IL: IntoIterator<Item = Self::Id>,
+    {
+        DagBehaviorOrdering {
+            delegate: self,
+            id,
+            deps,
+        }
+    }
+}
+
+// DagTypeId
+#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq)]
+pub struct BehaviorBarrierId {
+    id: TypeId,
+}
+
+pub trait BehaviorBarrierMarker: 'static {
+    fn barrier_id() -> BehaviorBarrierId {
+        BehaviorBarrierId {
+            id: TypeId::of::<Self>(),
+        }
     }
 }
 
@@ -497,7 +620,7 @@ impl BehaviorRegistry {
 
     pub fn register<B: BehaviorKind>(
         &mut self,
-        delegate: impl BehaviorListExtendElement<<B::Delegate as BehaviorDelegate>::List>,
+        delegate: impl PushToBehaviorList<<B::Delegate as BehaviorDelegate>::List>,
     ) -> &mut Self {
         let own_registry = self
             .behaviors
@@ -513,7 +636,7 @@ impl BehaviorRegistry {
 
     pub fn register_combined<B>(&mut self, delegate: B) -> &mut Self
     where
-        B: BehaviorKind<Delegate = B> + BehaviorDelegate + BehaviorListExtendElement<B::List>,
+        B: BehaviorKind<Delegate = B> + BehaviorDelegate + PushToBehaviorList<B::List>,
     {
         self.register::<B>(delegate)
     }
@@ -525,7 +648,7 @@ impl BehaviorRegistry {
 
     pub fn with<B: BehaviorKind>(
         mut self,
-        delegate: impl BehaviorListExtendElement<<B::Delegate as BehaviorDelegate>::List>,
+        delegate: impl PushToBehaviorList<<B::Delegate as BehaviorDelegate>::List>,
     ) -> Self {
         self.register::<B>(delegate);
         self
@@ -533,7 +656,7 @@ impl BehaviorRegistry {
 
     pub fn with_combined<B>(mut self, delegate: B) -> Self
     where
-        B: BehaviorKind<Delegate = B> + BehaviorDelegate + BehaviorListExtendElement<B::List>,
+        B: BehaviorKind<Delegate = B> + BehaviorDelegate + PushToBehaviorList<B::List>,
     {
         self.register_combined(delegate);
         self
@@ -577,9 +700,11 @@ impl fmt::Debug for BehaviorRegistry {
 #[doc(hidden)]
 pub mod behavior_derive_macro_internal {
     pub use {
-        super::{behavior_delegate, BehaviorDelegate, BehaviorList, BehaviorRegistry},
+        super::{
+            behavior_delegate, BehaviorDelegate, BehaviorList, BehaviorRegistry, DagBehaviorList,
+        },
         crate::event::ProcessableEventList,
-        std::{boxed::Box, compile_error, concat, option::Option, stringify, vec::Vec},
+        std::{boxed::Box, compile_error, concat, option::Option, stringify},
     };
 
     pub trait FnPointeeInference {
@@ -612,7 +737,9 @@ macro_rules! behavior_delegate {
         $(where $($where_token)*)?
         {
             type List = $crate::behavior::behavior_derive_macro_internal::behavior_delegate!(
-				@__internal_choose_first $({ $ty })? {$crate::behavior::behavior_derive_macro_internal::Vec<Self>}
+				@__internal_choose_first
+					$({ $ty })?
+					{ $crate::behavior::behavior_derive_macro_internal::DagBehaviorList<Self> }
 			);
             type View<'a> = $crate::behavior::behavior_derive_macro_internal::Box<dyn $(for<$($fn_lt,)*>)? Fn($($para),*) + 'a>;
 
@@ -630,7 +757,7 @@ macro_rules! behavior_delegate {
             }
         }
     };
-	(@__internal_choose_first {$($first:tt)*} $({ $($ignored:ty)* })*) => { $($first)* };
+	(@__internal_choose_first {$($first:tt)*} $({ $($ignored:tt)* })*) => { $($first)* };
 }
 
 pub use behavior_delegate;
