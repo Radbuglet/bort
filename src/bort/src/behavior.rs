@@ -427,55 +427,49 @@ pub trait PushToBehaviorList<L: BehaviorList> {
 }
 
 // DAG behavior list
+// TODO: Layer IDs
 #[derive(Debug, Clone)]
 #[derive_where(Default)]
 pub struct DagBehaviorList<D, I = BehaviorBarrierId> {
-    graph: Graph<DagGraphNode<D, I>, ()>,
+    graph: Graph<Option<D>, ()>,
     id_map: FxHashMap<I, NodeIndex>,
 }
 
-#[derive(Debug, Clone)]
-enum DagGraphNode<D, I> {
-    Terminal(D),
-    NonTerminal { _id: I, delegate: Option<D> },
-}
-
-// TODO: Error handling
 impl<D, I> BehaviorList for DagBehaviorList<D, I>
 where
     D: 'static + Sync + Send,
     I: 'static + Sync + Send + Copy + fmt::Debug,
 {
     type Element = D;
-    type ElementIter<'a> = DagBehaviorListIter<'a, D, I>;
+    type ElementIter<'a> = DagBehaviorListIter<'a, D>;
 
     fn iter(&self) -> Self::ElementIter<'_> {
         DagBehaviorListIter {
             graph: &self.graph,
             exec_order: petgraph::algo::toposort(&self.graph, None)
-                .unwrap()
+                .expect("failed to execute behavior: dependency graph contains cycles")
                 .into_iter(),
         }
     }
 }
 
 #[derive(Debug)]
-pub struct DagBehaviorListIter<'a, D, I> {
-    graph: &'a Graph<DagGraphNode<D, I>, ()>,
+pub struct DagBehaviorListIter<'a, D> {
+    graph: &'a Graph<Option<D>, ()>,
     exec_order: std::vec::IntoIter<NodeIndex>,
 }
 
-impl<'a, D, I> Iterator for DagBehaviorListIter<'a, D, I>
-where
-    I: fmt::Debug,
-{
+impl<'a, D> Iterator for DagBehaviorListIter<'a, D> {
     type Item = &'a D;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.exec_order.next().map(|v| match &self.graph[v] {
-            DagGraphNode::Terminal(delegate) => delegate,
-            DagGraphNode::NonTerminal { delegate, .. } => delegate.as_ref().unwrap(),
-        })
+        while let Some(node) = self.exec_order.next() {
+            if let Some(delegate) = &self.graph[node] {
+                return Some(delegate);
+            }
+        }
+
+        None
     }
 }
 
@@ -485,14 +479,14 @@ where
     I: 'static + Sync + Send + Copy + fmt::Debug + Eq + hash::Hash,
 {
     fn push_to(self, list: &mut DagBehaviorList<D, I>) {
-        list.graph.add_node(DagGraphNode::Terminal(self));
+        list.graph.add_node(Some(self));
     }
 }
 
 #[derive(Debug)]
 pub struct DagBehaviorOrdering<D, I, IL> {
     pub delegate: D,
-    pub id: I,
+    pub id: Option<I>,
     pub deps: IL,
 }
 
@@ -503,19 +497,17 @@ where
     IL: IntoIterator<Item = I>,
 {
     fn push_to(self, list: &mut DagBehaviorList<D, I>) {
-        let index = list.graph.add_node(DagGraphNode::NonTerminal {
-            _id: self.id,
-            delegate: Some(self.delegate),
-        });
-        list.id_map.insert(self.id, index);
+        let index = list.graph.add_node(Some(self.delegate));
+
+        if let Some(id) = self.id {
+            list.id_map.insert(id, index);
+        }
 
         for dep in self.deps {
-            let dep_index = *list.id_map.entry(dep).or_insert_with(|| {
-                list.graph.add_node(DagGraphNode::NonTerminal {
-                    _id: self.id,
-                    delegate: None,
-                })
-            });
+            let dep_index = *list
+                .id_map
+                .entry(dep)
+                .or_insert_with(|| list.graph.add_node(None));
 
             list.graph.add_edge(dep_index, index, ());
         }
@@ -525,7 +517,15 @@ where
 pub trait DagBehaviorOrderingCtorExt: Sized {
     type Id;
 
-    fn with_ordering<IL>(self, id: Self::Id, deps: IL) -> DagBehaviorOrdering<Self, Self::Id, IL>
+    fn with_id_and_deps<IL>(
+        self,
+        id: Self::Id,
+        deps: IL,
+    ) -> DagBehaviorOrdering<Self, Self::Id, IL>
+    where
+        IL: IntoIterator<Item = Self::Id>;
+
+    fn with_deps<IL>(self, deps: IL) -> DagBehaviorOrdering<Self, Self::Id, IL>
     where
         IL: IntoIterator<Item = Self::Id>;
 }
@@ -536,13 +536,24 @@ where
 {
     type Id = I;
 
-    fn with_ordering<IL>(self, id: Self::Id, deps: IL) -> DagBehaviorOrdering<Self, Self::Id, IL>
+    fn with_id_and_deps<IL>(self, id: Self::Id, deps: IL) -> DagBehaviorOrdering<Self, Self::Id, IL>
     where
         IL: IntoIterator<Item = Self::Id>,
     {
         DagBehaviorOrdering {
             delegate: self,
-            id,
+            id: Some(id),
+            deps,
+        }
+    }
+
+    fn with_deps<IL>(self, deps: IL) -> DagBehaviorOrdering<Self, Self::Id, IL>
+    where
+        IL: IntoIterator<Item = Self::Id>,
+    {
+        DagBehaviorOrdering {
+            delegate: self,
+            id: None,
             deps,
         }
     }
