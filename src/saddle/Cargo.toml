@@ -8,7 +8,7 @@ cfgenius = "0.1.0"
 derive-where = "1.2.1"
 linkme = "0.3.14"
 partial-scope = { path = "../partial-scope" }
-petgraph = "0.6.3"
+petgraph = "0.6.4"
 rustc-hash = "1.1.0"
 
 [features]
