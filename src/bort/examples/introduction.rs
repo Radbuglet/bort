@@ -99,7 +99,7 @@ fn main() {
     // We begin by declaring a delegate to encapsulate our closure type.
     delegate! {
         fn HomeEnterBehavior(
-            bhv: &BehaviorRegistry,
+            bhv: BehaviorProvider<'_>,
             on_enter_home: &mut VecEventList<EnterHomeEvent>,
             in_world: VirtualTag,
             people_from_this_world: &mut u32,
@@ -164,7 +164,7 @@ fn main() {
 
     delegate! {
         fn PrintAllTheInfo(
-            bhv: &BehaviorRegistry,
+            bhv: BehaviorProvider<'_>,
             call_cx: &mut call_cx![PrintAllTheInfo],
             target: Entity,
         )

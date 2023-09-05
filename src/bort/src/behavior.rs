@@ -10,7 +10,7 @@ use crate::{
 };
 
 use std::{
-    any::Any,
+    any::{Any, TypeId},
     fmt,
     ops::{Deref, DerefMut},
 };
@@ -409,7 +409,7 @@ pub trait BehaviorDelegate: Sized {
     type List: BehaviorList;
     type View<'a>;
 
-    fn view<'a>(bhv: &'a BehaviorRegistry, list: Option<&'a Self::List>) -> Self::View<'a>;
+    fn view<'a>(bhv: BehaviorProvider<'a>, list: Option<&'a Self::List>) -> Self::View<'a>;
 }
 
 pub trait BehaviorList: 'static + Send + Sync + Default {
@@ -483,6 +483,36 @@ macro_rules! behavior_kind {
 
 pub use behavior_kind;
 
+// BehaviorProvider
+#[derive(Copy, Clone)]
+pub struct BehaviorProvider<'a> {
+    raw: &'a (dyn RawBehaviorProvider + 'a),
+}
+
+pub trait RawBehaviorProvider: Send + Sync {
+    fn get_list_untyped(&self, behavior_id: TypeId) -> Option<&(dyn Any + Send + Sync)>;
+}
+
+impl<'a> BehaviorProvider<'a> {
+    pub fn wrap(raw: &'a (dyn RawBehaviorProvider + 'a)) -> Self {
+        Self { raw }
+    }
+
+    pub fn raw(self) -> &'a (dyn RawBehaviorProvider + 'a) {
+        self.raw
+    }
+
+    pub fn get_list<B: BehaviorKind>(self) -> Option<&'a <B::Delegate as BehaviorDelegate>::List> {
+        self.raw
+            .get_list_untyped(TypeId::of::<B>())
+            .map(|list| list.downcast_ref().unwrap())
+    }
+
+    pub fn get<B: BehaviorKind>(self) -> <B::Delegate as BehaviorDelegate>::View<'a> {
+        <B::Delegate as BehaviorDelegate>::view(self, self.get_list::<B>())
+    }
+}
+
 // BehaviorRegistry
 pub struct BehaviorRegistry {
     behaviors: FxHashMap<NamedTypeId, Box<dyn Any + Send + Sync>>,
@@ -544,14 +574,22 @@ impl BehaviorRegistry {
         self
     }
 
-    pub fn get_raw<B: BehaviorKind>(&self) -> Option<&<B::Delegate as BehaviorDelegate>::List> {
-        self.behaviors
-            .get(&NamedTypeId::of::<B>())
-            .map(|list| list.downcast_ref().unwrap())
+    pub fn provider(&self) -> BehaviorProvider {
+        BehaviorProvider::wrap(self)
+    }
+
+    pub fn get_list<B: BehaviorKind>(&self) -> Option<&<B::Delegate as BehaviorDelegate>::List> {
+        self.provider().get_list::<B>()
     }
 
     pub fn get<B: BehaviorKind>(&self) -> <B::Delegate as BehaviorDelegate>::View<'_> {
-        <B::Delegate as BehaviorDelegate>::view(self, self.get_raw::<B>())
+        self.provider().get::<B>()
+    }
+}
+
+impl RawBehaviorProvider for BehaviorRegistry {
+    fn get_list_untyped(&self, behavior_id: TypeId) -> Option<&(dyn Any + Send + Sync)> {
+        self.behaviors.get(&behavior_id).map(|v| &**v)
     }
 }
 
@@ -577,7 +615,7 @@ impl fmt::Debug for BehaviorRegistry {
 #[doc(hidden)]
 pub mod behavior_derive_macro_internal {
     pub use {
-        super::{behavior_delegate, BehaviorDelegate, BehaviorList, BehaviorRegistry},
+        super::{behavior_delegate, BehaviorDelegate, BehaviorList, BehaviorProvider},
         crate::event::ProcessableEventList,
         std::{boxed::Box, compile_error, concat, option::Option, stringify, vec::Vec},
     };
@@ -619,7 +657,7 @@ macro_rules! behavior_delegate {
             type View<'a> = $crate::behavior::behavior_derive_macro_internal::Box<dyn $(for<$($fn_lt,)*>)? Fn($($para),*) + 'a>;
 
             fn view<'a>(
-                bhv: &'a $crate::behavior::behavior_derive_macro_internal::BehaviorRegistry,
+                bhv: $crate::behavior::behavior_derive_macro_internal::BehaviorProvider<'a>,
                 list: $crate::behavior::behavior_derive_macro_internal::Option<&'a Self::List>,
             ) -> Self::View<'a> {
                 $crate::behavior::behavior_derive_macro_internal::Box::new(move |$($para_name,)*| {
@@ -638,18 +676,18 @@ macro_rules! behavior_delegate {
 pub use behavior_delegate;
 
 delegate! {
-    pub fn ContextlessEventHandler<EL>(bhv: &BehaviorRegistry, events: &mut EL)
+    pub fn ContextlessEventHandler<EL>(bhv: BehaviorProvider<'_>, events: &mut EL)
     as deriving behavior_delegate
     where
         EL: ProcessableEventList,
 }
 
 delegate! {
-    pub fn ContextlessQueryHandler(bhv: &BehaviorRegistry)
+    pub fn ContextlessQueryHandler(bhv: BehaviorProvider<'_>)
     as deriving behavior_delegate
 }
 
 delegate! {
-    pub fn NamespacedQueryHandler(bhv: &BehaviorRegistry, namespace: VirtualTag)
+    pub fn NamespacedQueryHandler(bhv: BehaviorProvider<'_>, namespace: VirtualTag)
     as deriving behavior_delegate
 }

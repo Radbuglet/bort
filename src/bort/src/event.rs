@@ -207,7 +207,7 @@ impl<E> CountingEvent<E> {
         had_event
     }
 
-	pub fn take_one_event(&mut self) -> bool {
+    pub fn take_one_event(&mut self) -> bool {
         let had_event = self.has_event();
         self.count -= 1;
         had_event

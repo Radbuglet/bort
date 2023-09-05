@@ -246,7 +246,7 @@ pub use saddle::{validate, DangerousGlobalAccessToken, RootCollectionCallToken};
 pub mod macro_internals_saddle_delegate {
     pub use {
         super::{call_cx, proc_collection},
-        crate::behavior::{behavior_delegate, behavior_kind, delegate, BehaviorRegistry},
+        crate::behavior::{behavior_delegate, behavior_kind, delegate, BehaviorProvider},
     };
 }
 
@@ -272,7 +272,7 @@ macro_rules! saddle_delegate {
                     $(<$($fn_lt),*>)?
                 )?
                 (
-                    bhv: &$crate::saddle::macro_internals_saddle_delegate::BehaviorRegistry,
+                    bhv: $crate::saddle::macro_internals_saddle_delegate::BehaviorProvider,
                     call_cx: &mut $crate::saddle::macro_internals_saddle_delegate::call_cx![$name],
                     $($para_name: $para),*
                 ) $(-> $ret)?
