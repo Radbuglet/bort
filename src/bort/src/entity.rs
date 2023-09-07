@@ -1,5 +1,5 @@
 use std::{
-    any::type_name,
+    any::{type_name, TypeId},
     borrow, fmt, mem,
     num::NonZeroU64,
     ops::{Deref, DerefMut},
@@ -229,6 +229,11 @@ impl Entity {
         storage::<T>().has(self)
     }
 
+    pub fn has_dyn(self, ty: TypeId) -> bool {
+        let token = MainThreadToken::acquire_fmt("check the component list of an entity");
+        DbRoot::get(token).entity_has_component_dyn(token, self.inert, ty)
+    }
+
     pub fn obj<T: 'static>(self) -> Obj<T> {
         Obj::wrap(self)
     }
@@ -409,6 +414,10 @@ impl OwnedEntity {
 
     pub fn has<T: 'static>(&self) -> bool {
         self.entity.has::<T>()
+    }
+
+    pub fn has_dyn(self, ty: TypeId) -> bool {
+        self.entity.has_dyn(ty)
     }
 
     pub fn obj<T: 'static>(&self) -> Obj<T> {

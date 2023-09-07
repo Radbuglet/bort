@@ -272,7 +272,7 @@ macro_rules! saddle_delegate {
                     $(<$($fn_lt),*>)?
                 )?
                 (
-                    bhv: $crate::saddle::macro_internals_saddle_delegate::BehaviorProvider,
+                    bhv: $crate::saddle::macro_internals_saddle_delegate::BehaviorProvider<'_>,
                     call_cx: &mut $crate::saddle::macro_internals_saddle_delegate::call_cx![$name],
                     $($para_name: $para),*
                 ) $(-> $ret)?

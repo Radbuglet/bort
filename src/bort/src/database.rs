@@ -1,5 +1,5 @@
 use std::{
-    any::{type_name, Any},
+    any::{type_name, Any, TypeId},
     cell::RefCell,
     fmt, hash, mem,
     num::NonZeroU64,
@@ -126,6 +126,8 @@ trait DbAnyStorage: fmt::Debug + Sync {
         arch: DbArchetypeRef,
         heap_count: usize,
     );
+
+    fn contains_entity(&self, storage: &'static MainThreadToken, entity: InertEntity) -> bool;
 }
 
 pub type DbStorage<T> = NOptRefCell<DbStorageInner<T>>;
@@ -1064,6 +1066,17 @@ impl DbRoot {
         storage.mappings.get(&entity).map(|mapping| mapping.slot)
     }
 
+    pub fn entity_has_component_dyn(
+        &self,
+        token: &'static MainThreadToken,
+        entity: InertEntity,
+        ty: TypeId,
+    ) -> bool {
+        self.storages
+            .get(&ty)
+            .is_some_and(|storage| storage.contains_entity(token, entity))
+    }
+
     // === Debug === //
 
     pub fn debug_total_spawns(&self) -> u64 {
@@ -1240,6 +1253,10 @@ impl<T: 'static> DbAnyStorage for DbStorage<T> {
         };
 
         heap_list.truncate(heap_count);
+    }
+
+    fn contains_entity(&self, token: &'static MainThreadToken, entity: InertEntity) -> bool {
+        self.borrow(token).mappings.contains_key(&entity)
     }
 }
 

@@ -409,14 +409,17 @@ pub trait BehaviorDelegate: Sized {
     type List: BehaviorList;
     type View<'a>;
 
-    fn view<'a>(bhv: BehaviorProvider<'a>, list: Option<&'a Self::List>) -> Self::View<'a>;
+    fn view<'a>(
+        bhv: BehaviorProvider<'a>,
+        lists: impl IntoIterator<Item = &'a Self::List> + Clone + 'a,
+    ) -> Self::View<'a>;
 }
 
 pub trait BehaviorList: 'static + Send + Sync + Default {
-    type Element;
-    type ElementIter<'a>: Iterator<Item = &'a Self::Element>;
+    type ReifiedItem;
+    type ItemIter<'a>: Iterator<Item = &'a Self::ReifiedItem>;
 
-    fn iter(&self) -> Self::ElementIter<'_>;
+    fn iter(&self) -> Self::ItemIter<'_>;
 }
 
 pub trait PushToBehaviorList<L: BehaviorList> {
@@ -425,10 +428,10 @@ pub trait PushToBehaviorList<L: BehaviorList> {
 
 // Basic implementations
 impl<T: 'static + Send + Sync> BehaviorList for Vec<T> {
-    type Element = T;
-    type ElementIter<'a> = std::slice::Iter<'a, T>;
+    type ReifiedItem = T;
+    type ItemIter<'a> = std::slice::Iter<'a, T>;
 
-    fn iter(&self) -> Self::ElementIter<'_> {
+    fn iter(&self) -> Self::ItemIter<'_> {
         self.as_slice().iter()
     }
 }
@@ -617,7 +620,10 @@ pub mod behavior_derive_macro_internal {
     pub use {
         super::{behavior_delegate, BehaviorDelegate, BehaviorList, BehaviorProvider},
         crate::event::ProcessableEventList,
-        std::{boxed::Box, compile_error, concat, option::Option, stringify, vec::Vec},
+        std::{
+            boxed::Box, clone::Clone, compile_error, concat, iter::IntoIterator, stringify,
+            vec::Vec,
+        },
     };
 
     pub trait FnPointeeInference {
@@ -658,14 +664,17 @@ macro_rules! behavior_delegate {
 
             fn view<'a>(
                 bhv: $crate::behavior::behavior_derive_macro_internal::BehaviorProvider<'a>,
-                list: $crate::behavior::behavior_derive_macro_internal::Option<&'a Self::List>,
+                lists: impl
+					$crate::behavior::behavior_derive_macro_internal::IntoIterator<Item = &'a Self::List>
+					+ $crate::behavior::behavior_derive_macro_internal::Clone
+					+ 'a,
             ) -> Self::View<'a> {
                 $crate::behavior::behavior_derive_macro_internal::Box::new(move |$($para_name,)*| {
-					let Some(list) = list else { return };
-
-                    for behavior in $crate::behavior::behavior_derive_macro_internal::BehaviorList::iter(list) {
-                        behavior(bhv, $($para_name,)*);
-                    }
+					for list in lists.clone() {
+						for behavior in $crate::behavior::behavior_derive_macro_internal::BehaviorList::iter(list) {
+							behavior(bhv, $($para_name,)*);
+						}
+					}
                 })
             }
         }
