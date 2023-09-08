@@ -416,10 +416,12 @@ pub trait BehaviorDelegate: Sized {
 }
 
 pub trait BehaviorList: 'static + Send + Sync + Default {
-    type ReifiedItem;
-    type ItemIter<'a>: Iterator<Item = &'a Self::ReifiedItem>;
+    type ReifiedItem: ?Sized;
 
-    fn iter(&self) -> Self::ItemIter<'_>;
+    fn process<'a>(
+        lists: impl IntoIterator<Item = &'a Self> + Clone,
+        f: impl FnMut(&'a Self::ReifiedItem),
+    );
 }
 
 pub trait PushToBehaviorList<L: BehaviorList> {
@@ -429,10 +431,16 @@ pub trait PushToBehaviorList<L: BehaviorList> {
 // Basic implementations
 impl<T: 'static + Send + Sync> BehaviorList for Vec<T> {
     type ReifiedItem = T;
-    type ItemIter<'a> = std::slice::Iter<'a, T>;
 
-    fn iter(&self) -> Self::ItemIter<'_> {
-        self.as_slice().iter()
+    fn process<'a>(
+        lists: impl IntoIterator<Item = &'a Self> + Clone,
+        mut f: impl FnMut(&'a Self::ReifiedItem),
+    ) {
+        for list in lists {
+            for el in list {
+                f(el);
+            }
+        }
     }
 }
 
@@ -670,11 +678,10 @@ macro_rules! behavior_delegate {
 					+ 'a,
             ) -> Self::View<'a> {
                 $crate::behavior::behavior_derive_macro_internal::Box::new(move |$($para_name,)*| {
-					for list in lists.clone() {
-						for behavior in $crate::behavior::behavior_derive_macro_internal::BehaviorList::iter(list) {
-							behavior(bhv, $($para_name,)*);
-						}
-					}
+					$crate::behavior::behavior_derive_macro_internal::BehaviorList::process(
+						lists.clone(),
+						|delegate: &Self| delegate(bhv, $($para_name,)*)
+					);
                 })
             }
         }
