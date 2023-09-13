@@ -146,68 +146,6 @@ fn main() {
     // Saddle helps check the validity of dynamic dispatches in the behavior registry while still
     // leaving enough flexibility for subsystem components to borrow in the complex ways that they
     // require. Saddle accomplishes this goal as follows:
-    //
-    // 1. Instead of using the `.get()` method, we use the `.get_s()` variants, which take a context
-    //    token proving that a given piece of code is allowed to access a given component type safely.
-    // 2. To get access to a given component token, a method must either be provided that token or
-    //    must acquire the token in a `behavior!` block.
-    // 3. Behavior blocks exist in a "namespace" of other behaviors and define the namespaces they
-    //    themselves are interested in calling into. Namespaces, therefore, can be seen as the set
-    //    of behaviors which could be called upon invoking a dynamic dispatch.
-    // 4. Saddle ensures that everything is safe by ensuring that a behavior can never call into
-    //    another behavior borrowing the same components as it.
-    //
-    // Let's try it out!
 
-    // We begin by defining all the behavior kinds in our app.
-    proc_collection!(pub AppRootBehavior);
-
-    delegate! {
-        fn PrintAllTheInfo(
-            bhv: BehaviorProvider<'_>,
-            call_cx: &mut call_cx![PrintAllTheInfo],
-            target: Entity,
-        )
-        as deriving behavior_delegate
-        as deriving behavior_kind
-        as deriving proc_collection
-    }
-
-    // ...and some implementations to go along.
-    let bhv = BehaviorRegistry::new()
-        .with::<PrintAllTheInfo>(PrintAllTheInfo::new(|_bhv, bhv_cx, target| {
-            proc! {
-                as PrintAllTheInfo[bhv_cx] do
-                (cx: [ref Name], _call_cx: []) {
-                    println!("{target:?} has the name {}", target.get_s::<Name>(cx).0);
-                }
-            }
-        }))
-        .with::<PrintAllTheInfo>(PrintAllTheInfo::new(|_bhv, bhv_cx, target| {
-            proc! {
-                as PrintAllTheInfo[bhv_cx] do
-                (cx: [ref Age], _call_cx: []) {
-                    println!("{target:?} has the age {}", target.get_s::<Age>(cx).0);
-                }
-            }
-        }));
-
-    // Now, we can run our main behavior.
-    let mut root = RootCollectionCallToken::acquire();
-
-    proc! {
-        as AppRootBehavior[root] do
-        // We can borrow the name mutably as much as we want so long as we don't try to call
-        // `PrintAllTheInfo`.
-        (cx: [mut Name], bhv_cx: []) {
-            player.get_mut_s::<Name>(cx).0.push_str(" the Soon-to-be-Logged");
-        }
-        // Here, it is valid to call `PrintAllTheInfo` because our borrows are compatible with the
-        // borrows of all of its implementations.
-        (cx: [], bhv_cx: [PrintAllTheInfo]) {
-            bhv.get::<PrintAllTheInfo>()(bhv_cx.as_dyn_mut(), player.entity());
-        }
-    }
-
-    // TODO: Talk about the implied project organization
+    // TODO
 }

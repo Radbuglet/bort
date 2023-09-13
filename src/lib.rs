@@ -40,14 +40,7 @@ pub mod prelude {
 
     cfgenius::cond! {
         if macro(super::HAS_SADDLE_SUPPORT) {
-            pub use crate::saddle::{
-                ProcCollection, proc_collection,
-                call_cx, CanCallCollection,
-                AccessRef, AccessMut, access_cx,
-                alias, proc,
-                validate, RootCollectionCallToken, DangerousGlobalAccessToken,
-                saddle_delegate,
-            };
+            pub use crate::saddle::{};
         }
     }
 }

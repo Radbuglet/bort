@@ -1,2 +1,37 @@
-[workspace]
-members = ["src/bort", "src/partial-scope", "src/saddle"]
+[package]
+name = "bort"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cfgenius = "0.1.0"
+derive-where = "1.2.1"
+hashbrown = { version = "0.14.0", default-features = false, features = ["raw"] }
+rustc-hash = "1.1.0"
+
+[dependencies.compost2]
+git = "https://github.com/Radbuglet/compost.git"
+rev = "0edbdb14734de95c563d7a5958af948edba45d5b"
+optional = true
+
+[dependencies.saddle]
+git = "https://github.com/Radbuglet/saddle.git"
+rev = "1f7778dff7c16822e546ea80c07fd91c7652dc2f"
+optional = true
+
+[features]
+default = ["saddle"]
+saddle = ["dep:compost2", "dep:saddle"]
+
+[dev-dependencies]
+criterion = "0.5.1"
+fastrand = "2.0.0"  # For "fuzzing"
+glam = "0.24.0"     # For benchmark
+linkme = "0.3.15"
+
+[[bench]]
+name = "access"
+harness = false
+
+[profile.bench]
+lto = "thin"
