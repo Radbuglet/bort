@@ -11,7 +11,7 @@ rustc-hash = "1.1.0"
 
 [dependencies.compost2]
 git = "https://github.com/Radbuglet/compost.git"
-rev = "0edbdb14734de95c563d7a5958af948edba45d5b"
+rev = "a8643f71a7c65cb75851e9af78b07d704b771efd"
 optional = true
 
 [dependencies.saddle]

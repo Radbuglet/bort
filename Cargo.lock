@@ -139,7 +139,7 @@ checksum = "cd7cc57abe963c6d3b9d8be5b06ba7c8957a930305ca90304f24ef040aa6f961"
 [[package]]
 name = "compost2"
 version = "0.1.0"
-source = "git+https://github.com/Radbuglet/compost.git?rev=0edbdb14734de95c563d7a5958af948edba45d5b#0edbdb14734de95c563d7a5958af948edba45d5b"
+source = "git+https://github.com/Radbuglet/compost.git?rev=a8643f71a7c65cb75851e9af78b07d704b771efd#a8643f71a7c65cb75851e9af78b07d704b771efd"
 
 [[package]]
 name = "criterion"
