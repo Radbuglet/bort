@@ -410,7 +410,7 @@ checksum = "0ab1bc2a289d34bd04a330323ac98a1b4bc82c9d9fcb1e66b63caa84da26b575"
 [[package]]
 name = "partial-scope"
 version = "0.1.0"
-source = "git+https://github.com/Radbuglet/saddle.git?rev=1f7778dff7c16822e546ea80c07fd91c7652dc2f#1f7778dff7c16822e546ea80c07fd91c7652dc2f"
+source = "git+https://github.com/Radbuglet/saddle.git?rev=841f6df71b1041b7ac22b045e74ff179922edee5#841f6df71b1041b7ac22b045e74ff179922edee5"
 
 [[package]]
 name = "plotters"
@@ -537,7 +537,7 @@ checksum = "1ad4cc8da4ef723ed60bced201181d83791ad433213d8c24efffda1eec85d741"
 [[package]]
 name = "saddle"
 version = "0.1.0"
-source = "git+https://github.com/Radbuglet/saddle.git?rev=1f7778dff7c16822e546ea80c07fd91c7652dc2f#1f7778dff7c16822e546ea80c07fd91c7652dc2f"
+source = "git+https://github.com/Radbuglet/saddle.git?rev=841f6df71b1041b7ac22b045e74ff179922edee5#841f6df71b1041b7ac22b045e74ff179922edee5"
 dependencies = [
  "partial-scope",
 ]

@@ -5,10 +5,16 @@ use crate::{
     obj::{Obj, OwnedObj},
 };
 
+// === Saddle Integration === //
+
+pub use saddle::{scope, Scope};
+
 // === CxValue === //
 
 mod cx_value_sealed {
     use std::{fmt, marker::PhantomData};
+
+    use saddle::Scope;
 
     pub struct AccessToken<T: 'static>(pub PhantomData<fn() -> T>);
 
@@ -16,21 +22,25 @@ mod cx_value_sealed {
         const SHOULD_FMT: bool;
 
         type Storage;
-        type WithLt<'b>: super::CxValue;
 
         fn new() -> Self::Storage;
 
         fn fmt_value(f: &mut fmt::Formatter) -> fmt::Result;
+
+        fn decl_borrows(s: &impl Scope);
+
+        fn decl_grants(s: &impl Scope);
     }
 }
 
 pub trait CxValue: cx_value_sealed::Sealed {}
 
+pub trait CxValueLt<'a>: CxValue {}
+
 impl cx_value_sealed::Sealed for NoValue {
     const SHOULD_FMT: bool = false;
 
     type Storage = NoValue;
-    type WithLt<'b> = NoValue;
 
     fn new() -> Self::Storage {
         NoValue
@@ -39,15 +49,24 @@ impl cx_value_sealed::Sealed for NoValue {
     fn fmt_value(_f: &mut std::fmt::Formatter) -> std::fmt::Result {
         Ok(())
     }
+
+    fn decl_borrows(s: &impl Scope) {
+        let _ = s;
+    }
+
+    fn decl_grants(s: &impl Scope) {
+        let _ = s;
+    }
 }
 
 impl CxValue for NoValue {}
+
+impl<'a> CxValueLt<'a> for NoValue {}
 
 impl<'a, T: 'static> cx_value_sealed::Sealed for &'a T {
     const SHOULD_FMT: bool = true;
 
     type Storage = &'a cx_value_sealed::AccessToken<T>;
-    type WithLt<'b> = &'b T;
 
     fn new() -> Self::Storage {
         &cx_value_sealed::AccessToken(PhantomData)
@@ -56,15 +75,24 @@ impl<'a, T: 'static> cx_value_sealed::Sealed for &'a T {
     fn fmt_value(f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "&{}", type_name::<T>())
     }
+
+    fn decl_borrows(s: &impl Scope) {
+        s.decl_dep_ref::<cx_value_sealed::AccessToken<T>>();
+    }
+
+    fn decl_grants(s: &impl Scope) {
+        s.decl_grant_ref::<cx_value_sealed::AccessToken<T>>();
+    }
 }
 
 impl<T: 'static> CxValue for &'_ T {}
+
+impl<'a, T: 'static> CxValueLt<'a> for &'a T {}
 
 impl<'a, T: 'static> cx_value_sealed::Sealed for &'a mut T {
     const SHOULD_FMT: bool = true;
 
     type Storage = &'a mut cx_value_sealed::AccessToken<T>;
-    type WithLt<'b> = &'b mut T;
 
     fn new() -> Self::Storage {
         Box::leak(Box::new(cx_value_sealed::AccessToken(PhantomData)))
@@ -73,9 +101,19 @@ impl<'a, T: 'static> cx_value_sealed::Sealed for &'a mut T {
     fn fmt_value(f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "&mut {}", type_name::<T>())
     }
+
+    fn decl_borrows(s: &impl Scope) {
+        s.decl_dep_mut::<cx_value_sealed::AccessToken<T>>();
+    }
+
+    fn decl_grants(s: &impl Scope) {
+        s.decl_grant_mut::<cx_value_sealed::AccessToken<T>>();
+    }
 }
 
 impl<T: 'static> CxValue for &'_ mut T {}
+
+impl<'a, T: 'static> CxValueLt<'a> for &'a mut T {}
 
 // === Cx === //
 
@@ -112,6 +150,94 @@ where
         K::Storage,
         L::Storage,
     >,
+}
+
+impl<'a, A, B, C, D, E, F, G, H, I, J, K, L> Cx<A, B, C, D, E, F, G, H, I, J, K, L>
+where
+    A: CxValueLt<'a>,
+    B: CxValueLt<'a>,
+    C: CxValueLt<'a>,
+    D: CxValueLt<'a>,
+    E: CxValueLt<'a>,
+    F: CxValueLt<'a>,
+    G: CxValueLt<'a>,
+    H: CxValueLt<'a>,
+    I: CxValueLt<'a>,
+    J: CxValueLt<'a>,
+    K: CxValueLt<'a>,
+    L: CxValueLt<'a>,
+{
+    pub fn new(scope: &'a mut impl Scope) -> (&'a mut impl Scope, Self) {
+        scope! { scope:
+            Self::decl_borrows(scope);
+            return (scope, Self::new_unchecked());
+        }
+    }
+}
+
+impl<A, B, C, D, E, F, G, H, I, J, K, L> Cx<A, B, C, D, E, F, G, H, I, J, K, L>
+where
+    A: CxValue,
+    B: CxValue,
+    C: CxValue,
+    D: CxValue,
+    E: CxValue,
+    F: CxValue,
+    G: CxValue,
+    H: CxValue,
+    I: CxValue,
+    J: CxValue,
+    K: CxValue,
+    L: CxValue,
+{
+    pub fn new_unchecked() -> Self {
+        Self {
+            macro_internal_compost_cx: compost2::Cx::from((
+                A::new(),
+                B::new(),
+                C::new(),
+                D::new(),
+                E::new(),
+                F::new(),
+                G::new(),
+                H::new(),
+                I::new(),
+                J::new(),
+                K::new(),
+                L::new(),
+            )),
+        }
+    }
+
+    pub fn decl_borrows(s: &impl Scope) {
+        A::decl_borrows(s);
+        B::decl_borrows(s);
+        C::decl_borrows(s);
+        D::decl_borrows(s);
+        E::decl_borrows(s);
+        F::decl_borrows(s);
+        G::decl_borrows(s);
+        H::decl_borrows(s);
+        I::decl_borrows(s);
+        J::decl_borrows(s);
+        K::decl_borrows(s);
+        L::decl_borrows(s);
+    }
+
+    pub fn decl_grants(s: &impl Scope) {
+        A::decl_grants(s);
+        B::decl_grants(s);
+        C::decl_grants(s);
+        D::decl_grants(s);
+        E::decl_grants(s);
+        F::decl_grants(s);
+        G::decl_grants(s);
+        H::decl_grants(s);
+        I::decl_grants(s);
+        J::decl_grants(s);
+        K::decl_grants(s);
+        L::decl_grants(s);
+    }
 }
 
 impl<A, B, C, D, E, F, G, H, I, J, K, L> fmt::Debug for Cx<A, B, C, D, E, F, G, H, I, J, K, L>
@@ -162,7 +288,22 @@ where
     }
 }
 
-impl<A, B, C, D, E, F, G, H, I, J, K, L> Cx<A, B, C, D, E, F, G, H, I, J, K, L>
+mod any_cx_sealed {
+    pub trait Sealed {}
+}
+
+pub trait AnyCx: fmt::Debug + any_cx_sealed::Sealed {
+    fn new_unchecked() -> Self;
+
+    fn decl_borrows(s: &impl Scope);
+
+    fn decl_grants(s: &impl Scope);
+}
+
+pub trait AnyCxLt<'a>: AnyCx {}
+
+impl<A, B, C, D, E, F, G, H, I, J, K, L> any_cx_sealed::Sealed
+    for Cx<A, B, C, D, E, F, G, H, I, J, K, L>
 where
     A: CxValue,
     B: CxValue,
@@ -177,24 +318,51 @@ where
     K: CxValue,
     L: CxValue,
 {
-    pub fn new() -> Self {
-        Self {
-            macro_internal_compost_cx: compost2::Cx::from((
-                A::new(),
-                B::new(),
-                C::new(),
-                D::new(),
-                E::new(),
-                F::new(),
-                G::new(),
-                H::new(),
-                I::new(),
-                J::new(),
-                K::new(),
-                L::new(),
-            )),
-        }
+}
+
+impl<A, B, C, D, E, F, G, H, I, J, K, L> AnyCx for Cx<A, B, C, D, E, F, G, H, I, J, K, L>
+where
+    A: CxValue,
+    B: CxValue,
+    C: CxValue,
+    D: CxValue,
+    E: CxValue,
+    F: CxValue,
+    G: CxValue,
+    H: CxValue,
+    I: CxValue,
+    J: CxValue,
+    K: CxValue,
+    L: CxValue,
+{
+    fn new_unchecked() -> Self {
+        Self::new_unchecked()
     }
+
+    fn decl_borrows(s: &impl Scope) {
+        Self::decl_borrows(s);
+    }
+
+    fn decl_grants(s: &impl Scope) {
+        Self::decl_grants(s);
+    }
+}
+
+impl<'a, A, B, C, D, E, F, G, H, I, J, K, L> AnyCxLt<'a> for Cx<A, B, C, D, E, F, G, H, I, J, K, L>
+where
+    A: CxValueLt<'a>,
+    B: CxValueLt<'a>,
+    C: CxValueLt<'a>,
+    D: CxValueLt<'a>,
+    E: CxValueLt<'a>,
+    F: CxValueLt<'a>,
+    G: CxValueLt<'a>,
+    H: CxValueLt<'a>,
+    I: CxValueLt<'a>,
+    J: CxValueLt<'a>,
+    K: CxValueLt<'a>,
+    L: CxValueLt<'a>,
+{
 }
 
 // === `cx!` macro === //
@@ -233,7 +401,7 @@ pub mod cx_macro_internals {
 
 #[macro_export]
 macro_rules! cx {
-    (assert_noalias $target:ident) => {{
+    (noalias $target:ident) => {{
 		let binder = $crate::saddle::cx_macro_internals::PhantomData;
 
 		#[allow(unreachable_code)]
@@ -363,6 +531,20 @@ impl<T: 'static> OwnedObj<T> {
     }
 }
 
-// === Procedure Collections === //
+// === ScopeExt === //
 
-// TODO
+pub trait ScopeExt {
+    fn call_with_grant<'a, C: AnyCxLt<'a>, S: Scope>(&'a mut self, cx: C) -> &'a mut S;
+}
+
+impl<SParent: Scope> ScopeExt for SParent {
+    fn call_with_grant<'a, C: AnyCxLt<'a>, SChild: Scope>(&'a mut self, cx: C) -> &'a mut SChild {
+        let _ = cx;
+
+        scope!(SubScope<SParent, SChild>);
+
+        let sub_scope = self.decl_call::<SubScope<SParent, SChild>>();
+        C::decl_grants(sub_scope);
+        sub_scope.decl_call()
+    }
+}
