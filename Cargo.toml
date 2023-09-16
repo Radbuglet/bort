@@ -16,7 +16,7 @@ optional = true
 
 [dependencies.saddle]
 git = "https://github.com/Radbuglet/saddle.git"
-rev = "841f6df71b1041b7ac22b045e74ff179922edee5"
+rev = "6f72169b7ff5dcbea323d4dd0ce58e39cd3b6609"
 optional = true
 
 [features]

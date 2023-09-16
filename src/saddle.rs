@@ -1,6 +1,7 @@
 use std::{any::type_name, fmt, marker::PhantomData};
 
 use crate::{
+    behavior::BehaviorKind,
     entity::{CompMut, CompRef, Entity, OwnedEntity},
     obj::{Obj, OwnedObj},
 };
@@ -8,6 +9,55 @@ use crate::{
 // === Saddle Integration === //
 
 pub use saddle::{scope, Scope};
+
+scope! {
+    pub BehaviorKindScope<Bhv>
+    where { Bhv: BehaviorKind }
+}
+
+#[doc(hidden)]
+pub mod macro_internals_saddle_delegate {
+    pub use {
+        super::BehaviorKindScope,
+        crate::behavior::{behavior_delegate, behavior_kind, delegate, BehaviorProvider},
+    };
+}
+
+#[macro_export]
+macro_rules! saddle_delegate {
+    (
+        $(#[$attr_meta:meta])*
+        $vis:vis fn $name:ident
+            $(
+                <$($generic:ident),* $(,)?>
+                $(<$($fn_lt:lifetime),* $(,)?>)?
+            )?
+            ($($para_name:ident: $para:ty),* $(,)?) $(-> $ret:ty)?
+		$(as list $list:ty)?
+        $(as deriving $deriving:path $({ $($deriving_args:tt)* })? )*
+        $(where $($where_token:tt)*)?
+    ) => {
+        $crate::saddle::macro_internals_saddle_delegate::delegate!(
+            $(#[$attr_meta])*
+            $vis fn $name
+                $(
+                    <$($generic),*>
+                    $(<$($fn_lt),*>)?
+                )?
+                (
+                    bhv: $crate::saddle::macro_internals_saddle_delegate::BehaviorProvider<'_>,
+                    call_cx: &mut $crate::saddle::macro_internals_saddle_delegate::BehaviorKindScope<$name>,
+                    $($para_name: $para),*
+                ) $(-> $ret)?
+            as deriving $crate::saddle::macro_internals_saddle_delegate::behavior_kind
+            as deriving $crate::saddle::macro_internals_saddle_delegate::behavior_delegate { $($list)? }
+            $(as deriving $deriving $({ $($deriving_args)* })? )*
+            $(where $($where_token)*)?
+        );
+    };
+}
+
+pub use saddle_delegate;
 
 // === CxValue === //
 
@@ -412,7 +462,7 @@ macro_rules! cx {
 
 		let duplicate = $crate::saddle::cx_macro_internals::bind_marker(
 			&binder,
-			$crate::saddle::cx_macro_internals::Cx::new(),
+			$crate::saddle::cx_macro_internals::Cx::new_unchecked(),
 		);
 
 		$crate::saddle::cx_macro_internals::Cx {
