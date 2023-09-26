@@ -188,6 +188,9 @@ where
     L: CxValue,
 {
     #[doc(hidden)]
+    pub macro_internal_usability_nub: (),
+
+    #[doc(hidden)]
     pub macro_internal_compost_cx: compost2::Cx<
         A::Storage,
         B::Storage,
@@ -219,11 +222,9 @@ where
     K: CxValueLt<'a>,
     L: CxValueLt<'a>,
 {
-    pub fn new(scope: &'a mut impl Scope) -> (&'a mut impl Scope, Self) {
-        scope! { scope:
-            Self::decl_borrows(scope);
-            return (scope, Self::new_unchecked());
-        }
+    pub fn new<S: Scope>(scope: &'a mut S) -> (&'a mut S, Self) {
+        Self::decl_borrows(scope);
+        return (scope, Self::new_unchecked());
     }
 }
 
@@ -244,6 +245,7 @@ where
 {
     pub fn new_unchecked() -> Self {
         Self {
+            macro_internal_usability_nub: (),
             macro_internal_compost_cx: compost2::Cx::from((
                 A::new(),
                 B::new(),
@@ -461,6 +463,7 @@ macro_rules! cx {
 			loop {}  // This is necessary in case droppable objects depend on borrows of $target.
             $crate::saddle::cx_macro_internals::ensure_is_context(&$target, &binder);
         }
+		let _ = $target.macro_internal_usability_nub;
 
 		let duplicate = $crate::saddle::cx_macro_internals::bind_marker(
 			&binder,
@@ -468,6 +471,7 @@ macro_rules! cx {
 		);
 
 		$crate::saddle::cx_macro_internals::Cx {
+			macro_internal_usability_nub: (),
 			macro_internal_compost_cx: $crate::saddle::cx_macro_internals::compost_cx!(
 				dangerously_specify_place { duplicate.macro_internal_compost_cx },
 			),
@@ -483,7 +487,10 @@ macro_rules! cx {
 			);
         }
 
+		let _ = $target.macro_internal_usability_nub;
+
 		$crate::saddle::cx_macro_internals::Cx {
+			macro_internal_usability_nub: (),
 			macro_internal_compost_cx: $crate::saddle::cx_macro_internals::compost_cx!(
 				dangerously_specify_place { $target.macro_internal_compost_cx },
 			),
