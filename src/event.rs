@@ -1,9 +1,17 @@
-use std::{any::Any, cell::RefCell, fmt, hash, marker::PhantomData, mem, ops::ControlFlow};
+use std::{
+    any::{type_name, Any},
+    cell::RefCell,
+    fmt, hash,
+    marker::PhantomData,
+    mem,
+    ops::ControlFlow,
+};
 
 use derive_where::derive_where;
 
 use crate::{
-    entity::{Entity, OwnedEntity},
+    core::cell::{OptRef, OptRefMut},
+    entity::{CompMut, CompRef, Entity, OwnedEntity},
     query::RawTag,
     util::{
         hash_map::{ConstSafeBuildHasherDefault, FxHashMap},
@@ -31,6 +39,12 @@ where
         self(target.entity(), event, context);
     }
 }
+
+// === SimpleEventTarget === //
+
+pub trait SimpleEventTarget: EventTarget<Self::Event> + QueryableEventList {}
+
+impl<T: EventTarget<T::Event> + QueryableEventList> SimpleEventTarget for T {}
 
 // === QueryableEvent === //
 
@@ -242,5 +256,55 @@ impl<E> ProcessableEventList for CountingEvent<E> {
         self.process_list.get_mut().clear();
         self.count = 0;
         self.owned.clear();
+    }
+}
+
+// === EventGroup === //
+
+pub trait EventGroupMarkerWithSeparated<E> {
+    type List: 'static + SimpleEventTarget<Event = E> + Default;
+}
+
+pub trait EventGroupMarkerWith<L: 'static + SimpleEventTarget + Default>:
+    EventGroupMarkerWithSeparated<L::Event, List = L>
+{
+}
+
+pub struct EventGroup<G: ?Sized> {
+    _ty: PhantomData<fn(G) -> G>,
+    events: OwnedEntity,
+}
+
+impl<G: ?Sized> EventGroup<G> {
+    pub fn new() -> Self {
+        Self {
+            _ty: PhantomData,
+            events: OwnedEntity::new()
+                .with_debug_label(format_args!("EventGroup<{}>", type_name::<G>())),
+        }
+    }
+
+    pub fn get<E>(&self) -> OptRef<'_, G::List>
+    where
+        G: EventGroupMarkerWithSeparated<E>,
+    {
+        CompRef::into_opt_ref(if !self.events.has::<G::List>() {
+            let (_, obj) = self.events.insert_with_obj(<G::List as Default>::default());
+            obj.get()
+        } else {
+            self.events.get()
+        })
+    }
+
+    pub fn get_mut<E>(&self) -> OptRefMut<'_, G::List>
+    where
+        G: EventGroupMarkerWithSeparated<E>,
+    {
+        CompMut::into_opt_ref_mut(if !self.events.has::<G::List>() {
+            let (_, obj) = self.events.insert_with_obj(<G::List as Default>::default());
+            obj.get_mut()
+        } else {
+            self.events.get_mut()
+        })
     }
 }

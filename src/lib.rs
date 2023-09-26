@@ -29,7 +29,8 @@ pub mod prelude {
         },
         entity::{storage, CompMut, CompRef, Entity, OwnedEntity, Storage},
         event::{
-            CountingEvent, EventTarget, ProcessableEventList, QueryableEventList, VecEventList,
+            CountingEvent, EventGroup, EventGroupMarkerWith, EventGroupMarkerWithSeparated,
+            EventTarget, ProcessableEventList, QueryableEventList, VecEventList,
         },
         obj::{Obj, OwnedObj},
         query::{

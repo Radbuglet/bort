@@ -2,7 +2,9 @@ use std::{any::type_name, fmt, marker::PhantomData};
 
 use crate::{
     behavior::BehaviorKind,
+    core::cell::{OptRef, OptRefMut},
     entity::{CompMut, CompRef, Entity, OwnedEntity},
+    event::{EventGroup, EventGroupMarkerWithSeparated},
     obj::{Obj, OwnedObj},
 };
 
@@ -578,6 +580,22 @@ impl<T: 'static> OwnedObj<T> {
     #[track_caller]
     pub fn get_mut_s<'b>(&self, _cx: Cx<&'b mut T>) -> CompMut<'b, T> {
         self.get_mut()
+    }
+}
+
+impl<G: ?Sized> EventGroup<G> {
+    pub fn get_s<'a, E>(&'a self, _cx: Cx<&'a G::List>) -> OptRef<'a, G::List>
+    where
+        G: EventGroupMarkerWithSeparated<E>,
+    {
+        self.get::<E>()
+    }
+
+    pub fn get_mut_s<'a, E>(&'a self, _cx: Cx<&'a mut G::List>) -> OptRefMut<'_, G::List>
+    where
+        G: EventGroupMarkerWithSeparated<E>,
+    {
+        self.get_mut::<E>()
     }
 }
 
