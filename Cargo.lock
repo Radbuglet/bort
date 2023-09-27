@@ -47,6 +47,7 @@ dependencies = [
  "glam",
  "hashbrown",
  "linkme",
+ "partial-scope",
  "rustc-hash",
  "saddle",
 ]

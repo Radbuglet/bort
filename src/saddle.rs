@@ -26,7 +26,6 @@ pub use saddle::Scope;
 
 #[doc(hidden)]
 pub mod scope_macro_internals {
-
     use {
         super::cx_value_sealed::AccessToken,
         crate::entity::{CompMut, CompRef},
@@ -35,7 +34,9 @@ pub mod scope_macro_internals {
 
     pub use {
         super::{scope, Cx},
+        partial_scope::partial_shadow,
         saddle::scope as raw_scope,
+        std::{mem::drop, option::Option},
     };
 
     pub fn bind_scope_lifetime<'a, S: Scope>(scope: &'a mut S) -> (&'a mut S, CompLtLimiter<'a>) {
@@ -98,54 +99,215 @@ macro_rules! scope {
         use let $from:expr => $to:ident
 			$(, inherits [$($grant_kw:ident $grant_ty:ty),*])?
 			$(, access $cx_name:ident: $cx_ty:ty)?
-			$(; $($direct_kw:ident $direct_name:ident $(as $direct_ty:ty)? = $direct_expr:expr),*)?
+			$(, inject {
+				$($direct_kw:ident $direct_name:ident $(as $direct_ty:ty)? = $direct_expr:expr),*
+				$(,)?
+			} as $inject_as:ident)?
 			$(,)?
     ) => {
+		// Define a new saddle scope
 		let $to = $crate::saddle::scope_macro_internals::raw_scope! {
 			use $from $(, inherits $($grant_kw $grant_ty),*)?
 		};
+
+		// Bind a lifetime limiter
 		let ($to, lt_limiter) = $crate::saddle::scope_macro_internals::bind_scope_lifetime($to);
 		let _ = &lt_limiter;
 
+		// Construct a context
 		$(let ($to, $cx_name): (_, $cx_ty) = $crate::saddle::scope_macro_internals::Cx::new($to);)?
 
-		$($(
-			$crate::saddle::scope_macro_internals::scope! {
-				@__acquire_cx lt_limiter $to $direct_kw $direct_name [$($direct_ty)? $direct_name] = $direct_expr
+		// Acquire all our components
+		$(
+			// Define a structure to contain all our borrowed objects.
+			#[allow(unused_mut)]
+			let mut $inject_as = {
+				#[allow(non_camel_case_types)]
+				struct Borrows<$($direct_name),*> {
+					$($direct_name: $crate::saddle::scope_macro_internals::Option<$direct_name>),*
+				}
+
+				Borrows {
+					$($direct_name: $crate::saddle::scope_macro_internals::Option::None),*
+				}
 			};
-		)*)?
+
+			// Add components to it
+			$(
+				$crate::saddle::scope_macro_internals::scope! {
+					@__acquire_cx
+						$inject_as lt_limiter $to
+						$direct_kw $direct_name [$($direct_ty)? $direct_name] = $direct_expr
+				};
+			)*
+		)?
 	};
-    (
+	(
+        use let $from:expr => $to:ident
+			$(, inherits [$($grant_kw:ident $grant_ty:ty),*])?
+			$(, access $cx_name:ident: $cx_ty:ty)?
+			$(, inject {
+				$($direct_kw:ident $direct_name:ident $(as $direct_ty:ty)? = $direct_expr:expr),*
+				$(,)?
+			})?
+			$(,)?
+    ) => {
+		$crate::saddle::scope_macro_internals::scope! {
+			use let $from => $to
+				$(, inherits [$($grant_kw $grant_ty),*])?
+				$(, access $cx_name: $cx_ty)?
+				$(, inject {
+					$($direct_kw $direct_name $(as $direct_ty)? = $direct_expr),*
+				} as injected_bundle)?
+		}
+	};
+	(
         use let $from_and_to:ident
 			$(, inherits [$($grant_kw:ident $grant_ty:ty),*])?
 			$(, access $cx_name:ident: $cx_ty:ty)?
-			$(; $($direct_kw:ident $direct_name:ident $(as $direct_ty:ty)? = $direct_expr:expr),*)?
+			$(, inject {
+				$($direct_kw:ident $direct_name:ident $(as $direct_ty:ty)? = $direct_expr:expr),*
+				$(,)?
+			} $(as $inject_as:ident)?)?
 			$(,)?
     ) => {
 		$crate::saddle::scope_macro_internals::scope! {
 			use let $from_and_to => $from_and_to
 				$(, inherits [$($grant_kw $grant_ty),*])?
 				$(, access $cx_name: $cx_ty)?
-				$(; $($direct_kw $direct_name $(as $direct_ty)? = $direct_expr),*)?
+				$(, inject {
+					$($direct_kw $direct_name $(as $direct_ty)? = $direct_expr),*
+				} $(as $inject_as)?)?
 		}
 	};
 
-	// Internals
-	(@__acquire_cx $limiter:ident $scope:ident oref $direct_name:ident [$first_ty:ty $(, $remaining_ty:ty)*] = $from:expr) => {
-		let $direct_name = $limiter.limit_ref_and_decl($scope, $from.get::<$first_ty>());
+    // Custom scoped
+    (
+        use $from:expr => $to:ident
+			$(, inherits [$($grant_kw:ident $grant_ty:ty),*])?
+			$(, access $cx_name:ident: $cx_ty:ty)?
+			$(, inject {
+				$($direct_kw:ident $direct_name:ident $(as $direct_ty:ty)? = $direct_expr:expr),*
+				$(,)?
+			} as $inject_as:ident)?
+			$(,)?
+		: $($body:tt)*
+    ) => {
+		// Declare variables we'll be smuggling into the semi-open scope.
+		let __internal_to;
+		$(let __internal_cx; { let $cx_name = (); let _ = $cx_name; })?
+		$(let __internal_inject; { let $inject_as = (); let _ = $inject_as; })?
+
+		// Acquire them.
+		{
+			$crate::saddle::scope_macro_internals::scope!(
+				use let $from => $to
+					$(, inherits [$($grant_kw $grant_ty),*])?
+					$(, access $cx_name: $cx_ty)?
+					$(, inject {
+						$($direct_kw $direct_name $(as $direct_ty)? = $direct_expr),*
+					} as $inject_as)?
+			);
+
+			__internal_to = $to;
+			$(__internal_cx = $cx_name;)?
+			$(__internal_inject = $inject_as;)?
+		}
+
+		// Define the semi-open scope.
+		$crate::saddle::scope_macro_internals::partial_shadow! {
+			// Bring them in!
+			$to $(, $cx_name)? $(, $inject_as $(, $direct_name)*)?;
+
+			#[allow(unused)]
+			let $to = __internal_to;
+
+			$(
+				#[allow(unused)]
+				let $cx_name = __internal_cx;
+			)?
+			$(
+				#[allow(unused_mut)]
+				let mut $inject_as = __internal_inject;
+
+				$($crate::saddle::scope_macro_internals::scope!(
+					@__get_out_cx $inject_as $direct_kw $direct_name
+				);)*
+			)?
+
+			// Paste the body.
+			$($body)*
+
+			// Drop the injection context if need be.
+			$($crate::saddle::scope_macro_internals::drop($inject_as);)?
+		}
 	};
-	(@__acquire_cx $scope:ident omut $direct_name:ident [$first_ty:ty $(, $remaining_ty:ty)*] = $from:expr) => {
-		let mut $direct_name = $limiter.limit_mut_and_decl($scope, $from.get_mut::<$first_ty>());
+	(
+        use $from:expr => $to:ident
+			$(, inherits [$($grant_kw:ident $grant_ty:ty),*])?
+			$(, access $cx_name:ident: $cx_ty:ty)?
+			$(, inject {
+				$($direct_kw:ident $direct_name:ident $(as $direct_ty:ty)? = $direct_expr:expr),*
+				$(,)?
+			})?
+			$(,)?
+		: $($body:tt)*
+    ) => {
+		$crate::saddle::scope_macro_internals::scope!(
+			use $from => $to
+				$(, inherits [$($grant_kw $grant_ty),*])?
+				$(, access $cx_name: $cx_ty)?
+				$(, inject {
+					$($direct_kw $direct_name $(as $direct_ty)? = $direct_expr),*
+				} as __internal_injected_bundle)?
+			: $($body)*
+		);
 	};
-	(@__acquire_cx $limiter:ident $scope:ident ref $direct_name:ident [$first_ty:ty $(, $remaining_ty:ty)*] = $from:expr) => {
-		let $direct_name = &*$limiter.limit_ref_and_decl($scope, $from.get::<$first_ty>());
-	};
-	(@__acquire_cx $scope:ident mut $direct_name:ident [$first_ty:ty $(, $remaining_ty:ty)*] = $from:expr) => {
-		let $direct_name = &mut *$limiter.limit_mut_and_decl($scope, $from.get_mut::<$first_ty>());
+	(
+        use $from_and_to:ident
+			$(, inherits [$($grant_kw:ident $grant_ty:ty),*])?
+			$(, access $cx_name:ident: $cx_ty:ty)?
+			$(, inject {
+				$($direct_kw:ident $direct_name:ident $(as $direct_ty:ty)? = $direct_expr:expr),*
+				$(,)?
+			} $(as $inject_as:ident)?)?
+			$(,)?
+		: $($body:tt)*
+    ) => {
+		$crate::saddle::scope_macro_internals::scope!(
+			use $from_and_to => $from_and_to
+				$(, inherits [$($grant_kw $grant_ty),*])?
+				$(, access $cx_name: $cx_ty)?
+				$(, inject {
+					$($direct_kw $direct_name $(as $direct_ty)? = $direct_expr),*
+				} $(as $inject_as)?)?
+			: $($body)*
+		);
 	};
 
-    // Custom scoped
-    // TODO
+	// Internals
+	(@__acquire_cx $inject_as:ident $limiter:ident $scope:ident ref $direct_name:ident [$first_ty:ty $(, $remaining_ty:ty)*] = $from:expr) => {
+		$inject_as.$direct_name = $crate::saddle::scope_macro_internals::Option::Some(
+			$limiter.limit_ref_and_decl($scope, $from.get::<$first_ty>())
+		);
+		#[allow(unused)]
+		let $direct_name = &**$inject_as.$direct_name.as_ref().unwrap();
+	};
+	(@__acquire_cx $inject_as:ident $limiter:ident $scope:ident mut $direct_name:ident [$first_ty:ty $(, $remaining_ty:ty)*] = $from:expr) => {
+		$inject_as.$direct_name = $crate::saddle::scope_macro_internals::Option::Some(
+			$limiter.limit_mut_and_decl($scope, $from.get_mut::<$first_ty>())
+		);
+		#[allow(unused)]
+		let $direct_name = &mut **$inject_as.$direct_name.as_mut().unwrap();
+	};
+	(@__get_out_cx $inject_as:ident ref $direct_name:ident) => {
+		#[allow(unused)]
+		let $direct_name = &**$inject_as.$direct_name.as_ref().unwrap();
+	};
+	(@__get_out_cx $inject_as:ident mut $direct_name:ident) => {
+		#[allow(unused)]
+		let $direct_name = &mut **$inject_as.$direct_name.as_mut().unwrap();
+	};
 }
 
 pub use scope;

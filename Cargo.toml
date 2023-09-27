@@ -19,9 +19,14 @@ git = "https://github.com/Radbuglet/saddle.git"
 rev = "9fd359cbb3597630496e627fcd49578b06518bfc"
 optional = true
 
+[dependencies.partial-scope]
+git = "https://github.com/Radbuglet/saddle.git"
+rev = "9fd359cbb3597630496e627fcd49578b06518bfc"
+optional = true
+
 [features]
 default = ["saddle"]
-saddle = ["dep:compost2", "dep:saddle"]
+saddle = ["dep:compost2", "dep:saddle", "dep:partial-scope"]
 
 [dev-dependencies]
 criterion = "0.5.1"
