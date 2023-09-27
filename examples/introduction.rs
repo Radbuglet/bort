@@ -54,7 +54,7 @@ fn main() {
 
     let mut on_enter_home = VecEventList::new();
 
-    on_enter_home.fire(player.entity(), EnterHomeEvent, ());
+    on_enter_home.fire(player.entity(), EnterHomeEvent);
 
     fn greeter_system(on_enter_home: &mut VecEventList<EnterHomeEvent>) {
         query! {
@@ -127,7 +127,7 @@ fn main() {
         ));
 
     // ...and dispatch them in the same way we had done before.
-    on_enter_home.fire(player.entity(), EnterHomeEvent, ());
+    on_enter_home.fire(player.entity(), EnterHomeEvent);
     bhv.get::<HomeEnterBehavior>()(&mut on_enter_home, in_world, &mut people_from_this_world);
 
     println!(
