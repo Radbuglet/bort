@@ -275,6 +275,12 @@ pub struct EventGroup<G: ?Sized> {
     events: OwnedEntity,
 }
 
+impl<G: ?Sized> Default for EventGroup<G> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<G: ?Sized> EventGroup<G> {
     pub fn new() -> Self {
         Self {
@@ -306,5 +312,18 @@ impl<G: ?Sized> EventGroup<G> {
         } else {
             self.events.get_mut()
         })
+    }
+}
+
+impl<G: ?Sized, E> EventTarget<E> for EventGroup<G>
+where
+    G: EventGroupMarkerWithSeparated<E>,
+{
+    fn fire(&mut self, target: Entity, event: E, context: ()) {
+        self.get_mut::<E>().fire(target, event, context);
+    }
+
+    fn fire_owned(&mut self, target: OwnedEntity, event: E, context: ()) {
+        self.get_mut::<E>().fire_owned(target, event, context);
     }
 }

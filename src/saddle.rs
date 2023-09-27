@@ -102,7 +102,7 @@ macro_rules! scope {
 			$(, inject {
 				$($direct_kw:ident $direct_name:ident $(as $direct_ty:ty)? = $direct_expr:expr),*
 				$(,)?
-			} as $inject_as:ident)?
+			} in $inject_as:ident)?
 			$(,)?
     ) => {
 		// Define a new saddle scope
@@ -158,7 +158,7 @@ macro_rules! scope {
 				$(, access $cx_name: $cx_ty)?
 				$(, inject {
 					$($direct_kw $direct_name $(as $direct_ty)? = $direct_expr),*
-				} as injected_bundle)?
+				} in injected_bundle)?
 		}
 	};
 	(
@@ -168,7 +168,7 @@ macro_rules! scope {
 			$(, inject {
 				$($direct_kw:ident $direct_name:ident $(as $direct_ty:ty)? = $direct_expr:expr),*
 				$(,)?
-			} $(as $inject_as:ident)?)?
+			} $(in $inject_as:ident)?)?
 			$(,)?
     ) => {
 		$crate::saddle::scope_macro_internals::scope! {
@@ -177,7 +177,7 @@ macro_rules! scope {
 				$(, access $cx_name: $cx_ty)?
 				$(, inject {
 					$($direct_kw $direct_name $(as $direct_ty)? = $direct_expr),*
-				} $(as $inject_as)?)?
+				} $(in $inject_as)?)?
 		}
 	};
 
@@ -189,14 +189,14 @@ macro_rules! scope {
 			$(, inject {
 				$($direct_kw:ident $direct_name:ident $(as $direct_ty:ty)? = $direct_expr:expr),*
 				$(,)?
-			} as $inject_as:ident)?
+			})?
 			$(,)?
 		: $($body:tt)*
     ) => {
 		// Declare variables we'll be smuggling into the semi-open scope.
 		let __internal_to;
 		$(let __internal_cx; { let $cx_name = (); let _ = $cx_name; })?
-		$(let __internal_inject; { let $inject_as = (); let _ = $inject_as; })?
+		$(let __internal_inject; $({ let $direct_name = (); let _ = $direct_name; })*)?
 
 		// Acquire them.
 		{
@@ -206,18 +206,18 @@ macro_rules! scope {
 					$(, access $cx_name: $cx_ty)?
 					$(, inject {
 						$($direct_kw $direct_name $(as $direct_ty)? = $direct_expr),*
-					} as $inject_as)?
+					} in __internal_inject_2)?
 			);
 
 			__internal_to = $to;
 			$(__internal_cx = $cx_name;)?
-			$(__internal_inject = $inject_as;)?
+			$(__internal_inject = __internal_inject_2; $({ let $direct_name = (); let _ = $direct_name; })*)?
 		}
 
 		// Define the semi-open scope.
 		$crate::saddle::scope_macro_internals::partial_shadow! {
 			// Bring them in!
-			$to $(, $cx_name)? $(, $inject_as $(, $direct_name)*)?;
+			$to $(, $cx_name)? $($(, $direct_name)*)?;
 
 			#[allow(unused)]
 			let $to = __internal_to;
@@ -227,11 +227,8 @@ macro_rules! scope {
 				let $cx_name = __internal_cx;
 			)?
 			$(
-				#[allow(unused_mut)]
-				let mut $inject_as = __internal_inject;
-
 				$($crate::saddle::scope_macro_internals::scope!(
-					@__get_out_cx $inject_as $direct_kw $direct_name
+					@__get_out_cx __internal_inject $direct_kw $direct_name
 				);)*
 			)?
 
@@ -239,11 +236,14 @@ macro_rules! scope {
 			$($body)*
 
 			// Drop the injection context if need be.
-			$($crate::saddle::scope_macro_internals::drop($inject_as);)?
+			$(
+				$crate::saddle::scope_macro_internals::drop(__internal_inject);
+				$({ let $direct_name = (); let _ = $direct_name; })*
+			)?
 		}
 	};
 	(
-        use $from:expr => $to:ident
+        use $from_and_to:ident
 			$(, inherits [$($grant_kw:ident $grant_ty:ty),*])?
 			$(, access $cx_name:ident: $cx_ty:ty)?
 			$(, inject {
@@ -254,33 +254,12 @@ macro_rules! scope {
 		: $($body:tt)*
     ) => {
 		$crate::saddle::scope_macro_internals::scope!(
-			use $from => $to
-				$(, inherits [$($grant_kw $grant_ty),*])?
-				$(, access $cx_name: $cx_ty)?
-				$(, inject {
-					$($direct_kw $direct_name $(as $direct_ty)? = $direct_expr),*
-				} as __internal_injected_bundle)?
-			: $($body)*
-		);
-	};
-	(
-        use $from_and_to:ident
-			$(, inherits [$($grant_kw:ident $grant_ty:ty),*])?
-			$(, access $cx_name:ident: $cx_ty:ty)?
-			$(, inject {
-				$($direct_kw:ident $direct_name:ident $(as $direct_ty:ty)? = $direct_expr:expr),*
-				$(,)?
-			} $(as $inject_as:ident)?)?
-			$(,)?
-		: $($body:tt)*
-    ) => {
-		$crate::saddle::scope_macro_internals::scope!(
 			use $from_and_to => $from_and_to
 				$(, inherits [$($grant_kw $grant_ty),*])?
 				$(, access $cx_name: $cx_ty)?
 				$(, inject {
 					$($direct_kw $direct_name $(as $direct_ty)? = $direct_expr),*
-				} $(as $inject_as)?)?
+				})?
 			: $($body)*
 		);
 	};
