@@ -84,7 +84,7 @@ macro_rules! scope {
 				$(#[$attr])*
 				$vis $name $(<$($generic),*>)?
 				$(where {$($where)*})?
-			)*
+			);*
 		}
 	};
 
@@ -106,16 +106,21 @@ macro_rules! scope {
 			$(,)?
     ) => {
 		// Define a new saddle scope
+		#[allow(unused)]
 		let $to = $crate::saddle::scope_macro_internals::raw_scope! {
 			use $from $(, inherits $($grant_kw $grant_ty),*)?
 		};
 
 		// Bind a lifetime limiter
+		#[allow(unused)]
 		let ($to, lt_limiter) = $crate::saddle::scope_macro_internals::bind_scope_lifetime($to);
 		let _ = &lt_limiter;
 
 		// Construct a context
-		$(let ($to, $cx_name): (_, $cx_ty) = $crate::saddle::scope_macro_internals::Cx::new($to);)?
+		$(
+			#[allow(unused)]
+			let ($to, $cx_name): (_, $cx_ty) = $crate::saddle::scope_macro_internals::Cx::new($to);
+		)?
 
 		// Acquire all our components
 		$(
@@ -137,7 +142,7 @@ macro_rules! scope {
 				$crate::saddle::scope_macro_internals::scope! {
 					@__acquire_cx
 						$inject_as lt_limiter $to
-						$direct_kw $direct_name [$($direct_ty)? $direct_name] = $direct_expr
+						$direct_kw $direct_name [$($direct_ty, )? $direct_name] = $direct_expr
 				};
 			)*
 		)?
@@ -196,7 +201,10 @@ macro_rules! scope {
 		// Declare variables we'll be smuggling into the semi-open scope.
 		let __internal_to;
 		$(let __internal_cx; { let $cx_name = (); let _ = $cx_name; })?
-		$(let __internal_inject; $({ let $direct_name = (); let _ = $direct_name; })*)?
+		$(
+			#[allow(unused_mut)]
+			let mut __internal_inject; $({ let $direct_name = (); let _ = $direct_name; })*
+		)?
 
 		// Acquire them.
 		{
