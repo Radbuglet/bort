@@ -41,7 +41,7 @@ pub mod prelude {
 
     cfgenius::cond! {
         if macro(super::HAS_SADDLE_SUPPORT) {
-            pub use crate::saddle::{Cx, cx, Scope, ScopeExt, scope, saddle_delegate};
+            pub use crate::saddle::{alias, Cx, cx, Scope, ScopeExt, scope, saddle_delegate};
         }
     }
 }

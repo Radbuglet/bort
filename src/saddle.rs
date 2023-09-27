@@ -8,9 +8,149 @@ use crate::{
     obj::{Obj, OwnedObj},
 };
 
-// === Saddle Integration === //
+// === `alias!` === //
 
-pub use saddle::{scope, Scope};
+#[macro_export]
+macro_rules! alias {
+    ($($vis:vis let $name:ident: $ty:ty);*$(;)?) => {$(
+        #[allow(non_camel_case_types)]
+        $vis type $name = $ty;
+    )*};
+}
+
+pub use alias;
+
+// === `scope!` === //
+
+pub use saddle::Scope;
+
+#[doc(hidden)]
+pub mod scope_macro_internals {
+
+    use {
+        super::cx_value_sealed::AccessToken,
+        crate::entity::{CompMut, CompRef},
+        saddle::Scope,
+    };
+
+    pub use {
+        super::{scope, Cx},
+        saddle::scope as raw_scope,
+    };
+
+    pub fn bind_scope_lifetime<'a, S: Scope>(scope: &'a mut S) -> (&'a mut S, CompLtLimiter<'a>) {
+        (scope, CompLtLimiter { _ty: [] })
+    }
+
+    pub struct CompLtLimiter<'a> {
+        _ty: [&'a (); 0],
+    }
+
+    impl<'a> CompLtLimiter<'a> {
+        pub fn limit_ref_and_decl<T: 'static>(
+            &self,
+            s: &impl Scope,
+            r: CompRef<'static, T>,
+        ) -> CompRef<'a, T> {
+            s.decl_dep_ref::<AccessToken<T>>();
+            r
+        }
+
+        pub fn limit_mut_and_decl<T: 'static>(
+            &self,
+            s: &impl Scope,
+            r: CompMut<'static, T>,
+        ) -> CompMut<'a, T> {
+            s.decl_dep_mut::<AccessToken<T>>();
+            r
+        }
+    }
+}
+
+#[macro_export]
+macro_rules! scope {
+    // Direct forwards
+    (
+        $(
+            $(#[$attr:meta])*
+            $vis:vis $name:ident $(<$($generic:ident),*$(,)?>)?
+			$(where {$($where:tt)*})?
+        );*
+        $(;)?
+    ) => {
+		$crate::saddle::scope_macro_internals::raw_scope! {
+			$(
+				$(#[$attr])*
+				$vis $name $(<$($generic),*>)?
+				$(where {$($where)*})?
+			)*
+		}
+	};
+
+    (use $from:expr $(, inherits $($grant_kw:ident $grant_ty:ty),*$(,)?)?) => {
+		$crate::saddle::scope_macro_internals::raw_scope! {
+			use $from $(, inherits $($grant_kw $grant_ty),*)?
+		}
+	};
+
+    // Custom unscoped
+    (
+        use let $from:expr => $to:ident
+			$(, inherits [$($grant_kw:ident $grant_ty:ty),*])?
+			$(, access $cx_name:ident: $cx_ty:ty)?
+			$(; $($direct_kw:ident $direct_name:ident $(as $direct_ty:ty)? = $direct_expr:expr),*)?
+			$(,)?
+    ) => {
+		let $to = $crate::saddle::scope_macro_internals::raw_scope! {
+			use $from $(, inherits $($grant_kw $grant_ty),*)?
+		};
+		let ($to, lt_limiter) = $crate::saddle::scope_macro_internals::bind_scope_lifetime($to);
+		let _ = &lt_limiter;
+
+		$(let ($to, $cx_name): (_, $cx_ty) = $crate::saddle::scope_macro_internals::Cx::new($to);)?
+
+		$($(
+			$crate::saddle::scope_macro_internals::scope! {
+				@__acquire_cx lt_limiter $to $direct_kw $direct_name [$($direct_ty)? $direct_name] = $direct_expr
+			};
+		)*)?
+	};
+    (
+        use let $from_and_to:ident
+			$(, inherits [$($grant_kw:ident $grant_ty:ty),*])?
+			$(, access $cx_name:ident: $cx_ty:ty)?
+			$(; $($direct_kw:ident $direct_name:ident $(as $direct_ty:ty)? = $direct_expr:expr),*)?
+			$(,)?
+    ) => {
+		$crate::saddle::scope_macro_internals::scope! {
+			use let $from_and_to => $from_and_to
+				$(, inherits [$($grant_kw $grant_ty),*])?
+				$(, access $cx_name: $cx_ty)?
+				$(; $($direct_kw $direct_name $(as $direct_ty)? = $direct_expr),*)?
+		}
+	};
+
+	// Internals
+	(@__acquire_cx $limiter:ident $scope:ident oref $direct_name:ident [$first_ty:ty $(, $remaining_ty:ty)*] = $from:expr) => {
+		let $direct_name = $limiter.limit_ref_and_decl($scope, $from.get::<$first_ty>());
+	};
+	(@__acquire_cx $scope:ident omut $direct_name:ident [$first_ty:ty $(, $remaining_ty:ty)*] = $from:expr) => {
+		let mut $direct_name = $limiter.limit_mut_and_decl($scope, $from.get_mut::<$first_ty>());
+	};
+	(@__acquire_cx $limiter:ident $scope:ident ref $direct_name:ident [$first_ty:ty $(, $remaining_ty:ty)*] = $from:expr) => {
+		let $direct_name = &*$limiter.limit_ref_and_decl($scope, $from.get::<$first_ty>());
+	};
+	(@__acquire_cx $scope:ident mut $direct_name:ident [$first_ty:ty $(, $remaining_ty:ty)*] = $from:expr) => {
+		let $direct_name = &mut *$limiter.limit_mut_and_decl($scope, $from.get_mut::<$first_ty>());
+	};
+
+    // Custom scoped
+    // TODO
+}
+
+pub use scope;
+
+// === `saddle_delegate!` === //
 
 scope! {
     pub BehaviorKindScope<Bhv>
