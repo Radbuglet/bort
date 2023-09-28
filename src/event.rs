@@ -21,21 +21,39 @@ use crate::{
 
 // === EventTarget === //
 
+mod event_target_sealed {
+    pub trait Truthy {
+        type Unit;
+
+        fn make_unit() -> Self::Unit;
+    }
+
+    pub struct IsUnit<T>([T; 0]);
+
+    impl Truthy for IsUnit<()> {
+        type Unit = ();
+
+        fn make_unit() -> Self::Unit {}
+    }
+}
+
+use event_target_sealed::*;
+
 pub trait EventTarget<E, C = ()> {
     fn fire(&mut self, target: Entity, event: E)
     where
-        C: Default,
+        IsUnit<C>: Truthy<Unit = C>,
     {
-        self.fire_cx(target, event, C::default());
+        self.fire_cx(target, event, IsUnit::make_unit());
     }
 
     fn fire_cx(&mut self, target: Entity, event: E, context: C);
 
     fn fire_owned(&mut self, target: OwnedEntity, event: E)
     where
-        C: Default,
+        IsUnit<C>: Truthy<Unit = C>,
     {
-        self.fire_owned_cx(target, event, C::default());
+        self.fire_owned_cx(target, event, IsUnit::make_unit());
     }
 
     fn fire_owned_cx(&mut self, target: OwnedEntity, event: E, context: C);
@@ -158,15 +176,15 @@ impl<E> VecEventList<E> {
     }
 }
 
-impl<E> EventTarget<E> for VecEventList<E> {
-    fn fire_cx(&mut self, target: Entity, event: E, _cx: ()) {
+impl<E, C> EventTarget<E, C> for VecEventList<E> {
+    fn fire_cx(&mut self, target: Entity, event: E, _cx: C) {
         self.events.push((target, event));
     }
 
-    fn fire_owned_cx(&mut self, target: OwnedEntity, event: E, _cx: ()) {
+    fn fire_owned_cx(&mut self, target: OwnedEntity, event: E, cx: C) {
         let (target, target_handle) = target.split_guard();
         self.owned.push(target);
-        self.fire(target_handle, event);
+        self.fire_cx(target_handle, event, cx);
     }
 }
 
@@ -250,12 +268,12 @@ impl<E> CountingEvent<E> {
     }
 }
 
-impl<E> EventTarget<E> for CountingEvent<E> {
-    fn fire_cx(&mut self, _target: Entity, _event: E, _context: ()) {
+impl<E, C> EventTarget<E, C> for CountingEvent<E> {
+    fn fire_cx(&mut self, _target: Entity, _event: E, _cx: C) {
         self.count += 1;
     }
 
-    fn fire_owned_cx(&mut self, target: OwnedEntity, _event: E, _context: ()) {
+    fn fire_owned_cx(&mut self, target: OwnedEntity, _event: E, _cx: C) {
         self.count += 1;
         self.owned.push(target);
     }
@@ -329,15 +347,15 @@ impl<G: ?Sized> EventGroup<G> {
     }
 }
 
-impl<G: ?Sized, E> EventTarget<E> for EventGroup<G>
+impl<G: ?Sized, E, C> EventTarget<E, C> for EventGroup<G>
 where
     G: EventGroupMarkerWithSeparated<E>,
 {
-    fn fire_cx(&mut self, target: Entity, event: E, context: ()) {
-        self.get_mut::<E>().fire_cx(target, event, context);
+    fn fire_cx(&mut self, target: Entity, event: E, _cx: C) {
+        self.get_mut::<E>().fire(target, event);
     }
 
-    fn fire_owned_cx(&mut self, target: OwnedEntity, event: E, context: ()) {
-        self.get_mut::<E>().fire_owned_cx(target, event, context);
+    fn fire_owned_cx(&mut self, target: OwnedEntity, event: E, _cx: C) {
+        self.get_mut::<E>().fire_owned(target, event);
     }
 }

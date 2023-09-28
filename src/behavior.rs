@@ -536,6 +536,12 @@ impl BehaviorRegistry {
         }
     }
 
+    pub fn from_fn(registrar: impl FnOnce(&mut Self)) -> Self {
+        let mut bhv = Self::new();
+        registrar(&mut bhv);
+        bhv
+    }
+
     pub fn register<B: BehaviorKind>(
         &mut self,
         delegate: impl PushToBehaviorList<<B::Delegate as BehaviorDelegate>::List>,
