@@ -1,11 +1,11 @@
 use std::{any::type_name, fmt, marker::PhantomData};
 
 use crate::{
-    behavior::BehaviorKind,
     core::cell::{OptRef, OptRefMut},
     entity::{CompMut, CompRef, Entity, OwnedEntity},
     event::{EventGroup, EventGroupMarkerWithSeparated},
     obj::{Obj, OwnedObj},
+    Behavior,
 };
 
 // === `alias!` === //
@@ -303,14 +303,14 @@ pub use scope;
 
 scope! {
     pub BehaviorKindScope<Bhv>
-    where { Bhv: BehaviorKind }
+    where { Bhv: Behavior }
 }
 
 #[doc(hidden)]
 pub mod macro_internals_saddle_delegate {
     pub use {
         super::BehaviorKindScope,
-        crate::behavior::{behavior_delegate, behavior_kind, delegate, BehaviorProvider},
+        crate::behavior::{behavior, delegate, BehaviorProvider},
     };
 }
 
@@ -340,8 +340,7 @@ macro_rules! saddle_delegate {
                     call_cx: &mut $crate::saddle::macro_internals_saddle_delegate::BehaviorKindScope<$name>,
                     $($para_name: $para),*
                 ) $(-> $ret)?
-            as deriving $crate::saddle::macro_internals_saddle_delegate::behavior_kind
-            as deriving $crate::saddle::macro_internals_saddle_delegate::behavior_delegate { $($list)? }
+            as deriving $crate::saddle::macro_internals_saddle_delegate::behavior { $($list)? }
             $(as deriving $deriving $({ $($deriving_args)* })? )*
             $(where $($where_token)*)?
         );

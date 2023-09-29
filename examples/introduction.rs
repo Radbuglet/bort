@@ -104,23 +104,17 @@ fn main() {
             in_world: VirtualTag,
             people_from_this_world: &mut u32,
         )
-        // This transforms our regular delegate into a delegate which can be called by the behavior
-        // registry.
-        as deriving behavior_delegate
-        // This allows this delegate to become a behavior onto its own. Normally, users must define
-        // a separate marker type declaring a behavior type using a specific delegate but this macro
-        // allows us to define the behavior and the delegate it calls as one and the same.
-        as deriving behavior_kind
+        as deriving behavior
     }
 
     // Now, we can start to register some behaviors.
     let bhv = BehaviorRegistry::new()
-        .with::<HomeEnterBehavior>(HomeEnterBehavior::new(
+        .with(HomeEnterBehavior::new(
             |_bhv, on_enter_home, _in_world, _people_from_this_world| {
                 greeter_system(on_enter_home);
             },
         ))
-        .with::<HomeEnterBehavior>(HomeEnterBehavior::new(
+        .with(HomeEnterBehavior::new(
             |_bhv, on_enter_home, in_world, people_from_this_world| {
                 counter_system(on_enter_home, in_world, people_from_this_world);
             },
@@ -128,7 +122,12 @@ fn main() {
 
     // ...and dispatch them in the same way we had done before.
     on_enter_home.fire(player.entity(), EnterHomeEvent);
-    bhv.get::<HomeEnterBehavior>()(&mut on_enter_home, in_world, &mut people_from_this_world);
+    bhv.get::<HomeEnterBehavior>()(
+        bhv.provider(),
+        &mut on_enter_home,
+        in_world,
+        &mut people_from_this_world,
+    );
 
     println!(
         "People who have now entered my home who are from this world: {}",
