@@ -1,6 +1,7 @@
 use std::{any::type_name, fmt, marker::PhantomData};
 
 use crate::{
+    behavior::PartialEntity,
     core::cell::{OptRef, OptRefMut},
     entity::{CompMut, CompRef, Entity, OwnedEntity},
     event::{EventGroup, EventGroupMarkerWithSeparated},
@@ -302,14 +303,14 @@ pub use scope;
 // === `saddle_delegate!` === //
 
 scope! {
-    pub BehaviorKindScope<Bhv>
+    pub BehaviorScope<Bhv>
     where { Bhv: Behavior }
 }
 
 #[doc(hidden)]
 pub mod macro_internals_saddle_delegate {
     pub use {
-        super::BehaviorKindScope,
+        super::BehaviorScope,
         crate::behavior::{behavior, delegate, BehaviorProvider},
     };
 }
@@ -337,7 +338,7 @@ macro_rules! saddle_delegate {
                 )?
                 (
                     bhv: $crate::saddle::macro_internals_saddle_delegate::BehaviorProvider<'_>,
-                    call_cx: &mut $crate::saddle::macro_internals_saddle_delegate::BehaviorKindScope<$name>,
+                    call_cx: &mut $crate::saddle::macro_internals_saddle_delegate::BehaviorScope<$name>,
                     $($para_name: $para),*
                 ) $(-> $ret)?
             as deriving $crate::saddle::macro_internals_saddle_delegate::behavior { $($list)? }
@@ -891,6 +892,16 @@ impl<G: ?Sized> EventGroup<G> {
         G: EventGroupMarkerWithSeparated<E>,
     {
         self.get_mut::<E>()
+    }
+}
+
+impl PartialEntity<'_> {
+    pub fn get_s<'a, T: 'static>(self, _cx: Cx<&'a T>) -> CompRef<'a, T> {
+        self.get()
+    }
+
+    pub fn get_mut_s<'a, T: 'static>(self, _cx: Cx<&'a mut T>) -> CompMut<'a, T> {
+        self.get_mut()
     }
 }
 

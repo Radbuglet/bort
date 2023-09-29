@@ -9,7 +9,7 @@ use derive_where::derive_where;
 use crate::{
     entity::{CompMut, CompRef, Entity},
     util::{
-        hash_map::{ConstSafeBuildHasherDefault, FxHashMap},
+        hash_map::{ConstSafeBuildHasherDefault, FxHashMap, FxHashSet},
         misc::{MapFmt, NamedTypeId, RawFmt},
     },
 };
@@ -30,9 +30,13 @@ pub trait FuncMethodInjectorMut<T: ?Sized> {
     const INJECTOR: Self::Injector;
 }
 
-// === Dispatchable === //
+// === Delegate Traits === //
 
-pub trait Dispatchable<A> {
+pub trait Delegate: fmt::Debug + Clone + Send + Sync + Deref<Target = Self::DynFn> {
+    type DynFn: ?Sized + Send + Sync;
+}
+
+pub trait Dispatchable<A>: Delegate {
     type Output;
 
     fn dispatch(&self, args: A) -> Self::Output;
@@ -47,7 +51,7 @@ pub mod delegate_macro_internal {
     // === Re-exports === //
 
     pub use {
-        super::{Dispatchable, FuncMethodInjectorMut, FuncMethodInjectorRef},
+        super::{Delegate, Dispatchable, FuncMethodInjectorMut, FuncMethodInjectorRef},
         std::{
             clone::Clone,
             convert::From,
@@ -301,6 +305,16 @@ macro_rules! delegate {
                 }
             }
         }
+
+		impl$(<$($generic),*>)? $crate::behavior::delegate_macro_internal::Delegate for $name $(<$($generic),*>)?
+        $(where
+            $($where_token)*
+        )?
+		{
+			type DynFn = dyn $($(for<$($fn_lt),*>)?)? Fn($($para),*) $(-> $ret)? +
+				$crate::behavior::delegate_macro_internal::Send +
+				$crate::behavior::delegate_macro_internal::Sync;
+		}
 
         $crate::behavior::delegate! {
             @__internal_forward_derives
@@ -585,22 +599,47 @@ pub trait BehaviorSafe: 'static + Send + Sync + Clone + Sized {}
 
 impl<T: 'static + Send + Sync + Clone> BehaviorSafe for T {}
 
-// === MultiplexedHandler === //
+// === Multiplexable === //
 
-pub trait MultiplexedHandler {
-    type Multiplexer<'a, L: 'a>
+pub trait Multiplexable: Delegate {
+    type Multiplexer<'a, D>
     where
-        Self: 'a;
+        Self: 'a,
+        D: MultiplexDriver<Item = Self::DynFn> + 'a;
 
-    fn make_multiplexer<'a, L: 'a>(list: L) -> Self::Multiplexer<'a, L>
+    fn make_multiplexer<'a, D>(driver: D) -> Self::Multiplexer<'a, D>
     where
-        L: Clone + IntoIterator<Item = &'a Self>;
+        D: MultiplexDriver<Item = Self::DynFn> + 'a;
+}
+
+pub trait MultiplexDriver: Sized {
+    type Item: ?Sized;
+
+    fn drive<'a>(&'a self, target: impl FnMut(&'a Self::Item));
+}
+
+impl<I: MultiplexDriver> MultiplexDriver for &'_ I {
+    type Item = I::Item;
+
+    fn drive<'a>(&'a self, target: impl FnMut(&'a Self::Item)) {
+        (*self).drive(target);
+    }
+}
+
+impl<I: MultiplexDriver> MultiplexDriver for Option<I> {
+    type Item = I::Item;
+
+    fn drive<'a>(&'a self, target: impl FnMut(&'a Self::Item)) {
+        if let Some(inner) = self {
+            inner.drive(target);
+        }
+    }
 }
 
 #[doc(hidden)]
 pub mod multiplexed_macro_internals {
     pub use {
-        super::{behavior, Behavior, MultiplexedHandler, SimpleBehaviorList},
+        super::{behavior, Behavior, MultiplexDriver, Multiplexable, SimpleBehaviorList},
         std::{boxed::Box, clone::Clone, iter::IntoIterator, ops::Fn},
     };
 }
@@ -621,25 +660,22 @@ macro_rules! behavior {
             ) $(-> $ret:ty)?
         $(where $($where_token:tt)*)?
     ) => {
-		impl<$($generic),*> $crate::behavior::multiplexed_macro_internals::MultiplexedHandler for $name<$($generic),*>
+		impl<$($generic),*> $crate::behavior::multiplexed_macro_internals::Multiplexable for $name<$($generic),*>
 		$(where $($where_token)*)?
 		{
-			type Multiplexer<'a, L: 'a> = $crate::behavior::multiplexed_macro_internals::Box<
+			type Multiplexer<'a, D> = $crate::behavior::multiplexed_macro_internals::Box<
 				dyn $(for<$($fn_lt),*>)? $crate::behavior::multiplexed_macro_internals::Fn($($para),*) + 'a
 			>
 			where
-				Self: 'a;
+				Self: 'a,
+				D: 'a + $crate::behavior::multiplexed_macro_internals::MultiplexDriver<Item = Self::DynFn>;
 
-			fn make_multiplexer<'a, L: 'a>(list: L) -> Self::Multiplexer<'a, L>
+			fn make_multiplexer<'a, D>(driver: D) -> Self::Multiplexer<'a, D>
 			where
-				L:
-					$crate::behavior::multiplexed_macro_internals::Clone +
-					$crate::behavior::multiplexed_macro_internals::IntoIterator<Item = &'a Self>
+				D: 'a + $crate::behavior::multiplexed_macro_internals::MultiplexDriver<Item = Self::DynFn>,
 			{
 				$crate::behavior::multiplexed_macro_internals::Box::new(move |$($para_name),*| {
-					for item in $crate::behavior::multiplexed_macro_internals::Clone::clone(&list) {
-						item($($para_name),*);
-					}
+					driver.drive(|item| item($($para_name),*));
 				})
 			}
 		}
@@ -749,8 +785,8 @@ pub struct SimpleBehaviorList<B> {
     pub behaviors: Vec<B>,
 }
 
-impl<B: BehaviorSafe + MultiplexedHandler> BehaviorList for SimpleBehaviorList<B> {
-    type View<'a> = B::Multiplexer<'a, std::slice::Iter<'a, B>>;
+impl<B: BehaviorSafe + Multiplexable> BehaviorList for SimpleBehaviorList<B> {
+    type View<'a> = B::Multiplexer<'a, Option<&'a SimpleBehaviorList<B>>>;
     type Delegate = B;
 
     fn extend(&mut self, mut other: Self) {
@@ -762,12 +798,163 @@ impl<B: BehaviorSafe + MultiplexedHandler> BehaviorList for SimpleBehaviorList<B
     }
 
     fn view<'a>(me: Option<&'a Self>) -> Self::View<'a> {
-        B::make_multiplexer(me.map_or(std::slice::Iter::default(), |l| l.behaviors.iter()))
+        B::make_multiplexer(me)
     }
 }
 
-impl<B: BehaviorSafe + MultiplexedHandler> ExtendableBehaviorList for SimpleBehaviorList<B> {
+impl<B: BehaviorSafe + Multiplexable> ExtendableBehaviorList for SimpleBehaviorList<B> {
     fn push(&mut self, delegate: Self::Delegate, _meta: ()) {
         self.behaviors.push(delegate);
+    }
+}
+
+impl<B: Multiplexable> MultiplexDriver for SimpleBehaviorList<B> {
+    type Item = B::DynFn;
+
+    fn drive<'a>(&'a self, mut target: impl FnMut(&'a Self::Item)) {
+        for bhv in &self.behaviors {
+            target(bhv);
+        }
+    }
+}
+
+// === InitializerBehaviorList === //
+
+// PartialEntity
+#[derive(Debug, Copy, Clone)]
+pub struct PartialEntity<'a> {
+    target: Entity,
+    can_access: &'a FxHashSet<NamedTypeId>,
+}
+
+impl PartialEntity<'_> {
+    pub fn add<T: 'static>(self, component: T) {
+        assert!(!self.target.has::<T>());
+        self.target.insert(component);
+    }
+
+    pub fn get<T: 'static>(self) -> CompRef<'static, T> {
+        assert!(self.can_access.contains(&NamedTypeId::of::<T>()));
+        self.target.get()
+    }
+
+    pub fn get_mut<'a, T: 'static>(self) -> CompMut<'static, T> {
+        assert!(self.can_access.contains(&NamedTypeId::of::<T>()));
+        self.target.get_mut()
+    }
+
+    pub fn entity(self) -> Entity {
+        self.target
+    }
+}
+
+// InitializerBehaviorList
+#[derive(Debug, Clone)]
+#[derive_where(Default)]
+pub struct InitializerBehaviorList<I> {
+    handlers: Vec<Handler<I>>,
+    handlers_with_deps: FxHashMap<NamedTypeId, Vec<usize>>,
+    handlers_without_any_deps: Vec<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct Handler<I> {
+    delegate: I,
+    deps: FxHashSet<NamedTypeId>,
+}
+
+impl<I> InitializerBehaviorList<I> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with(mut self, deps: impl IntoIterator<Item = NamedTypeId>, delegate: I) -> Self {
+        self.register(deps, delegate);
+        self
+    }
+
+    pub fn with_many(mut self, f: impl FnOnce(&mut InitializerBehaviorList<I>)) -> Self {
+        self.register_many(f);
+        self
+    }
+
+    pub fn register(
+        &mut self,
+        deps: impl IntoIterator<Item = NamedTypeId>,
+        delegate: I,
+    ) -> &mut Self {
+        let deps = deps.into_iter().collect::<FxHashSet<_>>();
+        if deps.is_empty() {
+            self.handlers_without_any_deps.push(self.handlers.len());
+        } else {
+            for &dep in &deps {
+                self.handlers_with_deps
+                    .entry(dep)
+                    .or_default()
+                    .push(self.handlers.len());
+            }
+        }
+        self.handlers.push(Handler { delegate, deps });
+
+        self
+    }
+
+    pub fn register_many(&mut self, f: impl FnOnce(&mut InitializerBehaviorList<I>)) -> &mut Self {
+        f(self);
+        self
+    }
+
+    pub fn execute(&self, mut executor: impl FnMut(&I, PartialEntity<'_>), target: Entity) {
+        // Execute handlers without dependencies
+        for &handler in &self.handlers_without_any_deps {
+            executor(
+                &self.handlers[handler].delegate,
+                PartialEntity {
+                    target,
+                    can_access: &self.handlers[handler].deps,
+                },
+            )
+        }
+
+        // Execute handlers with dependencies
+        let mut remaining_dep_types = self.handlers_with_deps.keys().copied().collect::<Vec<_>>();
+        let mut dep_counts = self
+            .handlers
+            .iter()
+            .map(|handler| handler.deps.len())
+            .collect::<Vec<_>>();
+
+        while !remaining_dep_types.is_empty() {
+            let old_len = remaining_dep_types.len();
+
+            remaining_dep_types.retain(|&dep| {
+                if !target.has_dyn(dep.into()) {
+                    return true;
+                }
+
+                for &handler in &self.handlers_with_deps[&dep] {
+                    dep_counts[handler] -= 1;
+
+                    if dep_counts[handler] == 0 {
+                        executor(
+                            &self.handlers[handler].delegate,
+                            PartialEntity {
+                                target,
+                                can_access: &self.handlers[handler].deps,
+                            },
+                        );
+                    }
+                }
+
+                false
+            });
+
+            assert_ne!(
+                remaining_dep_types.len(),
+                old_len,
+                "InitializerBehaviorList is unable to load the following required component types: {:?}",
+                remaining_dep_types
+            );
+        }
     }
 }
