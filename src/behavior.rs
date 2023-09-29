@@ -58,6 +58,7 @@ pub mod delegate_macro_internal {
             fmt,
             marker::{PhantomData, Send, Sync},
             ops::Deref,
+            panic::Location,
             stringify,
             sync::Arc,
         },
@@ -125,6 +126,7 @@ macro_rules! delegate {
             $($where_token)*
         )? {
             #[allow(unused)]
+			#[cfg_attr(debug_assertions, track_caller)]
             pub fn new_method_ref<Injector, Receiver, Func>(_injector: Injector, handler: Func) -> Self
             where
                 Injector: 'static + $crate::behavior::delegate_macro_internal::FuncMethodInjectorRefGetGuard<Receiver>,
@@ -157,6 +159,7 @@ macro_rules! delegate {
             }
 
             #[allow(unused)]
+			#[cfg_attr(debug_assertions, track_caller)]
             pub fn new_method_mut<Injector, Receiver, Func>(_injector: Injector, handler: Func) -> Self
             where
                 Injector: 'static + $crate::behavior::delegate_macro_internal::FuncMethodInjectorMutGetGuard<Receiver>,
@@ -208,6 +211,8 @@ macro_rules! delegate {
             $($where_token)*
         )? {
             _ty: ($($($crate::behavior::delegate_macro_internal::PhantomData<fn() -> $generic>,)*)?),
+			#[cfg(debug_assertions)]
+			defined: &'static $crate::behavior::delegate_macro_internal::Location<'static>,
             handler: $crate::behavior::delegate_macro_internal::Arc<
                 dyn
                     $($(for<$($fn_lt),*>)?)?
@@ -222,6 +227,7 @@ macro_rules! delegate {
             $($where_token)*
         )? {
             #[allow(unused)]
+			#[cfg_attr(debug_assertions, track_caller)]
             pub fn new<Func>(handler: Func) -> Self
             where
                 Func: 'static +
@@ -232,6 +238,8 @@ macro_rules! delegate {
             {
                 Self {
                     _ty: ($($($crate::behavior::delegate_macro_internal::PhantomData::<fn() -> $generic>,)*)?),
+					#[cfg(debug_assertions)]
+					defined: $crate::behavior::delegate_macro_internal::Location::caller(),
                     handler: $crate::behavior::delegate_macro_internal::Arc::new(handler),
                 }
             }
@@ -248,6 +256,7 @@ macro_rules! delegate {
         $(where
             $($where_token)*
         )? {
+			#[cfg_attr(debug_assertions, track_caller)]
             fn from(handler: Func) -> Self {
                 Self::new(handler)
             }
@@ -290,6 +299,16 @@ macro_rules! delegate {
                 )*
                 fmt.write_str(")")?;
 
+				#[cfg(debug_assertions)]
+				{
+					fmt.write_str(" @ ")?;
+					fmt.write_str(self.defined.file())?;
+					fmt.write_str(":")?;
+					$crate::behavior::delegate_macro_internal::fmt::Debug::fmt(&self.defined.line(), fmt)?;
+					fmt.write_str(":")?;
+					$crate::behavior::delegate_macro_internal::fmt::Debug::fmt(&self.defined.column(), fmt)?;
+				}
+
                 Ok(())
             }
         }
@@ -301,6 +320,8 @@ macro_rules! delegate {
             fn clone(&self) -> Self {
                 Self {
                     _ty: ($($($crate::behavior::delegate_macro_internal::PhantomData::<fn() -> $generic>,)*)?),
+					#[cfg(debug_assertions)]
+					defined: self.defined,
                     handler: $crate::behavior::delegate_macro_internal::Clone::clone(&self.handler),
                 }
             }
