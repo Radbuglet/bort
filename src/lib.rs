@@ -23,7 +23,7 @@ cfgenius::cond! {
 pub mod prelude {
     pub use crate::{
         behavior::{
-            behavior, delegate, Behavior, BehaviorProvider, BehaviorRegistry, ComponentInjector,
+            behavior, delegate, Behavior, BehaviorRegistry, ComponentInjector,
             InitializerBehaviorList, PartialEntity, SimpleBehaviorList,
         },
         entity::{storage, CompMut, CompRef, Entity, OwnedEntity, Storage},
@@ -40,7 +40,7 @@ pub mod prelude {
 
     cfgenius::cond! {
         if macro(super::HAS_SADDLE_SUPPORT) {
-            pub use crate::saddle::{alias, Cx, cx, Scope, ScopeExt, scope, saddle_delegate};
+            pub use crate::saddle::{alias, Cx, cx, Scope, ScopeExt, scope, behavior_s};
         }
     }
 }

@@ -99,7 +99,7 @@ fn main() {
     // We begin by declaring a delegate to encapsulate our closure type.
     delegate! {
         fn HomeEnterBehavior(
-            bhv: BehaviorProvider<'_>,
+            bhv: &BehaviorRegistry,
             on_enter_home: &mut VecEventList<EnterHomeEvent>,
             in_world: VirtualTag,
             people_from_this_world: &mut u32,
@@ -123,7 +123,7 @@ fn main() {
     // ...and dispatch them in the same way we had done before.
     on_enter_home.fire(player.entity(), EnterHomeEvent);
     bhv.get::<HomeEnterBehavior>()(
-        bhv.provider(),
+        &bhv,
         &mut on_enter_home,
         in_world,
         &mut people_from_this_world,

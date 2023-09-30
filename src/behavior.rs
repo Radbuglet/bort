@@ -10,7 +10,7 @@ use crate::{
     entity::{CompMut, CompRef, Entity},
     util::{
         hash_map::{ConstSafeBuildHasherDefault, FxHashMap, FxHashSet},
-        misc::{MapFmt, NamedTypeId, RawFmt},
+        misc::{MapFmt, NamedTypeId},
     },
 };
 
@@ -480,6 +480,14 @@ impl BehaviorRegistry {
         self
     }
 
+    pub fn register_from(&mut self, registry: &BehaviorRegistry) {
+        for (key, list) in self.behaviors.iter_mut() {
+            if let Some(other) = registry.behaviors.get(key) {
+                list.extend_dyn(&**other);
+            }
+        }
+    }
+
     pub fn with_cx<B: Behavior, M>(mut self, meta: M, delegate: B) -> Self
     where
         B::List: ExtendableBehaviorList<M>,
@@ -500,22 +508,29 @@ impl BehaviorRegistry {
         self
     }
 
-    pub fn provider(&self) -> BehaviorProvider {
-        BehaviorProvider::wrap(self)
+    pub fn get_list_untyped(&self, behavior_id: TypeId) -> Option<&(dyn DynBehaviorList)> {
+        self.behaviors.get(&behavior_id).map(|v| &**v)
     }
 
     pub fn get_list<B: Behavior>(&self) -> Option<&B::List> {
-        self.provider().get_list::<B>()
+        self.get_list_untyped(TypeId::of::<B>())
+            .map(|v| v.as_any().downcast_ref().unwrap())
+    }
+
+    pub fn get_list_mut_untyped(
+        &mut self,
+        behavior_id: TypeId,
+    ) -> Option<&mut (dyn DynBehaviorList)> {
+        self.behaviors.get_mut(&behavior_id).map(|v| &mut **v)
+    }
+
+    pub fn get_list_mut<B: Behavior>(&mut self) -> Option<&mut B::List> {
+        self.get_list_mut_untyped(TypeId::of::<B>())
+            .map(|v| v.as_any_mut().downcast_mut().unwrap())
     }
 
     pub fn get<B: Behavior>(&self) -> <B::List as BehaviorList>::View<'_> {
-        self.provider().get::<B>()
-    }
-}
-
-impl RawBehaviorProvider for BehaviorRegistry {
-    fn get_list_untyped(&self, behavior_id: TypeId) -> Option<&(dyn DynBehaviorList)> {
-        self.behaviors.get(&behavior_id).map(|v| &**v)
+        <B::List as BehaviorList>::view(self.get_list::<B>())
     }
 }
 
@@ -530,40 +545,21 @@ impl fmt::Debug for BehaviorRegistry {
         f.debug_struct("BehaviorRegistry")
             .field(
                 "behaviors",
-                &MapFmt(self.behaviors.iter().map(|(k, _v)| (k, RawFmt("...")))),
+                &MapFmt(self.behaviors.iter().map(|(k, v)| (k, v))),
             )
             .finish()
     }
 }
 
-// === BehaviorProvider === //
-
-#[derive(Debug, Copy, Clone)]
-pub struct BehaviorProvider<'a> {
-    raw: &'a (dyn RawBehaviorProvider + 'a),
-}
-
-pub trait RawBehaviorProvider: fmt::Debug + Send + Sync {
-    fn get_list_untyped(&self, behavior_id: TypeId) -> Option<&(dyn DynBehaviorList)>;
-}
-
-impl<'a> BehaviorProvider<'a> {
-    pub fn wrap(raw: &'a (dyn RawBehaviorProvider + 'a)) -> Self {
-        Self { raw }
-    }
-
-    pub fn raw(self) -> &'a (dyn RawBehaviorProvider + 'a) {
-        self.raw
-    }
-
-    pub fn get_list<B: Behavior>(self) -> Option<&'a B::List> {
-        self.raw
-            .get_list_untyped(TypeId::of::<B>())
-            .map(|list| list.as_any().downcast_ref().unwrap())
-    }
-
-    pub fn get<B: Behavior>(self) -> <B::List as BehaviorList>::View<'a> {
-        BehaviorList::view(self.get_list::<B>())
+impl Clone for BehaviorRegistry {
+    fn clone(&self) -> Self {
+        Self {
+            behaviors: self
+                .behaviors
+                .iter()
+                .map(|(k, v)| (*k, v.clone_box()))
+                .collect(),
+        }
     }
 }
 
@@ -573,12 +569,12 @@ pub trait Behavior: Sized + 'static {
     type List: BehaviorList<Delegate = Self>;
 }
 
-pub trait DynBehaviorList: 'static + Send + Sync {
+pub trait DynBehaviorList: 'static + Send + Sync + fmt::Debug {
     fn as_any(&self) -> &(dyn Any + Send + Sync);
 
     fn as_any_mut(&mut self) -> &mut (dyn Any + Send + Sync);
 
-    fn clone(&self) -> Box<dyn DynBehaviorList>;
+    fn clone_box(&self) -> Box<dyn DynBehaviorList>;
 
     fn extend_dyn(&mut self, other: &dyn DynBehaviorList);
 }
@@ -592,7 +588,7 @@ impl<T: BehaviorList> DynBehaviorList for T {
         self
     }
 
-    fn clone(&self) -> Box<dyn DynBehaviorList> {
+    fn clone_box(&self) -> Box<dyn DynBehaviorList> {
         Box::new(self.clone())
     }
 
@@ -601,7 +597,7 @@ impl<T: BehaviorList> DynBehaviorList for T {
     }
 }
 
-pub trait BehaviorList: BehaviorSafe + Default {
+pub trait BehaviorList: BehaviorSafe + Default + fmt::Debug {
     type View<'a>;
     type Delegate: 'static;
 
@@ -616,9 +612,9 @@ pub trait ExtendableBehaviorList<M = ()>: BehaviorList {
     fn push(&mut self, delegate: Self::Delegate, meta: M);
 }
 
-pub trait BehaviorSafe: 'static + Send + Sync + Clone + Sized {}
+pub trait BehaviorSafe: 'static + Sized + Send + Sync + Clone + fmt::Debug {}
 
-impl<T: 'static + Send + Sync + Clone> BehaviorSafe for T {}
+impl<T: 'static + Send + Sync + Clone + fmt::Debug> BehaviorSafe for T {}
 
 // === Multiplexable === //
 
@@ -660,13 +656,44 @@ impl<I: MultiplexDriver> MultiplexDriver for Option<I> {
 #[doc(hidden)]
 pub mod multiplexed_macro_internals {
     pub use {
-        super::{behavior, Behavior, MultiplexDriver, Multiplexable, SimpleBehaviorList},
+        super::{
+            behavior, delegate, Behavior, BehaviorRegistry, MultiplexDriver, Multiplexable,
+            SimpleBehaviorList,
+        },
         std::{boxed::Box, clone::Clone, iter::IntoIterator, ops::Fn},
     };
 }
 
 #[macro_export]
 macro_rules! behavior {
+	(
+        $(#[$attr_meta:meta])*
+        $vis:vis fn $name:ident
+            $(
+                <$($generic:ident),* $(,)?>
+                $(<$($fn_lt:lifetime),* $(,)?>)?
+            )?
+            ($($para_name:ident: $para:ty),* $(,)?) $(-> $ret:ty)?
+		$(as list $list:ty)?
+        $(as deriving $deriving:path $({ $($deriving_args:tt)* })? )*
+        $(where $($where_token:tt)*)?
+    ) => {
+        $crate::behavior::multiplexed_macro_internals::delegate!(
+            $(#[$attr_meta])*
+            $vis fn $name
+                $(
+                    <$($generic),*>
+                    $(<$($fn_lt),*>)?
+                )?
+                (
+                    bhv: &'_ $crate::behavior::multiplexed_macro_internals::BehaviorRegistry,
+                    $($para_name: $para),*
+                ) $(-> $ret)?
+            as deriving $crate::behavior::multiplexed_macro_internals::behavior { $($list)? }
+            $(as deriving $deriving $({ $($deriving_args)* })? )*
+            $(where $($where_token)*)?
+        );
+    };
     (
         args { just_multiplex }
 
@@ -1008,6 +1035,14 @@ impl<I: BehaviorSafe> BehaviorList for InitializerBehaviorList<I> {
 
     fn view<'a>(me: Option<&'a Self>) -> Self::View<'a> {
         InitializerBehaviorListView(me)
+    }
+}
+
+impl<I: BehaviorSafe, D: IntoIterator<Item = NamedTypeId>> ExtendableBehaviorList<D>
+    for InitializerBehaviorList<I>
+{
+    fn push(&mut self, delegate: Self::Delegate, deps: D) {
+        self.register(deps, delegate);
     }
 }
 

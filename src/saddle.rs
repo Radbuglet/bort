@@ -308,15 +308,15 @@ scope! {
 }
 
 #[doc(hidden)]
-pub mod macro_internals_saddle_delegate {
+pub mod macro_internals_behavior_s {
     pub use {
         super::BehaviorScope,
-        crate::behavior::{behavior, delegate, BehaviorProvider},
+        crate::behavior::{behavior, delegate, BehaviorRegistry},
     };
 }
 
 #[macro_export]
-macro_rules! saddle_delegate {
+macro_rules! behavior_s {
     (
         $(#[$attr_meta:meta])*
         $vis:vis fn $name:ident
@@ -329,7 +329,7 @@ macro_rules! saddle_delegate {
         $(as deriving $deriving:path $({ $($deriving_args:tt)* })? )*
         $(where $($where_token:tt)*)?
     ) => {
-        $crate::saddle::macro_internals_saddle_delegate::delegate!(
+        $crate::saddle::macro_internals_behavior_s::delegate!(
             $(#[$attr_meta])*
             $vis fn $name
                 $(
@@ -337,18 +337,18 @@ macro_rules! saddle_delegate {
                     $(<$($fn_lt),*>)?
                 )?
                 (
-                    bhv: $crate::saddle::macro_internals_saddle_delegate::BehaviorProvider<'_>,
-                    call_cx: &mut $crate::saddle::macro_internals_saddle_delegate::BehaviorScope<$name>,
+                    bhv: &'_ $crate::saddle::macro_internals_behavior_s::BehaviorRegistry,
+                    call_cx: &mut $crate::saddle::macro_internals_behavior_s::BehaviorScope<$name>,
                     $($para_name: $para),*
                 ) $(-> $ret)?
-            as deriving $crate::saddle::macro_internals_saddle_delegate::behavior { $($list)? }
+            as deriving $crate::saddle::macro_internals_behavior_s::behavior { $($list)? }
             $(as deriving $deriving $({ $($deriving_args)* })? )*
             $(where $($where_token)*)?
         );
     };
 }
 
-pub use saddle_delegate;
+pub use behavior_s;
 
 // === CxValue === //
 
