@@ -24,6 +24,7 @@ pub mod prelude {
     pub use crate::{
         behavior::{
             behavior, delegate, Behavior, BehaviorProvider, BehaviorRegistry, ComponentInjector,
+            InitializerBehaviorList, PartialEntity, SimpleBehaviorList,
         },
         entity::{storage, CompMut, CompRef, Entity, OwnedEntity, Storage},
         event::{

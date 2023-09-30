@@ -979,3 +979,46 @@ impl<I> InitializerBehaviorList<I> {
         }
     }
 }
+
+impl<I: BehaviorSafe> BehaviorList for InitializerBehaviorList<I> {
+    type View<'a> = InitializerBehaviorListView<'a, I>;
+    type Delegate = I;
+
+    fn extend(&mut self, other: Self) {
+        self.extend_ref(&other);
+    }
+
+    fn extend_ref(&mut self, other: &Self) {
+        for (key, deps) in &other.handlers_with_deps {
+            self.handlers_with_deps
+                .entry(*key)
+                .or_default()
+                .extend(deps.iter().map(|v| v + self.handlers.len()));
+        }
+
+        self.handlers_without_any_deps.extend(
+            other
+                .handlers_without_any_deps
+                .iter()
+                .map(|v| v + self.handlers.len()),
+        );
+
+        self.handlers.extend(other.handlers.iter().cloned());
+    }
+
+    fn view<'a>(me: Option<&'a Self>) -> Self::View<'a> {
+        InitializerBehaviorListView(me)
+    }
+}
+
+#[derive(Debug)]
+#[derive_where(Clone, Copy)]
+pub struct InitializerBehaviorListView<'a, I>(Option<&'a InitializerBehaviorList<I>>);
+
+impl<I> InitializerBehaviorListView<'_, I> {
+    pub fn execute(&self, executor: impl FnMut(&I, PartialEntity<'_>), target: Entity) {
+        if let Some(inner) = self.0 {
+            inner.execute(executor, target);
+        }
+    }
+}
