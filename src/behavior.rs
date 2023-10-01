@@ -872,7 +872,7 @@ impl<B: Multiplexable> MultiplexDriver for SimpleBehaviorList<B> {
 #[derive(Debug, Copy, Clone)]
 pub struct PartialEntity<'a> {
     target: Entity,
-    can_access: &'a FxHashSet<NamedTypeId>,
+    can_access: &'a FxHashSet<TypeId>,
 }
 
 impl PartialEntity<'_> {
@@ -882,12 +882,12 @@ impl PartialEntity<'_> {
     }
 
     pub fn get<T: 'static>(self) -> CompRef<'static, T> {
-        assert!(self.can_access.contains(&NamedTypeId::of::<T>()));
+        assert!(self.can_access.contains(&TypeId::of::<T>()));
         self.target.get()
     }
 
     pub fn get_mut<'a, T: 'static>(self) -> CompMut<'static, T> {
-        assert!(self.can_access.contains(&NamedTypeId::of::<T>()));
+        assert!(self.can_access.contains(&TypeId::of::<T>()));
         self.target.get_mut()
     }
 
@@ -901,14 +901,14 @@ impl PartialEntity<'_> {
 #[derive_where(Default)]
 pub struct InitializerBehaviorList<I> {
     handlers: Vec<Handler<I>>,
-    handlers_with_deps: FxHashMap<NamedTypeId, Vec<usize>>,
+    handlers_with_deps: FxHashMap<TypeId, Vec<usize>>,
     handlers_without_any_deps: Vec<usize>,
 }
 
 #[derive(Debug, Clone)]
 struct Handler<I> {
     delegate: I,
-    deps: FxHashSet<NamedTypeId>,
+    deps: FxHashSet<TypeId>,
 }
 
 impl<I> InitializerBehaviorList<I> {
@@ -916,7 +916,7 @@ impl<I> InitializerBehaviorList<I> {
         Self::default()
     }
 
-    pub fn with(mut self, deps: impl IntoIterator<Item = NamedTypeId>, delegate: I) -> Self {
+    pub fn with(mut self, deps: impl IntoIterator<Item = TypeId>, delegate: I) -> Self {
         self.register(deps, delegate);
         self
     }
@@ -926,11 +926,7 @@ impl<I> InitializerBehaviorList<I> {
         self
     }
 
-    pub fn register(
-        &mut self,
-        deps: impl IntoIterator<Item = NamedTypeId>,
-        delegate: I,
-    ) -> &mut Self {
+    pub fn register(&mut self, deps: impl IntoIterator<Item = TypeId>, delegate: I) -> &mut Self {
         let deps = deps.into_iter().collect::<FxHashSet<_>>();
         if deps.is_empty() {
             self.handlers_without_any_deps.push(self.handlers.len());
@@ -1038,7 +1034,7 @@ impl<I: BehaviorSafe> BehaviorList for InitializerBehaviorList<I> {
     }
 }
 
-impl<I: BehaviorSafe, D: IntoIterator<Item = NamedTypeId>> ExtendableBehaviorList<D>
+impl<I: BehaviorSafe, D: IntoIterator<Item = TypeId>> ExtendableBehaviorList<D>
     for InitializerBehaviorList<I>
 {
     fn push(&mut self, delegate: Self::Delegate, deps: D) {
