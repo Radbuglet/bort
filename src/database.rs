@@ -722,9 +722,9 @@ impl DbRoot {
                 storage.move_entity_into_empty_never_truncate(
                     token,
                     last_entity,
-                    &last_entity_info,
+                    last_entity_info,
                     info.physical_arch,
-                    &arch,
+                    arch,
                 );
             }
         }

@@ -67,7 +67,7 @@ where
     I::Item: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_list().entries(self.0.clone().into_iter()).finish()
+        f.debug_list().entries(self.0.clone()).finish()
     }
 }
 
@@ -81,7 +81,7 @@ where
     B: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_map().entries(self.0.clone().into_iter()).finish()
+        f.debug_map().entries(self.0.clone()).finish()
     }
 }
 

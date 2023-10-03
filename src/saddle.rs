@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity)]
+
 use std::{any::type_name, fmt, marker::PhantomData};
 
 use crate::{
@@ -40,7 +42,7 @@ pub mod scope_macro_internals {
         std::{mem::drop, option::Option},
     };
 
-    pub fn bind_scope_lifetime<'a, S: Scope>(scope: &'a mut S) -> (&'a mut S, CompLtLimiter<'a>) {
+    pub fn bind_scope_lifetime<S: Scope>(scope: &mut S) -> (&'_ mut S, CompLtLimiter<'_>) {
         (scope, CompLtLimiter { _ty: [] })
     }
 
@@ -513,7 +515,7 @@ where
 {
     pub fn new<S: Scope>(scope: &'a mut S) -> (&'a mut S, Self) {
         Self::decl_borrows(scope);
-        return (scope, Self::new_unchecked());
+        (scope, Self::new_unchecked())
     }
 }
 
@@ -896,11 +898,11 @@ impl<G: ?Sized> EventGroup<G> {
 }
 
 impl PartialEntity<'_> {
-    pub fn get_s<'a, T: 'static>(self, _cx: Cx<&'a T>) -> CompRef<'a, T> {
+    pub fn get_s<T: 'static>(self, _cx: Cx<&T>) -> CompRef<'_, T> {
         self.get()
     }
 
-    pub fn get_mut_s<'a, T: 'static>(self, _cx: Cx<&'a mut T>) -> CompMut<'a, T> {
+    pub fn get_mut_s<T: 'static>(self, _cx: Cx<&mut T>) -> CompMut<'_, T> {
         self.get_mut()
     }
 }

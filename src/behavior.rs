@@ -605,7 +605,7 @@ pub trait BehaviorList: BehaviorSafe + Default + fmt::Debug {
 
     fn extend_ref(&mut self, other: &Self);
 
-    fn view<'a>(me: Option<&'a Self>) -> Self::View<'a>;
+    fn view(me: Option<&Self>) -> Self::View<'_>;
 }
 
 pub trait ExtendableBehaviorList<M = ()>: BehaviorList {
@@ -845,7 +845,7 @@ impl<B: BehaviorSafe + Multiplexable> BehaviorList for SimpleBehaviorList<B> {
         self.behaviors.extend(other.behaviors.iter().cloned());
     }
 
-    fn view<'a>(me: Option<&'a Self>) -> Self::View<'a> {
+    fn view(me: Option<&Self>) -> Self::View<'_> {
         B::make_multiplexer(me)
     }
 }
@@ -886,7 +886,7 @@ impl PartialEntity<'_> {
         self.target.get()
     }
 
-    pub fn get_mut<'a, T: 'static>(self) -> CompMut<'static, T> {
+    pub fn get_mut<T: 'static>(self) -> CompMut<'static, T> {
         assert!(self.can_access.contains(&TypeId::of::<T>()));
         self.target.get_mut()
     }
@@ -972,7 +972,7 @@ impl<I> InitializerBehaviorList<I> {
             let old_len = remaining_dep_types.len();
 
             remaining_dep_types.retain(|&dep| {
-                if !target.has_dyn(dep.into()) {
+                if !target.has_dyn(dep) {
                     return true;
                 }
 
@@ -1029,7 +1029,7 @@ impl<I: BehaviorSafe> BehaviorList for InitializerBehaviorList<I> {
         self.handlers.extend(other.handlers.iter().cloned());
     }
 
-    fn view<'a>(me: Option<&'a Self>) -> Self::View<'a> {
+    fn view(me: Option<&Self>) -> Self::View<'_> {
         InitializerBehaviorListView(me)
     }
 }
