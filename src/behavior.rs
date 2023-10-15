@@ -1,7 +1,8 @@
 use std::{
     any::{Any, TypeId},
-    fmt,
+    fmt, hash,
     ops::{Deref, DerefMut},
+    sync::OnceLock,
 };
 
 use derive_where::derive_where;
@@ -866,6 +867,204 @@ impl<B: Multiplexable> MultiplexDriver for SimpleBehaviorList<B> {
     }
 }
 
+// === OrderedBehaviorList === //
+
+#[derive(Debug, Clone)]
+#[derive_where(Default)]
+pub struct OrderedBehaviorList<B, D> {
+    behaviors: Vec<OrderedBehavior<B, D>>,
+    dependents_on: FxHashMap<D, OrderedDependents>,
+    behaviors_topos: OnceLock<Vec<B>>,
+}
+
+#[derive(Debug, Clone)]
+struct OrderedBehavior<B, D> {
+    /// The behavior delegate
+    behavior: B,
+
+    /// The number of dependencies the behavior has before it can run.
+    dep_count: u32,
+
+    /// The dependencies it resolves in running.
+    resolves: FxHashSet<D>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct OrderedDependents {
+    /// The behaviors depending upon this key.
+    dependents: Vec<usize>,
+
+    /// The number of behaviors which need to be resolved before this entire dependency is satisfied.
+    resolvers: u32,
+}
+
+impl<B, D> BehaviorList for OrderedBehaviorList<B, D>
+where
+    B: BehaviorSafe + Multiplexable,
+    D: BehaviorSafe + hash::Hash + Eq,
+{
+    type View<'a> = B::Multiplexer<'a, Option<&'a Self>>;
+    type Delegate = B;
+
+    fn extend(&mut self, mut other: Self) {
+        self.behaviors.append(&mut other.behaviors);
+    }
+
+    fn extend_ref(&mut self, other: &Self) {
+        self.behaviors.extend(other.behaviors.iter().cloned());
+    }
+
+    fn view(me: Option<&Self>) -> Self::View<'_> {
+        B::make_multiplexer(me)
+    }
+}
+
+impl<B, D, I1, I2> ExtendableBehaviorList<(I1, I2)> for OrderedBehaviorList<B, D>
+where
+    B: BehaviorSafe + Multiplexable,
+    D: BehaviorSafe + hash::Hash + Eq,
+    I1: IntoIterator<Item = D>,
+    I2: IntoIterator<Item = D>,
+{
+    fn push(&mut self, delegate: Self::Delegate, (depends, resolves): (I1, I2)) {
+        // Register the behavior
+        let bhv_idx = self.behaviors.len();
+        self.behaviors.push(OrderedBehavior {
+            behavior: delegate,
+            dep_count: 0, // This will be adjusted later.
+            resolves: resolves.into_iter().collect(),
+        });
+        let bhv = &mut self.behaviors[bhv_idx];
+
+        // For each resolved dependency, increment its resolver count.
+        for resolved in &bhv.resolves {
+            if let Some(info) = self.dependents_on.get_mut(resolved) {
+                info.resolvers += 1;
+            } else {
+                self.dependents_on.insert(
+                    resolved.clone(),
+                    OrderedDependents {
+                        dependents: Vec::new(),
+                        resolvers: 1,
+                    },
+                );
+            }
+        }
+
+        // For each dependency...
+        for dep in depends {
+            // Increment the behavior's dependency count
+            bhv.dep_count += 1;
+
+            // Register a relationship between the dependency and this.
+            if let Some(info) = self.dependents_on.get_mut(&dep) {
+                info.dependents.push(bhv_idx);
+            } else {
+                self.dependents_on.insert(
+                    dep.clone(),
+                    OrderedDependents {
+                        dependents: vec![bhv_idx],
+                        resolvers: 0,
+                    },
+                );
+            }
+        }
+
+        // Invalidate the existing topological sort if applicable
+        let _ = OnceLock::take(&mut self.behaviors_topos);
+    }
+}
+
+impl<B: BehaviorSafe + Multiplexable, D> MultiplexDriver for OrderedBehaviorList<B, D>
+where
+    B: BehaviorSafe + Multiplexable,
+    D: BehaviorSafe + hash::Hash + Eq,
+{
+    type Item = B::DynFn;
+
+    fn drive<'a>(&'a self, mut target: impl FnMut(&'a Self::Item)) {
+        let topos = self.behaviors_topos.get_or_init(|| {
+            let mut toposorted = Vec::new();
+
+            // Create mutable state copies
+            let mut behavior_counts = self
+                .behaviors
+                .iter()
+                .map(|b| b.dep_count)
+                .collect::<Vec<_>>();
+
+            let mut dependents_on = self
+                .dependents_on
+                .iter()
+                .map(|(k, v)| (k, v.resolvers))
+                .collect::<FxHashMap<_, _>>();
+
+            // Decrement the blockers for behaviors whose dependencies have no blocking resolvers
+            for (_key, dependents) in &self.dependents_on {
+                if dependents.resolvers == 0 {
+                    for &blocked_id in &dependents.dependents {
+						behavior_counts[blocked_id] -= 1;
+					}
+                }
+            }
+
+			// Collect the initial set of behaviors which are ready to run
+			let mut ready_to_run = behavior_counts
+				.iter()
+				.enumerate()
+				.filter_map(|(i, &blockers)| (blockers == 0).then_some(i))
+				.collect::<Vec<_>>();
+
+            // Propagate execution to build the toposorted array
+            while let Some(ran) = ready_to_run.pop() {
+                // Add it to the toposorted array
+                toposorted.push(self.behaviors[ran].behavior.clone());
+
+                // Propagate resolution
+                ready_to_run.extend(
+                    self.behaviors[ran]
+                        .resolves
+                        .iter()
+                        // For every dependency resolved by running this behavior, decrement its blocker count.
+                        .filter(|resolved| {
+                            let resolved_count = dependents_on.get_mut(resolved).unwrap();
+                            *resolved_count -= 1;
+
+                            *resolved_count == 0
+                        })
+                        // For dependencies with zero blockers, find their dependents.
+                        .flat_map(|resolved| &self.dependents_on[resolved].dependents)
+                        // ...and attempt to resolve them.
+                        .filter(|&&bhv_id| {
+                            behavior_counts[bhv_id] -= 1;
+
+                            // ...producing an iterator of behaviors which can run.
+                            behavior_counts[bhv_id] == 0
+                        }),
+                );
+            }
+
+            // Now, ensure that all behaviors have run.
+            let blocked = behavior_counts
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &blockers)| (blockers > 0).then_some(&self.behaviors[i].behavior))
+                .collect::<Vec<_>>();
+
+            if !blocked.is_empty() {
+				// TODO: Improve error message.
+                panic!("the following behaviors could never run due to cyclic dependencies: {blocked:#?}");
+            }
+
+            toposorted
+        });
+
+        for bhv in topos {
+            target(bhv);
+        }
+    }
+}
+
 // === InitializerBehaviorList === //
 
 // PartialEntity
@@ -899,56 +1098,20 @@ impl PartialEntity<'_> {
 // InitializerBehaviorList
 #[derive(Debug, Clone)]
 #[derive_where(Default)]
-pub struct InitializerBehaviorList<I> {
-    handlers: Vec<Handler<I>>,
+pub struct InitializerBehaviorList<B> {
+    handlers: Vec<InitHandler<B>>,
     handlers_with_deps: FxHashMap<TypeId, Vec<usize>>,
     handlers_without_any_deps: Vec<usize>,
 }
 
 #[derive(Debug, Clone)]
-struct Handler<I> {
-    delegate: I,
+struct InitHandler<B> {
+    delegate: B,
     deps: FxHashSet<TypeId>,
 }
 
-impl<I> InitializerBehaviorList<I> {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with(mut self, deps: impl IntoIterator<Item = TypeId>, delegate: I) -> Self {
-        self.register(deps, delegate);
-        self
-    }
-
-    pub fn with_many(mut self, f: impl FnOnce(&mut InitializerBehaviorList<I>)) -> Self {
-        self.register_many(f);
-        self
-    }
-
-    pub fn register(&mut self, deps: impl IntoIterator<Item = TypeId>, delegate: I) -> &mut Self {
-        let deps = deps.into_iter().collect::<FxHashSet<_>>();
-        if deps.is_empty() {
-            self.handlers_without_any_deps.push(self.handlers.len());
-        } else {
-            for &dep in &deps {
-                self.handlers_with_deps
-                    .entry(dep)
-                    .or_default()
-                    .push(self.handlers.len());
-            }
-        }
-        self.handlers.push(Handler { delegate, deps });
-
-        self
-    }
-
-    pub fn register_many(&mut self, f: impl FnOnce(&mut InitializerBehaviorList<I>)) -> &mut Self {
-        f(self);
-        self
-    }
-
-    pub fn execute(&self, mut executor: impl FnMut(&I, PartialEntity<'_>), target: Entity) {
+impl<B> InitializerBehaviorList<B> {
+    pub fn execute(&self, mut executor: impl FnMut(&B, PartialEntity<'_>), target: Entity) {
         // Execute handlers without dependencies
         for &handler in &self.handlers_without_any_deps {
             executor(
@@ -1003,9 +1166,9 @@ impl<I> InitializerBehaviorList<I> {
     }
 }
 
-impl<I: BehaviorSafe> BehaviorList for InitializerBehaviorList<I> {
-    type View<'a> = InitializerBehaviorListView<'a, I>;
-    type Delegate = I;
+impl<B: BehaviorSafe> BehaviorList for InitializerBehaviorList<B> {
+    type View<'a> = InitializerBehaviorListView<'a, B>;
+    type Delegate = B;
 
     fn extend(&mut self, other: Self) {
         self.extend_ref(&other);
@@ -1034,20 +1197,33 @@ impl<I: BehaviorSafe> BehaviorList for InitializerBehaviorList<I> {
     }
 }
 
-impl<I: BehaviorSafe, D: IntoIterator<Item = TypeId>> ExtendableBehaviorList<D>
-    for InitializerBehaviorList<I>
+impl<B, I> ExtendableBehaviorList<I> for InitializerBehaviorList<B>
+where
+    B: BehaviorSafe,
+    I: IntoIterator<Item = TypeId>,
 {
-    fn push(&mut self, delegate: Self::Delegate, deps: D) {
-        self.register(deps, delegate);
+    fn push(&mut self, delegate: Self::Delegate, deps: I) {
+        let deps = deps.into_iter().collect::<FxHashSet<_>>();
+        if deps.is_empty() {
+            self.handlers_without_any_deps.push(self.handlers.len());
+        } else {
+            for &dep in &deps {
+                self.handlers_with_deps
+                    .entry(dep)
+                    .or_default()
+                    .push(self.handlers.len());
+            }
+        }
+        self.handlers.push(InitHandler { delegate, deps });
     }
 }
 
 #[derive(Debug)]
 #[derive_where(Clone, Copy)]
-pub struct InitializerBehaviorListView<'a, I>(Option<&'a InitializerBehaviorList<I>>);
+pub struct InitializerBehaviorListView<'a, B>(Option<&'a InitializerBehaviorList<B>>);
 
-impl<I> InitializerBehaviorListView<'_, I> {
-    pub fn execute(&self, executor: impl FnMut(&I, PartialEntity<'_>), target: Entity) {
+impl<B> InitializerBehaviorListView<'_, B> {
+    pub fn execute(&self, executor: impl FnMut(&B, PartialEntity<'_>), target: Entity) {
         if let Some(inner) = self.0 {
             inner.execute(executor, target);
         }

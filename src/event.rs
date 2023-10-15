@@ -302,6 +302,8 @@ pub trait EventGroupMarkerWith<L: 'static + SimpleEventTarget + Default>:
 {
 }
 
+pub trait EventGroupMarkerExtends<G: ?Sized> {}
+
 pub struct EventGroup<G: ?Sized> {
     _ty: PhantomData<fn(G) -> G>,
     events: OwnedEntity,
@@ -310,6 +312,14 @@ pub struct EventGroup<G: ?Sized> {
 impl<G: ?Sized> Default for EventGroup<G> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<G: ?Sized> fmt::Debug for EventGroup<G> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EventGroup")
+            .field("events", &self.events)
+            .finish()
     }
 }
 
@@ -344,6 +354,39 @@ impl<G: ?Sized> EventGroup<G> {
         } else {
             self.events.get_mut()
         })
+    }
+
+    pub fn cast_arbitrary<G2: ?Sized>(self) -> EventGroup<G2> {
+        EventGroup {
+            _ty: PhantomData,
+            events: self.events,
+        }
+    }
+
+    pub fn cast_arbitrary_ref<G2: ?Sized>(&self) -> &EventGroup<G2> {
+        #[allow(unsafe_code)] // TODO: Use a library
+        unsafe {
+            mem::transmute(self)
+        }
+    }
+
+    pub fn cast_arbitrary_mut<G2: ?Sized>(&mut self) -> &mut EventGroup<G2> {
+        #[allow(unsafe_code)] // TODO: Use a library
+        unsafe {
+            mem::transmute(self)
+        }
+    }
+
+    pub fn cast<G2: ?Sized + EventGroupMarkerExtends<G>>(self) -> EventGroup<G2> {
+        self.cast_arbitrary()
+    }
+
+    pub fn cast_ref<G2: ?Sized + EventGroupMarkerExtends<G>>(&self) -> &EventGroup<G2> {
+        self.cast_arbitrary_ref()
+    }
+
+    pub fn cast_mut<G2: ?Sized + EventGroupMarkerExtends<G>>(&mut self) -> &mut EventGroup<G2> {
+        self.cast_arbitrary_mut()
     }
 }
 
