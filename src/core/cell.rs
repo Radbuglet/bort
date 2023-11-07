@@ -25,6 +25,8 @@ use std::{
     ptr::NonNull,
 };
 
+use autoken::{ImmutableBorrow, MutableBorrow, Nothing};
+
 use crate::util::misc::{unwrap_error, RawFmt};
 
 // === Borrow state === ///
@@ -374,10 +376,14 @@ impl<T> OptRefCell<T> {
 
     #[track_caller]
     #[inline(always)]
-    pub fn try_borrow(&self) -> Result<Option<OptRef<T>>, BorrowError> {
+    pub fn try_borrow<'l>(
+        &self,
+        loaner: &'l ImmutableBorrow<T>,
+    ) -> Result<Option<OptRef<T, Nothing<'l>>>, BorrowError> {
         if let Some(borrow) = CellBorrowRef::acquire(&self.state, &self.borrowed_at) {
             Ok(Some(OptRef {
                 value: NonNull::from(unsafe { (*self.value.get()).assume_init_ref() }),
+                autoken: loaner.loan(),
                 borrow,
             }))
         } else if self.is_empty() {
@@ -389,10 +395,14 @@ impl<T> OptRefCell<T> {
 
     #[track_caller]
     #[inline(always)]
-    pub fn borrow_or_none(&self) -> Option<OptRef<T>> {
+    pub fn borrow_or_none<'l>(
+        &self,
+        loaner: &'l ImmutableBorrow<T>,
+    ) -> Option<OptRef<T, Nothing<'l>>> {
         if let Some(borrow) = CellBorrowRef::acquire(&self.state, &self.borrowed_at) {
             Some(OptRef {
                 value: NonNull::from(unsafe { (*self.value.get()).assume_init_ref() }),
+                autoken: loaner.loan(),
                 borrow,
             })
         } else if self.is_empty() {
@@ -404,10 +414,11 @@ impl<T> OptRefCell<T> {
 
     #[track_caller]
     #[inline(always)]
-    pub fn borrow(&self) -> OptRef<T> {
+    pub fn borrow(&self) -> OptRef<T, T> {
         if let Some(borrow) = CellBorrowRef::acquire(&self.state, &self.borrowed_at) {
             OptRef {
                 value: NonNull::from(unsafe { (*self.value.get()).assume_init_ref() }),
+                autoken: ImmutableBorrow::new(),
                 borrow,
             }
         } else {
@@ -417,10 +428,21 @@ impl<T> OptRefCell<T> {
 
     #[track_caller]
     #[inline(always)]
-    pub fn try_borrow_mut(&self) -> Result<Option<OptRefMut<T>>, BorrowMutError> {
+    pub fn borrow_on_loan<'l>(&self, loaner: &'l ImmutableBorrow<T>) -> OptRef<T, Nothing<'l>> {
+        let _ = loaner;
+        OptRef::strip_lifetime_analysis(autoken::assume_no_alias(|| self.borrow()))
+    }
+
+    #[track_caller]
+    #[inline(always)]
+    pub fn try_borrow_mut<'l>(
+        &self,
+        loaner: &'l mut MutableBorrow<T>,
+    ) -> Result<Option<OptRefMut<T, Nothing<'l>>>, BorrowMutError> {
         if let Some(borrow) = CellBorrowMut::acquire(&self.state, &self.borrowed_at) {
             Ok(Some(OptRefMut {
                 value: NonNull::from(unsafe { (*self.value.get()).assume_init_mut() }),
+                autoken: loaner.loan(),
                 borrow,
                 marker: PhantomData,
             }))
@@ -433,10 +455,14 @@ impl<T> OptRefCell<T> {
 
     #[track_caller]
     #[inline(always)]
-    pub fn borrow_mut_or_none(&self) -> Option<OptRefMut<T>> {
+    pub fn borrow_mut_or_none<'l>(
+        &self,
+        loaner: &'l mut MutableBorrow<T>,
+    ) -> Option<OptRefMut<T, Nothing<'l>>> {
         if let Some(borrow) = CellBorrowMut::acquire(&self.state, &self.borrowed_at) {
             Some(OptRefMut {
                 value: NonNull::from(unsafe { (*self.value.get()).assume_init_mut() }),
+                autoken: loaner.loan(),
                 borrow,
                 marker: PhantomData,
             })
@@ -449,16 +475,27 @@ impl<T> OptRefCell<T> {
 
     #[track_caller]
     #[inline(always)]
-    pub fn borrow_mut(&self) -> OptRefMut<T> {
+    pub fn borrow_mut(&self) -> OptRefMut<T, T> {
         if let Some(borrow) = CellBorrowMut::acquire(&self.state, &self.borrowed_at) {
             OptRefMut {
                 value: NonNull::from(unsafe { (*self.value.get()).assume_init_mut() }),
+                autoken: MutableBorrow::new(),
                 borrow,
                 marker: PhantomData,
             }
         } else {
             self.failed_to_borrow::<true>();
         }
+    }
+
+    #[track_caller]
+    #[inline(always)]
+    pub fn borrow_mut_on_loan<'l>(
+        &self,
+        loaner: &'l mut MutableBorrow<T>,
+    ) -> OptRefMut<T, Nothing<'l>> {
+        let _ = loaner;
+        OptRefMut::strip_lifetime_analysis(autoken::assume_no_alias(|| self.borrow_mut()))
     }
 
     // === Unguarded borrowing === //
@@ -567,20 +604,25 @@ impl<T> OptRefCell<T> {
 
 impl<T: fmt::Debug> fmt::Debug for OptRefCell<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.try_borrow() {
+        let loaner = ImmutableBorrow::new();
+
+        // For some weird reason, rust thinks destructors are run before the last return statement?
+        let v = match self.try_borrow(&loaner) {
             Ok(borrow) => f.debug_struct("RefCell").field("value", &borrow).finish(),
             Err(_) => f
                 .debug_struct("RefCell")
                 .field("value", &RawFmt("<borrowed>"))
                 .finish(),
-        }
+        };
+        v
     }
 }
 
 impl<T: Clone> Clone for OptRefCell<T> {
     #[track_caller]
     fn clone(&self) -> Self {
-        Self::new(self.borrow_or_none().map(|v| v.clone()))
+        let loaner = ImmutableBorrow::new();
+        Self::new(self.borrow_or_none(&loaner).map(|v| v.clone()))
     }
 }
 
@@ -592,7 +634,11 @@ impl<T> Default for OptRefCell<T> {
 
 impl<T: PartialEq> PartialEq for OptRefCell<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.borrow_or_none().as_deref() == other.borrow_or_none().as_deref()
+        let loaner = ImmutableBorrow::new();
+
+        // For some weird reason, rust thinks destructors are run before the last return statement?
+        let v = self.borrow_or_none(&loaner).as_deref() == other.borrow_or_none(&loaner).as_deref();
+        v
     }
 }
 
@@ -600,17 +646,27 @@ impl<T: Eq> Eq for OptRefCell<T> {}
 
 impl<T: PartialOrd> PartialOrd for OptRefCell<T> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.borrow_or_none()
+        let loaner = ImmutableBorrow::new();
+
+        // For some weird reason, rust thinks destructors are run before the last return statement?
+        let v = self
+            .borrow_or_none(&loaner)
             .as_deref()
-            .partial_cmp(&other.borrow_or_none().as_deref())
+            .partial_cmp(&other.borrow_or_none(&loaner).as_deref());
+        v
     }
 }
 
 impl<T: Ord> Ord for OptRefCell<T> {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.borrow_or_none()
+        let loaner = ImmutableBorrow::new();
+
+        // For some weird reason, rust thinks destructors are run before the last return statement?
+        let v = self
+            .borrow_or_none(&loaner)
             .as_deref()
-            .cmp(&other.borrow_or_none().as_deref())
+            .cmp(&other.borrow_or_none(&loaner).as_deref());
+        v
     }
 }
 
@@ -632,37 +688,41 @@ impl<T> Drop for OptRefCell<T> {
 
 // === OptRef === //
 
-pub struct OptRef<'b, T: ?Sized> {
+pub struct OptRef<'b, T: ?Sized, B: ?Sized = T> {
     value: NonNull<T>,
+    autoken: ImmutableBorrow<B>,
     borrow: CellBorrowRef<'b>,
 }
 
-impl<'b, T: ?Sized> OptRef<'b, T> {
+impl<'b, T: ?Sized, B: ?Sized> OptRef<'b, T, B> {
     #[allow(clippy::should_implement_trait)] // (follows standard library conventions)
     pub fn clone(orig: &Self) -> Self {
         Self {
             value: orig.value,
+            autoken: orig.autoken.clone(),
             borrow: orig.borrow.clone(),
         }
     }
 
-    pub fn map<U: ?Sized, F>(orig: OptRef<'b, T>, f: F) -> OptRef<'b, U>
+    pub fn map<U: ?Sized, F>(orig: OptRef<'b, T, B>, f: F) -> OptRef<'b, U, B>
     where
         F: FnOnce(&T) -> &U,
     {
         OptRef {
             value: NonNull::from(f(&*orig)),
+            autoken: orig.autoken,
             borrow: orig.borrow,
         }
     }
 
-    pub fn filter_map<U: ?Sized, F>(orig: OptRef<'b, T>, f: F) -> Result<OptRef<'b, U>, Self>
+    pub fn filter_map<U: ?Sized, F>(orig: OptRef<'b, T, B>, f: F) -> Result<OptRef<'b, U, B>, Self>
     where
         F: FnOnce(&T) -> Option<&U>,
     {
         match f(&*orig) {
             Some(value) => Ok(OptRef {
                 value: NonNull::from(value),
+                autoken: orig.autoken,
                 borrow: orig.borrow,
             }),
             None => Err(orig),
@@ -670,9 +730,9 @@ impl<'b, T: ?Sized> OptRef<'b, T> {
     }
 
     pub fn map_split<U: ?Sized, V: ?Sized, F>(
-        orig: OptRef<'b, T>,
+        orig: OptRef<'b, T, B>,
         f: F,
-    ) -> (OptRef<'b, U>, OptRef<'b, V>)
+    ) -> (OptRef<'b, U, B>, OptRef<'b, V, B>)
     where
         F: FnOnce(&T) -> (&U, &V),
     {
@@ -681,22 +741,32 @@ impl<'b, T: ?Sized> OptRef<'b, T> {
         (
             OptRef {
                 value: NonNull::from(a),
+                autoken: orig.autoken.clone(),
                 borrow,
             },
             OptRef {
                 value: NonNull::from(b),
+                autoken: orig.autoken,
                 borrow: orig.borrow,
             },
         )
     }
 
-    pub fn leak(orig: OptRef<'b, T>) -> &'b T {
+    pub fn leak(orig: OptRef<'b, T, B>) -> &'b T {
         mem::forget(orig.borrow);
         unsafe { orig.value.as_ref() }
     }
+
+    pub fn strip_lifetime_analysis(orig: OptRef<'b, T, B>) -> OptRef<'b, T, Nothing<'static>> {
+        OptRef {
+            value: orig.value,
+            autoken: orig.autoken.strip_lifetime_analysis(),
+            borrow: orig.borrow,
+        }
+    }
 }
 
-impl<T: ?Sized> Deref for OptRef<'_, T> {
+impl<T: ?Sized, B: ?Sized> Deref for OptRef<'_, T, B> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -704,13 +774,13 @@ impl<T: ?Sized> Deref for OptRef<'_, T> {
     }
 }
 
-impl<T: ?Sized + fmt::Debug> fmt::Debug for OptRef<'_, T> {
+impl<T: ?Sized + fmt::Debug, B: ?Sized> fmt::Debug for OptRef<'_, T, B> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(&**self, f)
     }
 }
 
-impl<T: ?Sized + fmt::Display> fmt::Display for OptRef<'_, T> {
+impl<T: ?Sized + fmt::Display, B: ?Sized> fmt::Display for OptRef<'_, T, B> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&**self, f)
     }
@@ -718,7 +788,8 @@ impl<T: ?Sized + fmt::Display> fmt::Display for OptRef<'_, T> {
 
 // === OptRefMut === //
 
-pub struct OptRefMut<'b, T: ?Sized> {
+pub struct OptRefMut<'b, T: ?Sized, B: ?Sized = T> {
+    autoken: MutableBorrow<B>,
     // NB: we use a pointer instead of `&'b mut T` to avoid `noalias` violations, because a
     // `RefMut` argument doesn't hold exclusivity for its whole scope, only until it drops.
     value: NonNull<T>,
@@ -727,29 +798,31 @@ pub struct OptRefMut<'b, T: ?Sized> {
     marker: PhantomData<&'b mut T>,
 }
 
-impl<'b, T: ?Sized> OptRefMut<'b, T> {
-    pub fn map<U: ?Sized, F>(mut orig: OptRefMut<'b, T>, f: F) -> OptRefMut<'b, U>
+impl<'b, T: ?Sized, B: ?Sized> OptRefMut<'b, T, B> {
+    pub fn map<U: ?Sized, F>(mut orig: OptRefMut<'b, T, B>, f: F) -> OptRefMut<'b, U, B>
     where
         F: FnOnce(&mut T) -> &mut U,
     {
         let value = NonNull::from(f(&mut *orig));
         OptRefMut {
             value,
+            autoken: orig.autoken,
             borrow: orig.borrow,
             marker: PhantomData,
         }
     }
 
     pub fn filter_map<U: ?Sized, F>(
-        mut orig: OptRefMut<'b, T>,
+        mut orig: OptRefMut<'b, T, B>,
         f: F,
-    ) -> Result<OptRefMut<'b, U>, Self>
+    ) -> Result<OptRefMut<'b, U, B>, Self>
     where
         F: FnOnce(&mut T) -> Option<&mut U>,
     {
         match f(&mut *orig) {
             Some(value) => Ok(OptRefMut {
                 value: NonNull::from(value),
+                autoken: orig.autoken,
                 borrow: orig.borrow,
                 marker: PhantomData,
             }),
@@ -758,35 +831,49 @@ impl<'b, T: ?Sized> OptRefMut<'b, T> {
     }
 
     pub fn map_split<U: ?Sized, V: ?Sized, F>(
-        mut orig: OptRefMut<'b, T>,
+        mut orig: OptRefMut<'b, T, B>,
         f: F,
-    ) -> (OptRefMut<'b, U>, OptRefMut<'b, V>)
+    ) -> (OptRefMut<'b, U, B>, OptRefMut<'b, V, B>)
     where
         F: FnOnce(&mut T) -> (&mut U, &mut V),
     {
+        let autoken = orig.autoken.assume_no_alias_clone();
         let borrow = orig.borrow.clone();
         let (a, b) = f(&mut *orig);
         (
             OptRefMut {
                 value: NonNull::from(a),
+                autoken,
                 borrow,
                 marker: PhantomData,
             },
             OptRefMut {
                 value: NonNull::from(b),
+                autoken: orig.autoken,
                 borrow: orig.borrow,
                 marker: PhantomData,
             },
         )
     }
 
-    pub fn leak(mut orig: OptRefMut<'b, T>) -> &'b mut T {
+    pub fn leak(mut orig: OptRefMut<'b, T, B>) -> &'b mut T {
         mem::forget(orig.borrow);
         unsafe { orig.value.as_mut() }
     }
+
+    pub fn strip_lifetime_analysis(
+        orig: OptRefMut<'b, T, B>,
+    ) -> OptRefMut<'b, T, Nothing<'static>> {
+        OptRefMut {
+            autoken: orig.autoken.strip_lifetime_analysis(),
+            value: orig.value,
+            borrow: orig.borrow,
+            marker: orig.marker,
+        }
+    }
 }
 
-impl<T: ?Sized> Deref for OptRefMut<'_, T> {
+impl<T: ?Sized, B: ?Sized> Deref for OptRefMut<'_, T, B> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -794,19 +881,19 @@ impl<T: ?Sized> Deref for OptRefMut<'_, T> {
     }
 }
 
-impl<T: ?Sized> DerefMut for OptRefMut<'_, T> {
+impl<T: ?Sized, B: ?Sized> DerefMut for OptRefMut<'_, T, B> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { self.value.as_mut() }
     }
 }
 
-impl<T: ?Sized + fmt::Debug> fmt::Debug for OptRefMut<'_, T> {
+impl<T: ?Sized + fmt::Debug, B: ?Sized> fmt::Debug for OptRefMut<'_, T, B> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(&**self, f)
     }
 }
 
-impl<T: ?Sized + fmt::Display> fmt::Display for OptRefMut<'_, T> {
+impl<T: ?Sized + fmt::Display, B: ?Sized> fmt::Display for OptRefMut<'_, T, B> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&**self, f)
     }

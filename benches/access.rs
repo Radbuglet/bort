@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 
+use autoken::ImmutableBorrow;
 use bort::{
     core::{cell::OptRefCell, heap::Heap, token::MainThreadToken},
     query, storage, OwnedEntity, OwnedObj, Tag, VirtualTag,
@@ -36,9 +37,10 @@ fn access_tests() {
         let storage = storage::<i32>();
 
         let entity = OwnedEntity::new().with(3i32);
+        let loaner = ImmutableBorrow::new();
 
         c.iter(|| {
-            drop(storage.try_get(entity.entity()).unwrap());
+            drop(storage.try_get(entity.entity(), &loaner).unwrap());
         });
     });
 

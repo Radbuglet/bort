@@ -5,6 +5,8 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use autoken::{ImmutableBorrow, MutableBorrow, Nothing};
+
 use crate::util::misc::NOT_ON_MAIN_THREAD_MSG;
 
 use super::{
@@ -272,10 +274,12 @@ impl<T> NOptRefCell<T> {
     ) {
         self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
 
+        let mut loaner = MutableBorrow::new();
+
         // Safety: we can read and mutate the `value`'s borrow count safely because we are the
         // only thread with "write" namespace access and we know that fact will not change during
         // this operation because *this is the operation we're using to change that fact!*
-        match self.value.try_borrow_mut() {
+        match self.value.try_borrow_mut(&mut loaner) {
             Ok(_) => {}
             Err(err) => {
                 panic!(
@@ -337,10 +341,11 @@ impl<T> NOptRefCell<T> {
     }
 
     #[track_caller]
-    pub fn try_borrow<'a>(
+    pub fn try_borrow<'a, 'l>(
         &'a self,
         token: &'a impl BorrowToken<T>,
-    ) -> Result<Option<OptRef<'a, T>>, BorrowError> {
+        loaner: &'l ImmutableBorrow<T>,
+    ) -> Result<Option<OptRef<'a, T, Nothing<'l>>>, BorrowError> {
         self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
 
         // Safety: we know we can read and write from the `value`'s borrow count safely because
@@ -354,19 +359,23 @@ impl<T> NOptRefCell<T> {
         //
         // We know that it is safe to give this thread access to `T` because `UnJailXyzToken`
         // asserts as much.
-        self.value.try_borrow()
+        self.value.try_borrow(loaner)
     }
 
     #[track_caller]
-    pub fn borrow_or_none<'a>(&'a self, token: &'a impl BorrowToken<T>) -> Option<OptRef<'a, T>> {
+    pub fn borrow_or_none<'a, 'l>(
+        &'a self,
+        token: &'a impl BorrowToken<T>,
+        loaner: &'l ImmutableBorrow<T>,
+    ) -> Option<OptRef<'a, T, Nothing<'l>>> {
         self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
 
         // Safety: see `try_borrow`.
-        self.value.borrow_or_none()
+        self.value.borrow_or_none(loaner)
     }
 
     #[track_caller]
-    pub fn borrow<'a>(&'a self, token: &'a impl BorrowToken<T>) -> OptRef<'a, T> {
+    pub fn borrow<'a>(&'a self, token: &'a impl BorrowToken<T>) -> OptRef<'a, T, T> {
         self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
 
         // Safety: see `try_borrow`.
@@ -374,33 +383,59 @@ impl<T> NOptRefCell<T> {
     }
 
     #[track_caller]
-    pub fn try_borrow_mut<'a>(
+    pub fn borrow_on_loan<'a, 'l>(
         &'a self,
-        token: &'a impl BorrowMutToken<T>,
-    ) -> Result<Option<OptRefMut<'a, T>>, BorrowMutError> {
+        token: &'a impl BorrowToken<T>,
+        loaner: &'l ImmutableBorrow<T>,
+    ) -> OptRef<'a, T, Nothing<'l>> {
         self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
 
         // Safety: see `try_borrow`.
-        self.value.try_borrow_mut()
+        self.value.borrow_on_loan(loaner)
     }
 
     #[track_caller]
-    pub fn borrow_mut_or_none<'a>(
+    pub fn try_borrow_mut<'a, 'l>(
         &'a self,
         token: &'a impl BorrowMutToken<T>,
-    ) -> Option<OptRefMut<'a, T>> {
+        loaner: &'l mut MutableBorrow<T>,
+    ) -> Result<Option<OptRefMut<'a, T, Nothing<'l>>>, BorrowMutError> {
         self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
 
         // Safety: see `try_borrow`.
-        self.value.borrow_mut_or_none()
+        self.value.try_borrow_mut(loaner)
     }
 
     #[track_caller]
-    pub fn borrow_mut<'a>(&'a self, token: &'a impl BorrowMutToken<T>) -> OptRefMut<'a, T> {
+    pub fn borrow_mut_or_none<'a, 'l>(
+        &'a self,
+        token: &'a impl BorrowMutToken<T>,
+        loaner: &'l mut MutableBorrow<T>,
+    ) -> Option<OptRefMut<'a, T, Nothing<'l>>> {
+        self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
+
+        // Safety: see `try_borrow`.
+        self.value.borrow_mut_or_none(loaner)
+    }
+
+    #[track_caller]
+    pub fn borrow_mut<'a>(&'a self, token: &'a impl BorrowMutToken<T>) -> OptRefMut<'a, T, T> {
         self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
 
         // Safety: see `try_borrow`.
         self.value.borrow_mut()
+    }
+
+    #[track_caller]
+    pub fn borrow_mut_on_loan<'a, 'l>(
+        &'a self,
+        token: &'a impl BorrowMutToken<T>,
+        loaner: &'l mut MutableBorrow<T>,
+    ) -> OptRefMut<'a, T, Nothing<'l>> {
+        self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
+
+        // Safety: see `try_borrow`.
+        self.value.borrow_mut_on_loan(loaner)
     }
 
     // === Replace === //

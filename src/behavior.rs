@@ -420,14 +420,14 @@ pub use delegate;
 pub struct ComponentInjector;
 
 impl<T: 'static> FuncMethodInjectorRef<T> for ComponentInjector {
-    type Guard<'a> = CompRef<'static, T>;
+    type Guard<'a> = CompRef<'static, T, T>;
     type Injector = for<'a> fn(&'a (), &mut Entity) -> Self::Guard<'a>;
 
     const INJECTOR: Self::Injector = |_, me| me.get();
 }
 
 impl<T: 'static> FuncMethodInjectorMut<T> for ComponentInjector {
-    type Guard<'a> = CompMut<'static, T>;
+    type Guard<'a> = CompMut<'static, T, T>;
     type Injector = for<'a> fn(&'a (), &mut Entity) -> Self::Guard<'a>;
 
     const INJECTOR: Self::Injector = |_, me| me.get_mut();
@@ -1080,12 +1080,12 @@ impl PartialEntity<'_> {
         self.target.insert(component);
     }
 
-    pub fn get<T: 'static>(self) -> CompRef<'static, T> {
+    pub fn get<T: 'static>(self) -> CompRef<'static, T, T> {
         assert!(self.can_access.contains(&TypeId::of::<T>()));
         self.target.get()
     }
 
-    pub fn get_mut<T: 'static>(self) -> CompMut<'static, T> {
+    pub fn get_mut<T: 'static>(self) -> CompMut<'static, T, T> {
         assert!(self.can_access.contains(&TypeId::of::<T>()));
         self.target.get_mut()
     }

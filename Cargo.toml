@@ -4,29 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+autoken = { git = "https://github.com/Radbuglet/autoken.git", rev = "0dcb9ba10c31c3c2fb9376f9d3668659b9c1e924" }
 cfgenius = "0.1.0"
 derive-where = "1.2.1"
 hashbrown = { version = "0.14.0", default-features = false, features = ["raw"] }
 rustc-hash = "1.1.0"
-
-[dependencies.compost2]
-git = "https://github.com/Radbuglet/compost.git"
-rev = "7727c0642b9762be5968e71b58ba3c9a04117669"
-optional = true
-
-[dependencies.saddle]
-git = "https://github.com/Radbuglet/saddle.git"
-rev = "9fd359cbb3597630496e627fcd49578b06518bfc"
-optional = true
-
-[dependencies.partial-scope]
-git = "https://github.com/Radbuglet/saddle.git"
-rev = "9fd359cbb3597630496e627fcd49578b06518bfc"
-optional = true
-
-[features]
-default = ["saddle"]
-saddle = ["dep:compost2", "dep:saddle", "dep:partial-scope"]
 
 [dev-dependencies]
 criterion = "0.5.1"

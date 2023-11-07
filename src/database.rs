@@ -6,6 +6,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use autoken::MutableBorrow;
 use derive_where::derive_where;
 
 use crate::{
@@ -323,7 +324,7 @@ impl InertTag {
 
 impl DbRoot {
     #[track_caller]
-    pub fn get(token: &'static MainThreadToken) -> OptRefMut<'static, DbRoot> {
+    pub fn get(token: &'static MainThreadToken) -> OptRefMut<'static, DbRoot, DbRoot> {
         static DB: NOptRefCell<DbRoot> = NOptRefCell::new_empty();
 
         if DB.is_empty(token) {
@@ -500,7 +501,7 @@ impl DbRoot {
 
     // === Queries === //
 
-    pub fn borrow_query_guard(&self, token: &'static MainThreadToken) -> OptRef<'static, ()> {
+    pub fn borrow_query_guard(&self, token: &'static MainThreadToken) -> OptRef<'static, (), ()> {
         self.query_guard.borrow(token)
     }
 
@@ -606,9 +607,10 @@ impl DbRoot {
         &mut self,
         token: &'static MainThreadToken,
     ) -> Result<(), ConcurrentFlushError> {
+        let mut guard_loaner = MutableBorrow::new();
         let _guard = self
             .query_guard
-            .try_borrow_mut(token)
+            .try_borrow_mut(token, &mut guard_loaner)
             .map_err(|_| ConcurrentFlushError)?;
 
         let mut may_need_truncation = FxHashSet::default();

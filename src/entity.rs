@@ -5,6 +5,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
+use autoken::{ImmutableBorrow, MutableBorrow, Nothing};
 use derive_where::derive_where;
 
 use crate::{
@@ -100,27 +101,35 @@ impl<T: 'static> Storage<T> {
     }
 
     #[track_caller]
-    pub fn try_get(&self, entity: Entity) -> Option<CompRef<'static, T>> {
+    pub fn try_get<'l>(
+        &self,
+        entity: Entity,
+        loaner: &'l ImmutableBorrow<T>,
+    ) -> Option<CompRef<'static, T, Nothing<'l>>> {
         self.try_get_slot(entity).map(|slot| {
             CompRef::new(
                 Obj::from_raw_parts(entity, slot),
-                slot.borrow(self.token.make_ref()),
+                slot.borrow_on_loan(self.token.make_ref(), loaner),
             )
         })
     }
 
     #[track_caller]
-    pub fn try_get_mut(&self, entity: Entity) -> Option<CompMut<'static, T>> {
+    pub fn try_get_mut<'l>(
+        &self,
+        entity: Entity,
+        loaner: &'l mut MutableBorrow<T>,
+    ) -> Option<CompMut<'static, T, Nothing<'l>>> {
         self.try_get_slot(entity).map(|slot| {
             CompMut::new(
                 Obj::from_raw_parts(entity, slot),
-                slot.borrow_mut(self.token.make_ref()),
+                slot.borrow_mut_on_loan(self.token.make_ref(), loaner),
             )
         })
     }
 
     #[track_caller]
-    pub fn get(&self, entity: Entity) -> CompRef<'static, T> {
+    pub fn get(&self, entity: Entity) -> CompRef<'static, T, T> {
         let slot = self.get_slot(entity);
 
         CompRef::new(
@@ -130,12 +139,40 @@ impl<T: 'static> Storage<T> {
     }
 
     #[track_caller]
-    pub fn get_mut(&self, entity: Entity) -> CompMut<'static, T> {
+    pub fn get_on_loan<'l>(
+        &self,
+        entity: Entity,
+        loaner: &'l ImmutableBorrow<T>,
+    ) -> CompRef<'static, T, Nothing<'l>> {
+        let slot = self.get_slot(entity);
+
+        CompRef::new(
+            Obj::from_raw_parts(entity, slot),
+            slot.borrow_on_loan(self.token.make_ref(), loaner),
+        )
+    }
+
+    #[track_caller]
+    pub fn get_mut(&self, entity: Entity) -> CompMut<'static, T, T> {
         let slot = self.get_slot(entity);
 
         CompMut::new(
             Obj::from_raw_parts(entity, slot),
             slot.borrow_mut(self.token.make_ref()),
+        )
+    }
+
+    #[track_caller]
+    pub fn get_mut_on_loan<'l>(
+        &self,
+        entity: Entity,
+        loaner: &'l mut MutableBorrow<T>,
+    ) -> CompMut<'static, T, Nothing<'l>> {
+        let slot = self.get_slot(entity);
+
+        CompMut::new(
+            Obj::from_raw_parts(entity, slot),
+            slot.borrow_mut_on_loan(self.token.make_ref(), loaner),
         )
     }
 
@@ -202,13 +239,19 @@ impl Entity {
     }
 
     #[track_caller]
-    pub fn try_get<T: 'static>(self) -> Option<CompRef<'static, T>> {
-        storage::<T>().try_get(self)
+    pub fn try_get<T: 'static>(
+        self,
+        loaner: &ImmutableBorrow<T>,
+    ) -> Option<CompRef<'static, T, Nothing<'_>>> {
+        storage::<T>().try_get(self, loaner)
     }
 
     #[track_caller]
-    pub fn try_get_mut<T: 'static>(self) -> Option<CompMut<'static, T>> {
-        storage::<T>().try_get_mut(self)
+    pub fn try_get_mut<T: 'static>(
+        self,
+        loaner: &mut MutableBorrow<T>,
+    ) -> Option<CompMut<'static, T, Nothing<'_>>> {
+        storage::<T>().try_get_mut(self, loaner)
     }
 
     pub fn get_slot<T: 'static>(self) -> Slot<T> {
@@ -216,13 +259,29 @@ impl Entity {
     }
 
     #[track_caller]
-    pub fn get<T: 'static>(self) -> CompRef<'static, T> {
+    pub fn get<T: 'static>(self) -> CompRef<'static, T, T> {
         storage::<T>().get(self)
     }
 
     #[track_caller]
-    pub fn get_mut<T: 'static>(self) -> CompMut<'static, T> {
+    pub fn get_on_loan<T: 'static>(
+        self,
+        loaner: &ImmutableBorrow<T>,
+    ) -> CompRef<'static, T, Nothing<'_>> {
+        storage::<T>().get_on_loan(self, loaner)
+    }
+
+    #[track_caller]
+    pub fn get_mut<T: 'static>(self) -> CompMut<'static, T, T> {
         storage::<T>().get_mut(self)
+    }
+
+    #[track_caller]
+    pub fn get_mut_on_loan<T: 'static>(
+        self,
+        loaner: &mut MutableBorrow<T>,
+    ) -> CompMut<'static, T, Nothing<'_>> {
+        storage::<T>().get_mut_on_loan(self, loaner)
     }
 
     pub fn has<T: 'static>(self) -> bool {
@@ -389,13 +448,19 @@ impl OwnedEntity {
     }
 
     #[track_caller]
-    pub fn try_get<T: 'static>(&self) -> Option<CompRef<'static, T>> {
-        self.entity.try_get()
+    pub fn try_get<'l, T: 'static>(
+        &self,
+        loaner: &'l ImmutableBorrow<T>,
+    ) -> Option<CompRef<'static, T, Nothing<'l>>> {
+        self.entity.try_get(loaner)
     }
 
     #[track_caller]
-    pub fn try_get_mut<T: 'static>(&self) -> Option<CompMut<'static, T>> {
-        self.entity.try_get_mut()
+    pub fn try_get_mut<'l, T: 'static>(
+        &self,
+        loaner: &'l mut MutableBorrow<T>,
+    ) -> Option<CompMut<'static, T, Nothing<'l>>> {
+        self.entity.try_get_mut(loaner)
     }
 
     pub fn get_slot<T: 'static>(&self) -> Slot<T> {
@@ -403,13 +468,29 @@ impl OwnedEntity {
     }
 
     #[track_caller]
-    pub fn get<T: 'static>(&self) -> CompRef<'static, T> {
+    pub fn get<T: 'static>(&self) -> CompRef<'static, T, T> {
         self.entity.get()
     }
 
     #[track_caller]
-    pub fn get_mut<T: 'static>(&self) -> CompMut<'static, T> {
+    pub fn get_on_loan<'l, T: 'static>(
+        &self,
+        loaner: &'l ImmutableBorrow<T>,
+    ) -> CompRef<'static, T, Nothing<'l>> {
+        self.entity.get_on_loan(loaner)
+    }
+
+    #[track_caller]
+    pub fn get_mut<T: 'static>(&self) -> CompMut<'static, T, T> {
         self.entity.get_mut()
+    }
+
+    #[track_caller]
+    pub fn get_mut_on_loan<'l, T: 'static>(
+        &self,
+        loaner: &'l mut MutableBorrow<T>,
+    ) -> CompMut<'static, T, Nothing<'l>> {
+        self.entity.get_mut_on_loan(loaner)
     }
 
     pub fn has<T: 'static>(&self) -> bool {
@@ -476,28 +557,28 @@ impl Drop for OwnedEntity {
 
 // === `CompRef` and `CompMut` === //
 
-pub struct CompRef<'b, T: ?Sized, O: Copy = Obj<T>> {
+pub struct CompRef<'b, T: ?Sized, B: ?Sized = T, O: Copy = Obj<T>> {
     owner: O,
-    value: OptRef<'b, T>,
+    value: OptRef<'b, T, B>,
 }
 
-impl<'b, T: ?Sized, O: Copy> CompRef<'b, T, O> {
-    pub fn new(owner: O, value: OptRef<'b, T>) -> Self {
+impl<'b, T: ?Sized, B: ?Sized, O: Copy> CompRef<'b, T, B, O> {
+    pub fn new(owner: O, value: OptRef<'b, T, B>) -> Self {
         Self { owner, value }
     }
 
-    pub fn into_opt_ref(orig: Self) -> OptRef<'b, T> {
+    pub fn into_opt_ref(orig: Self) -> OptRef<'b, T, B> {
         orig.value
     }
 
-    pub fn map_owner<P: Copy>(orig: Self, f: impl FnOnce(O) -> P) -> CompRef<'b, T, P> {
+    pub fn map_owner<P: Copy>(orig: Self, f: impl FnOnce(O) -> P) -> CompRef<'b, T, B, P> {
         CompRef {
             owner: f(orig.owner),
             value: orig.value,
         }
     }
 
-    pub fn erase_owner(orig: Self) -> CompRef<'b, T, Entity>
+    pub fn erase_owner(orig: Self) -> CompRef<'b, T, B, Entity>
     where
         O: Into<Entity>,
     {
@@ -516,7 +597,7 @@ impl<'b, T: ?Sized, O: Copy> CompRef<'b, T, O> {
         }
     }
 
-    pub fn map<U: ?Sized, F>(orig: CompRef<'b, T, O>, f: F) -> CompRef<'b, U, O>
+    pub fn map<U: ?Sized, F>(orig: CompRef<'b, T, B, O>, f: F) -> CompRef<'b, U, B, O>
     where
         F: FnOnce(&T) -> &U,
     {
@@ -527,9 +608,9 @@ impl<'b, T: ?Sized, O: Copy> CompRef<'b, T, O> {
     }
 
     pub fn filter_map<U: ?Sized, F>(
-        orig: CompRef<'b, T, O>,
+        orig: CompRef<'b, T, B, O>,
         f: F,
-    ) -> Result<CompRef<'b, U, O>, Self>
+    ) -> Result<CompRef<'b, U, B, O>, Self>
     where
         F: FnOnce(&T) -> Option<&U>,
     {
@@ -542,9 +623,9 @@ impl<'b, T: ?Sized, O: Copy> CompRef<'b, T, O> {
     }
 
     pub fn map_split<U: ?Sized, V: ?Sized, F>(
-        orig: CompRef<'b, T, O>,
+        orig: CompRef<'b, T, B, O>,
         f: F,
-    ) -> (CompRef<'b, U, O>, CompRef<'b, V, O>)
+    ) -> (CompRef<'b, U, B, O>, CompRef<'b, V, B, O>)
     where
         F: FnOnce(&T) -> (&U, &V),
     {
@@ -560,12 +641,21 @@ impl<'b, T: ?Sized, O: Copy> CompRef<'b, T, O> {
         )
     }
 
-    pub fn leak(orig: CompRef<'b, T, O>) -> &'b T {
+    pub fn leak(orig: CompRef<'b, T, B, O>) -> &'b T {
         OptRef::leak(orig.value)
+    }
+
+    pub fn strip_lifetime_analysis(
+        orig: CompRef<'b, T, B, O>,
+    ) -> CompRef<'b, T, Nothing<'static>, O> {
+        CompRef {
+            owner: orig.owner,
+            value: OptRef::strip_lifetime_analysis(orig.value),
+        }
     }
 }
 
-impl<T: ?Sized, O: Copy> Deref for CompRef<'_, T, O> {
+impl<T: ?Sized, B: ?Sized, O: Copy> Deref for CompRef<'_, T, B, O> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -573,33 +663,33 @@ impl<T: ?Sized, O: Copy> Deref for CompRef<'_, T, O> {
     }
 }
 
-impl<T: ?Sized + fmt::Debug, O: Copy> fmt::Debug for CompRef<'_, T, O> {
+impl<T: ?Sized + fmt::Debug, B: ?Sized, O: Copy> fmt::Debug for CompRef<'_, T, B, O> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.value.fmt(f)
     }
 }
 
-impl<T: ?Sized + fmt::Display, O: Copy> fmt::Display for CompRef<'_, T, O> {
+impl<T: ?Sized + fmt::Display, B: ?Sized, O: Copy> fmt::Display for CompRef<'_, T, B, O> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.value.fmt(f)
     }
 }
 
-pub struct CompMut<'b, T: ?Sized, O: Copy = Obj<T>> {
+pub struct CompMut<'b, T: ?Sized, B: ?Sized = T, O: Copy = Obj<T>> {
     owner: O,
-    value: OptRefMut<'b, T>,
+    value: OptRefMut<'b, T, B>,
 }
 
-impl<'b, T: ?Sized, O: Copy> CompMut<'b, T, O> {
-    pub fn new(owner: O, value: OptRefMut<'b, T>) -> Self {
+impl<'b, T: ?Sized, B: ?Sized, O: Copy> CompMut<'b, T, B, O> {
+    pub fn new(owner: O, value: OptRefMut<'b, T, B>) -> Self {
         Self { owner, value }
     }
 
-    pub fn into_opt_ref_mut(orig: Self) -> OptRefMut<'b, T> {
+    pub fn into_opt_ref_mut(orig: Self) -> OptRefMut<'b, T, B> {
         orig.value
     }
 
-    pub fn map_owner<P: Copy>(orig: Self, f: impl FnOnce(O) -> P) -> CompMut<'b, T, P> {
+    pub fn map_owner<P: Copy>(orig: Self, f: impl FnOnce(O) -> P) -> CompMut<'b, T, B, P> {
         CompMut {
             owner: f(orig.owner),
             value: orig.value,
@@ -610,7 +700,7 @@ impl<'b, T: ?Sized, O: Copy> CompMut<'b, T, O> {
         orig.owner
     }
 
-    pub fn map<U: ?Sized, F>(orig: CompMut<'b, T, O>, f: F) -> CompMut<'b, U, O>
+    pub fn map<U: ?Sized, F>(orig: CompMut<'b, T, B, O>, f: F) -> CompMut<'b, U, B, O>
     where
         F: FnOnce(&mut T) -> &mut U,
     {
@@ -621,9 +711,9 @@ impl<'b, T: ?Sized, O: Copy> CompMut<'b, T, O> {
     }
 
     pub fn filter_map<U: ?Sized, F>(
-        orig: CompMut<'b, T, O>,
+        orig: CompMut<'b, T, B, O>,
         f: F,
-    ) -> Result<CompMut<'b, U, O>, Self>
+    ) -> Result<CompMut<'b, U, B, O>, Self>
     where
         F: FnOnce(&mut T) -> Option<&mut U>,
     {
@@ -642,9 +732,9 @@ impl<'b, T: ?Sized, O: Copy> CompMut<'b, T, O> {
     }
 
     pub fn map_split<U: ?Sized, V: ?Sized, F>(
-        orig: CompMut<'b, T, O>,
+        orig: CompMut<'b, T, B, O>,
         f: F,
-    ) -> (CompMut<'b, U, O>, CompMut<'b, V, O>)
+    ) -> (CompMut<'b, U, B, O>, CompMut<'b, V, B, O>)
     where
         F: FnOnce(&mut T) -> (&mut U, &mut V),
     {
@@ -663,12 +753,21 @@ impl<'b, T: ?Sized, O: Copy> CompMut<'b, T, O> {
         )
     }
 
-    pub fn leak(orig: CompMut<'b, T, O>) -> &'b mut T {
+    pub fn leak(orig: CompMut<'b, T, B, O>) -> &'b mut T {
         OptRefMut::leak(orig.value)
+    }
+
+    pub fn strip_lifetime_analysis(
+        orig: CompMut<'b, T, B, O>,
+    ) -> CompMut<'b, T, Nothing<'static>, O> {
+        CompMut {
+            owner: orig.owner,
+            value: OptRefMut::strip_lifetime_analysis(orig.value),
+        }
     }
 }
 
-impl<T: ?Sized, O: Copy> Deref for CompMut<'_, T, O> {
+impl<T: ?Sized, B: ?Sized, O: Copy> Deref for CompMut<'_, T, B, O> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -676,19 +775,19 @@ impl<T: ?Sized, O: Copy> Deref for CompMut<'_, T, O> {
     }
 }
 
-impl<T: ?Sized, O: Copy> DerefMut for CompMut<'_, T, O> {
+impl<T: ?Sized, B: ?Sized, O: Copy> DerefMut for CompMut<'_, T, B, O> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.value
     }
 }
 
-impl<T: ?Sized + fmt::Debug, O: Copy> fmt::Debug for CompMut<'_, T, O> {
+impl<T: ?Sized + fmt::Debug, B: ?Sized, O: Copy> fmt::Debug for CompMut<'_, T, B, O> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(&**self, f)
     }
 }
 
-impl<T: ?Sized + fmt::Display, O: Copy> fmt::Display for CompMut<'_, T, O> {
+impl<T: ?Sized + fmt::Display, B: ?Sized, O: Copy> fmt::Display for CompMut<'_, T, B, O> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&**self, f)
     }

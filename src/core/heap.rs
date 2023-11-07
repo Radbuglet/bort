@@ -5,6 +5,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering::Relaxed},
 };
 
+use autoken::{ImmutableBorrow, MutableBorrow, Nothing};
 use derive_where::derive_where;
 
 use crate::{
@@ -319,18 +320,22 @@ impl<'a, T: 'static> DirectSlot<'a, T> {
     }
 
     #[track_caller]
-    pub fn borrow_or_none(self, token: &impl BorrowToken<T>) -> Option<OptRef<T>> {
+    pub fn borrow_or_none<'b, 'l>(
+        self,
+        token: &'b impl BorrowToken<T>,
+        loaner: &'l ImmutableBorrow<T>,
+    ) -> Option<OptRef<'b, T, Nothing<'l>>> {
         unsafe {
             // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
             // precludes deletion until the reference expires.
             self.heap_value_prolonged()
         }
         .value
-        .borrow_or_none(token)
+        .borrow_or_none(token, loaner)
     }
 
     #[track_caller]
-    pub fn borrow(self, token: &impl BorrowToken<T>) -> OptRef<T> {
+    pub fn borrow(self, token: &impl BorrowToken<T>) -> OptRef<T, T> {
         unsafe {
             // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
             // precludes deletion until the reference expires.
@@ -341,18 +346,37 @@ impl<'a, T: 'static> DirectSlot<'a, T> {
     }
 
     #[track_caller]
-    pub fn borrow_mut_or_none(self, token: &impl BorrowMutToken<T>) -> Option<OptRefMut<T>> {
+    pub fn borrow_on_loan<'b, 'l>(
+        self,
+        token: &'b impl BorrowToken<T>,
+        loaner: &'l ImmutableBorrow<T>,
+    ) -> OptRef<'b, T, Nothing<'l>> {
         unsafe {
             // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
             // precludes deletion until the reference expires.
             self.heap_value_prolonged()
         }
         .value
-        .borrow_mut_or_none(token)
+        .borrow_on_loan(token, loaner)
     }
 
     #[track_caller]
-    pub fn borrow_mut(self, token: &impl BorrowMutToken<T>) -> OptRefMut<T> {
+    pub fn borrow_mut_or_none<'b, 'l>(
+        self,
+        token: &'b impl BorrowMutToken<T>,
+        loaner: &'l mut MutableBorrow<T>,
+    ) -> Option<OptRefMut<'b, T, Nothing<'l>>> {
+        unsafe {
+            // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
+            // precludes deletion until the reference expires.
+            self.heap_value_prolonged()
+        }
+        .value
+        .borrow_mut_or_none(token, loaner)
+    }
+
+    #[track_caller]
+    pub fn borrow_mut(self, token: &impl BorrowMutToken<T>) -> OptRefMut<T, T> {
         unsafe {
             // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
             // precludes deletion until the reference expires.
@@ -360,6 +384,21 @@ impl<'a, T: 'static> DirectSlot<'a, T> {
         }
         .value
         .borrow_mut(token)
+    }
+
+    #[track_caller]
+    pub fn borrow_mut_on_loan<'b, 'l>(
+        self,
+        token: &'b impl BorrowMutToken<T>,
+        loaner: &'l mut MutableBorrow<T>,
+    ) -> OptRefMut<'b, T, Nothing<'l>> {
+        unsafe {
+            // Safety: is this function succeeds, it will return an `OptRef` to its contents, which
+            // precludes deletion until the reference expires.
+            self.heap_value_prolonged()
+        }
+        .value
+        .borrow_mut_on_loan(token, loaner)
     }
 
     #[track_caller]
@@ -477,17 +516,21 @@ impl<T> Slot<T> {
     }
 
     #[track_caller]
-    pub fn borrow_or_none(self, token: &impl BorrowToken<T>) -> Option<OptRef<T>> {
+    pub fn borrow_or_none<'b, 'l>(
+        self,
+        token: &'b impl BorrowToken<T>,
+        loaner: &'l ImmutableBorrow<T>,
+    ) -> Option<OptRef<'b, T, Nothing<'l>>> {
         unsafe {
             // Safety: we only use the `DirectSlot` until the function returns, and we know the
             // direct slot cannot be invalidated until then because we never call something which
             // could potentially destroy the heap.
-            self.direct_slot(token).borrow_or_none(token)
+            self.direct_slot(token).borrow_or_none(token, loaner)
         }
     }
 
     #[track_caller]
-    pub fn borrow(self, token: &impl BorrowToken<T>) -> OptRef<T> {
+    pub fn borrow(self, token: &impl BorrowToken<T>) -> OptRef<T, T> {
         unsafe {
             // Safety: we only use the `DirectSlot` until the function returns, and we know the
             // direct slot cannot be invalidated until then because we never call something which
@@ -497,22 +540,54 @@ impl<T> Slot<T> {
     }
 
     #[track_caller]
-    pub fn borrow_mut_or_none(self, token: &impl BorrowMutToken<T>) -> Option<OptRefMut<T>> {
+    pub fn borrow_on_loan<'b, 'l>(
+        self,
+        token: &'b impl BorrowToken<T>,
+        loaner: &'l ImmutableBorrow<T>,
+    ) -> OptRef<'b, T, Nothing<'l>> {
         unsafe {
             // Safety: we only use the `DirectSlot` until the function returns, and we know the
             // direct slot cannot be invalidated until then because we never call something which
             // could potentially destroy the heap.
-            self.direct_slot(token).borrow_mut_or_none(token)
+            self.direct_slot(token).borrow_on_loan(token, loaner)
         }
     }
 
     #[track_caller]
-    pub fn borrow_mut(self, token: &impl BorrowMutToken<T>) -> OptRefMut<T> {
+    pub fn borrow_mut_or_none<'b, 'l>(
+        self,
+        token: &'b impl BorrowMutToken<T>,
+        loaner: &'l mut MutableBorrow<T>,
+    ) -> Option<OptRefMut<'b, T, Nothing<'l>>> {
+        unsafe {
+            // Safety: we only use the `DirectSlot` until the function returns, and we know the
+            // direct slot cannot be invalidated until then because we never call something which
+            // could potentially destroy the heap.
+            self.direct_slot(token).borrow_mut_or_none(token, loaner)
+        }
+    }
+
+    #[track_caller]
+    pub fn borrow_mut(self, token: &impl BorrowMutToken<T>) -> OptRefMut<T, T> {
         unsafe {
             // Safety: we only use the `DirectSlot` until the function returns, and we know the
             // direct slot cannot be invalidated until then because we never call something which
             // could potentially destroy the heap.
             self.direct_slot(token).borrow_mut(token)
+        }
+    }
+
+    #[track_caller]
+    pub fn borrow_mut_on_loan<'b, 'l>(
+        self,
+        token: &'b impl BorrowMutToken<T>,
+        loaner: &'l mut MutableBorrow<T>,
+    ) -> OptRefMut<'b, T, Nothing<'l>> {
+        unsafe {
+            // Safety: we only use the `DirectSlot` until the function returns, and we know the
+            // direct slot cannot be invalidated until then because we never call something which
+            // could potentially destroy the heap.
+            self.direct_slot(token).borrow_mut_on_loan(token, loaner)
         }
     }
 

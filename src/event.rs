@@ -332,7 +332,7 @@ impl<G: ?Sized> EventGroup<G> {
         }
     }
 
-    pub fn get<E>(&self) -> OptRef<'_, G::List>
+    pub fn get<E>(&self) -> OptRef<'_, G::List, G::List>
     where
         G: EventGroupMarkerWithSeparated<E>,
     {
@@ -344,7 +344,7 @@ impl<G: ?Sized> EventGroup<G> {
         })
     }
 
-    pub fn get_mut<E>(&self) -> OptRefMut<'_, G::List>
+    pub fn get_mut<E>(&self) -> OptRefMut<'_, G::List, G::List>
     where
         G: EventGroupMarkerWithSeparated<E>,
     {

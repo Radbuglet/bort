@@ -10,15 +10,7 @@ pub mod obj;
 pub mod query;
 mod util;
 
-cfgenius::define! {
-    pub HAS_SADDLE_SUPPORT = cfg(feature = "saddle")
-}
-
-cfgenius::cond! {
-    if macro(HAS_SADDLE_SUPPORT) {
-        pub mod saddle;
-    }
-}
+pub use autoken;
 
 pub mod prelude {
     pub use crate::{
@@ -37,12 +29,6 @@ pub mod prelude {
             RawTag, Tag, VirtualTag,
         },
     };
-
-    cfgenius::cond! {
-        if macro(super::HAS_SADDLE_SUPPORT) {
-            pub use crate::saddle::{alias, Cx, cx, Scope, ScopeExt, scope, behavior_s};
-        }
-    }
 }
 
 pub use prelude::*;
