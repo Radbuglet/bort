@@ -5,7 +5,9 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use autoken::{ImmutableBorrow, MutableBorrow, Nothing};
+use autoken::{
+    ImmutableBorrow, MutableBorrow, Nothing, PotentialImmutableBorrow, PotentialMutableBorrow,
+};
 
 use crate::util::misc::NOT_ON_MAIN_THREAD_MSG;
 
@@ -274,12 +276,13 @@ impl<T> NOptRefCell<T> {
     ) {
         self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
 
+        // This borrow either happens or it results in a panic.
         let mut loaner = MutableBorrow::new();
 
         // Safety: we can read and mutate the `value`'s borrow count safely because we are the
         // only thread with "write" namespace access and we know that fact will not change during
         // this operation because *this is the operation we're using to change that fact!*
-        match self.value.try_borrow_mut(&mut loaner) {
+        match self.value.try_borrow_mut(loaner.downgrade_mut()) {
             Ok(_) => {}
             Err(err) => {
                 panic!(
@@ -344,7 +347,7 @@ impl<T> NOptRefCell<T> {
     pub fn try_borrow<'a, 'l>(
         &'a self,
         token: &'a impl BorrowToken<T>,
-        loaner: &'l ImmutableBorrow<T>,
+        loaner: &'l PotentialImmutableBorrow<T>,
     ) -> Result<Option<OptRef<'a, T, Nothing<'l>>>, BorrowError> {
         self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
 
@@ -398,7 +401,7 @@ impl<T> NOptRefCell<T> {
     pub fn try_borrow_mut<'a, 'l>(
         &'a self,
         token: &'a impl BorrowMutToken<T>,
-        loaner: &'l mut MutableBorrow<T>,
+        loaner: &'l mut PotentialMutableBorrow<T>,
     ) -> Result<Option<OptRefMut<'a, T, Nothing<'l>>>, BorrowMutError> {
         self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
 

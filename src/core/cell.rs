@@ -25,7 +25,9 @@ use std::{
     ptr::NonNull,
 };
 
-use autoken::{ImmutableBorrow, MutableBorrow, Nothing};
+use autoken::{
+    ImmutableBorrow, MutableBorrow, Nothing, PotentialImmutableBorrow, PotentialMutableBorrow,
+};
 
 use crate::util::misc::{unwrap_error, RawFmt};
 
@@ -378,7 +380,7 @@ impl<T> OptRefCell<T> {
     #[inline(always)]
     pub fn try_borrow<'l>(
         &self,
-        loaner: &'l ImmutableBorrow<T>,
+        loaner: &'l PotentialImmutableBorrow<T>,
     ) -> Result<Option<OptRef<T, Nothing<'l>>>, BorrowError> {
         if let Some(borrow) = CellBorrowRef::acquire(&self.state, &self.borrowed_at) {
             Ok(Some(OptRef {
@@ -437,7 +439,7 @@ impl<T> OptRefCell<T> {
     #[inline(always)]
     pub fn try_borrow_mut<'l>(
         &self,
-        loaner: &'l mut MutableBorrow<T>,
+        loaner: &'l mut PotentialMutableBorrow<T>,
     ) -> Result<Option<OptRefMut<T, Nothing<'l>>>, BorrowMutError> {
         if let Some(borrow) = CellBorrowMut::acquire(&self.state, &self.borrowed_at) {
             Ok(Some(OptRefMut {
@@ -604,7 +606,7 @@ impl<T> OptRefCell<T> {
 
 impl<T: fmt::Debug> fmt::Debug for OptRefCell<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let loaner = ImmutableBorrow::new();
+        let loaner = PotentialImmutableBorrow::new();
 
         // For some weird reason, rust thinks destructors are run before the last return statement?
         let v = match self.try_borrow(&loaner) {

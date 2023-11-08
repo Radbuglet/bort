@@ -4,7 +4,7 @@ use derive_where::derive_where;
 
 use crate::{
     core::token::MainThreadToken,
-    database::{get_global_tag, DbRoot, DbStorage, InertTag},
+    database::{get_global_tag, DbRoot, DbStorage, InertTag, RecursiveQueryGuardTy},
     entity::Storage,
     util::misc::NamedTypeId,
 };
@@ -184,11 +184,13 @@ pub fn try_flush() -> bool {
     DbRoot::get(token).flush_archetypes(token).is_ok()
 }
 
+fn flush_with_custom_msg(msg: &'static str) {
+    autoken::assert_mutably_borrowable::<RecursiveQueryGuardTy>();
+    assert!(try_flush(), "{msg}");
+}
+
 pub fn flush() {
-    assert!(
-        try_flush(),
-        "attempted to flush the entity database while a query was active"
-    );
+    flush_with_custom_msg("attempted to flush the entity database while a query was active");
 }
 
 // === Queries === //
@@ -213,7 +215,6 @@ pub mod query_internals {
             query::try_flush,
         },
         std::{
-            assert,
             convert::Into,
             hint::unreachable_unchecked,
             iter::{empty, Iterator},
@@ -326,6 +327,15 @@ pub mod query_internals {
     }
 
     impl<T: ?Sized + QueryableEventList> QueryableEventListCallSyntaxHelper for T {}
+
+    // === Force Flush === //
+
+    pub fn flush() {
+        super::flush_with_custom_msg(
+            "Attempted to run a query inside another query, which is forbidden by default. \
+		     If this behavior is intended, use the `rec for` syntax instead of the `for` syntax.",
+        );
+    }
 }
 
 #[macro_export]
@@ -441,11 +451,7 @@ macro_rules! query {
             $($body:tt)*
         }
     ) => {{
-        $crate::query::query_internals::assert!(
-            $crate::query::query_internals::try_flush(),
-            "Attempted to run a query inside another query, which is forbidden by default. \
-                If this behavior is intended, use the `rec for` syntax instead of the `for` syntax."
-        );
+        $crate::query::query_internals::flush();
 
         $crate::query! {
             rec for (

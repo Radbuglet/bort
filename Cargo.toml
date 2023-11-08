@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-autoken = { git = "https://github.com/Radbuglet/autoken.git", rev = "0dcb9ba10c31c3c2fb9376f9d3668659b9c1e924" }
+autoken = { git = "https://github.com/Radbuglet/autoken.git", rev = "2243b587f48d926c52b527997f3cc069eff53120" }
 cfgenius = "0.1.0"
 derive-where = "1.2.1"
 hashbrown = { version = "0.14.0", default-features = false, features = ["raw"] }

@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use autoken::MutableBorrow;
+use autoken::PotentialMutableBorrow;
 use derive_where::derive_where;
 
 use crate::{
@@ -68,8 +68,13 @@ pub struct DbRoot {
 
     // A guard to protect against flushing while querying. This doesn't prevent panics but it does
     // prevent nasty concurrent modification surprises.
-    query_guard: &'static NOptRefCell<()>,
+    query_guard: &'static NOptRefCell<RecursiveQueryGuardTy>,
 }
+
+// This has its own type for the sake of autoken analysis.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct RecursiveQueryGuardTy;
 
 #[derive(Debug, Copy, Clone)]
 struct DbEntity {
@@ -340,7 +345,7 @@ impl DbRoot {
                     probably_alive_dirty_entities: Vec::new(),
                     dead_dirty_entities: Vec::new(),
                     debug_total_spawns: 0,
-                    query_guard: leak(NOptRefCell::new_full(())),
+                    query_guard: leak(NOptRefCell::new_full(RecursiveQueryGuardTy)),
                 }),
             );
         }
@@ -501,7 +506,10 @@ impl DbRoot {
 
     // === Queries === //
 
-    pub fn borrow_query_guard(&self, token: &'static MainThreadToken) -> OptRef<'static, (), ()> {
+    pub fn borrow_query_guard(
+        &self,
+        token: &'static MainThreadToken,
+    ) -> OptRef<'static, RecursiveQueryGuardTy> {
         self.query_guard.borrow(token)
     }
 
@@ -607,7 +615,7 @@ impl DbRoot {
         &mut self,
         token: &'static MainThreadToken,
     ) -> Result<(), ConcurrentFlushError> {
-        let mut guard_loaner = MutableBorrow::new();
+        let mut guard_loaner = PotentialMutableBorrow::new();
         let _guard = self
             .query_guard
             .try_borrow_mut(token, &mut guard_loaner)
