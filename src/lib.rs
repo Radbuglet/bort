@@ -14,8 +14,9 @@ pub use autoken;
 
 pub mod prelude {
     pub use crate::{
+        autoken,
         behavior::{
-            behavior, delegate, Behavior, BehaviorRegistry, ComponentInjector,
+            behavior, delegate, Behavior, BehaviorListFor, BehaviorRegistry, ComponentInjector,
             InitializerBehaviorList, OrderedBehaviorList, PartialEntity, SimpleBehaviorList,
         },
         entity::{storage, CompMut, CompRef, Entity, OwnedEntity, Storage},

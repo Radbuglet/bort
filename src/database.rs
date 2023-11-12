@@ -1,7 +1,9 @@
 use std::{
     any::{type_name, Any, TypeId},
     cell::RefCell,
-    fmt, hash, mem,
+    fmt, hash,
+    marker::PhantomData,
+    mem,
     num::NonZeroU64,
     sync::{Arc, Mutex},
 };
@@ -169,8 +171,11 @@ enum DbEntityMappingHeap<T: 'static> {
 struct DbComponentType {
     pub id: NamedTypeId,
     pub name: &'static str,
-    pub dtor: fn(&'static MainThreadToken, InertEntity),
+    pub dtor: fn(PhantomData<ComponentDestructorMarker>, &'static MainThreadToken, InertEntity),
 }
+
+// For AuToken function analysis.
+struct ComponentDestructorMarker;
 
 impl fmt::Debug for DbComponentType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -183,7 +188,11 @@ impl fmt::Debug for DbComponentType {
 
 impl DbComponentType {
     fn of<T: 'static>() -> Self {
-        fn dtor<T: 'static>(token: &'static MainThreadToken, entity: InertEntity) {
+        fn dtor<T: 'static>(
+            _marker: PhantomData<ComponentDestructorMarker>,
+            token: &'static MainThreadToken,
+            entity: InertEntity,
+        ) {
             let comp = {
                 let mut db = DbRoot::get(token);
                 let storage = db.get_storage::<T>();
@@ -1374,7 +1383,11 @@ impl ComponentListSnapshot {
 
         for i in 0..len {
             let dtor = self.0.direct_borrow().keys()[i].dtor;
-            dtor(token, target);
+
+            // Analysis of destructors is essentially useless because we assume that all destructors
+            // could run at any time. `.destroy()` is already dangerous because of UAFs so what's a
+            // bit of extra danger to keep our users up at night?
+            autoken::assume_no_alias(|| dtor(PhantomData, token, target));
         }
     }
 }

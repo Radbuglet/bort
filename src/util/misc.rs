@@ -176,3 +176,19 @@ pub fn unpoison<'a, T: ?Sized>(
 pub fn unwrap_error<T, E: Error>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|e| panic!("{e}"))
 }
+
+// === IsUnit === //
+
+pub trait Truthy {
+    type Unit;
+
+    fn make_unit() -> Self::Unit;
+}
+
+pub struct IsUnit<T>([T; 0]);
+
+impl Truthy for IsUnit<()> {
+    type Unit = ();
+
+    fn make_unit() -> Self::Unit {}
+}

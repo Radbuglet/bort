@@ -11,7 +11,7 @@ use crate::{
     entity::{CompMut, CompRef, Entity},
     util::{
         hash_map::{ConstSafeBuildHasherDefault, FxHashMap, FxHashSet},
-        misc::{MapFmt, NamedTypeId},
+        misc::{IsUnit, MapFmt, NamedTypeId, Truthy},
     },
 };
 
@@ -464,7 +464,7 @@ impl BehaviorRegistry {
             .downcast_mut::<B::List>()
             .unwrap();
 
-        own_registry.push(delegate, meta);
+        own_registry.push_cx(delegate, meta);
 
         self
     }
@@ -531,7 +531,7 @@ impl BehaviorRegistry {
     }
 
     pub fn get<B: Behavior>(&self) -> <B::List as BehaviorList>::View<'_> {
-        <B::List as BehaviorList>::view(self.get_list::<B>())
+        <B::List as BehaviorList>::opt_view(self.get_list::<B>())
     }
 }
 
@@ -565,6 +565,8 @@ impl Clone for BehaviorRegistry {
 }
 
 // === Behavior === //
+
+pub type BehaviorListFor<T> = <T as Behavior>::List;
 
 pub trait Behavior: Sized + 'static {
     type List: BehaviorList<Delegate = Self>;
@@ -606,11 +608,22 @@ pub trait BehaviorList: BehaviorSafe + Default + fmt::Debug {
 
     fn extend_ref(&mut self, other: &Self);
 
-    fn view(me: Option<&Self>) -> Self::View<'_>;
+    fn opt_view(me: Option<&Self>) -> Self::View<'_>;
+
+    fn view(&self) -> Self::View<'_> {
+        Self::opt_view(Some(self))
+    }
 }
 
 pub trait ExtendableBehaviorList<M = ()>: BehaviorList {
-    fn push(&mut self, delegate: Self::Delegate, meta: M);
+    fn push_cx(&mut self, delegate: Self::Delegate, meta: M);
+
+    fn push(&mut self, delegate: Self::Delegate)
+    where
+        IsUnit<M>: Truthy<Unit = M>,
+    {
+        self.push_cx(delegate, IsUnit::<M>::make_unit())
+    }
 }
 
 pub trait BehaviorSafe: 'static + Sized + Send + Sync + Clone + fmt::Debug {}
@@ -846,13 +859,13 @@ impl<B: BehaviorSafe + Multiplexable> BehaviorList for SimpleBehaviorList<B> {
         self.behaviors.extend(other.behaviors.iter().cloned());
     }
 
-    fn view(me: Option<&Self>) -> Self::View<'_> {
+    fn opt_view(me: Option<&Self>) -> Self::View<'_> {
         B::make_multiplexer(me)
     }
 }
 
 impl<B: BehaviorSafe + Multiplexable> ExtendableBehaviorList for SimpleBehaviorList<B> {
-    fn push(&mut self, delegate: Self::Delegate, _meta: ()) {
+    fn push_cx(&mut self, delegate: Self::Delegate, _meta: ()) {
         self.behaviors.push(delegate);
     }
 }
@@ -914,7 +927,7 @@ where
         self.behaviors.extend(other.behaviors.iter().cloned());
     }
 
-    fn view(me: Option<&Self>) -> Self::View<'_> {
+    fn opt_view(me: Option<&Self>) -> Self::View<'_> {
         B::make_multiplexer(me)
     }
 }
@@ -926,7 +939,7 @@ where
     I1: IntoIterator<Item = D>,
     I2: IntoIterator<Item = D>,
 {
-    fn push(&mut self, delegate: Self::Delegate, (depends, resolves): (I1, I2)) {
+    fn push_cx(&mut self, delegate: Self::Delegate, (depends, resolves): (I1, I2)) {
         // Register the behavior
         let bhv_idx = self.behaviors.len();
         self.behaviors.push(OrderedBehavior {
@@ -1192,7 +1205,7 @@ impl<B: BehaviorSafe> BehaviorList for InitializerBehaviorList<B> {
         self.handlers.extend(other.handlers.iter().cloned());
     }
 
-    fn view(me: Option<&Self>) -> Self::View<'_> {
+    fn opt_view(me: Option<&Self>) -> Self::View<'_> {
         InitializerBehaviorListView(me)
     }
 }
@@ -1202,7 +1215,7 @@ where
     B: BehaviorSafe,
     I: IntoIterator<Item = TypeId>,
 {
-    fn push(&mut self, delegate: Self::Delegate, deps: I) {
+    fn push_cx(&mut self, delegate: Self::Delegate, deps: I) {
         let deps = deps.into_iter().collect::<FxHashSet<_>>();
         if deps.is_empty() {
             self.handlers_without_any_deps.push(self.handlers.len());

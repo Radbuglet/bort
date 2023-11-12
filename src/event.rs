@@ -16,28 +16,11 @@ use crate::{
     util::{
         hash_map::{ConstSafeBuildHasherDefault, FxHashMap},
         iter::hash_one,
+        misc::{IsUnit, Truthy},
     },
 };
 
 // === EventTarget === //
-
-mod event_target_sealed {
-    pub trait Truthy {
-        type Unit;
-
-        fn make_unit() -> Self::Unit;
-    }
-
-    pub struct IsUnit<T>([T; 0]);
-
-    impl Truthy for IsUnit<()> {
-        type Unit = ();
-
-        fn make_unit() -> Self::Unit {}
-    }
-}
-
-use event_target_sealed::*;
 
 pub trait EventTarget<E, C = ()> {
     fn fire(&mut self, target: Entity, event: E)
