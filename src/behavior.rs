@@ -37,28 +37,22 @@ pub trait Delegate: fmt::Debug + Clone + Send + Sync + Deref<Target = Self::DynF
     type DynFn: ?Sized + Send + Sync;
 }
 
-pub trait Dispatchable<A>: Delegate {
-    type Output;
-
-    fn dispatch(&self, args: A) -> Self::Output;
-}
-
 // === Delegate === //
 
 #[doc(hidden)]
 pub mod delegate_macro_internal {
-    use std::ops::DerefMut;
+    use std::{mem::MaybeUninit, ops::DerefMut};
 
     // === Re-exports === //
 
     pub use {
-        super::{Delegate, Dispatchable, FuncMethodInjectorMut, FuncMethodInjectorRef},
+        super::{Delegate, FuncMethodInjectorMut, FuncMethodInjectorRef},
         std::{
             clone::Clone,
             convert::From,
             fmt,
             marker::{PhantomData, Send, Sync},
-            ops::Deref,
+            ops::{Deref, Fn},
             panic::Location,
             stringify,
             sync::Arc,
@@ -89,6 +83,16 @@ pub mod delegate_macro_internal {
         G: FuncMethodInjectorMut<T>,
     {
         type GuardHelper<'a> = G::Guard<'a>;
+    }
+
+    // N.B. this function is not marked as unsafe because `#[forbid(dead_code)]` may be used in
+    // userland crates.
+    #[allow(unsafe_code)] // TODO: Move to `core`
+    pub fn uber_dangerous_transmute_this_is_unsound<A, B>(a: A) -> B {
+        unsafe {
+            let mut a = MaybeUninit::<A>::new(a);
+            a.as_mut_ptr().cast::<B>().read()
+        }
     }
 }
 
@@ -217,17 +221,17 @@ macro_rules! delegate {
             handler: $crate::behavior::delegate_macro_internal::Arc<
                 dyn
                     $($(for<$($fn_lt),*>)?)?
-                    Fn($($para),*) $(-> $ret)? +
+                    $crate::behavior::delegate_macro_internal::Fn($($para),*) $(-> $ret)? +
                         $crate::behavior::delegate_macro_internal::Send +
                         $crate::behavior::delegate_macro_internal::Sync
             >,
         }
 
+		#[allow(unused)]
         impl$(<$($generic),*>)? $name $(<$($generic),*>)?
         $(where
             $($where_token)*
         )? {
-            #[allow(unused)]
 			#[cfg_attr(debug_assertions, track_caller)]
             pub fn new<Func>(handler: Func) -> Self
             where
@@ -244,6 +248,16 @@ macro_rules! delegate {
                     handler: $crate::behavior::delegate_macro_internal::Arc::new(handler),
                 }
             }
+
+			#[allow(non_camel_case_types)]
+			pub fn call<$($($($fn_lt,)*)?)? $($para_name,)* __Out>(&self $(,$para_name: $para_name)*) -> __Out
+			where
+				$($(for<$($fn_lt,)*>)?)? fn($($para,)*) $(-> $ret)?: $crate::behavior::delegate_macro_internal::Fn($($para_name,)*) -> __Out,
+			{
+				$crate::behavior::delegate_macro_internal::uber_dangerous_transmute_this_is_unsound(
+					(self)($($crate::behavior::delegate_macro_internal::uber_dangerous_transmute_this_is_unsound($para_name),)*)
+				)
+			}
         }
 
         impl<
@@ -273,17 +287,6 @@ macro_rules! delegate {
 
             fn deref(&self) -> &Self::Target {
                 &*self.handler
-            }
-        }
-
-        impl<$($($($fn_lt,)*)? $($generic: 'static,)*)?> $crate::behavior::delegate_macro_internal::Dispatchable<($($para,)*)> for $name $(<$($generic),*>)?
-        $(where
-            $($where_token)*
-        )? {
-            type Output = $crate::behavior::delegate!(@__internal_or_unit $($ret)?);
-
-            fn dispatch(&self, ($($para_name,)*): ($($para,)*)) -> Self::Output {
-                self($($para_name,)*)
             }
         }
 
