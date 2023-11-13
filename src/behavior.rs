@@ -33,9 +33,7 @@ pub trait FuncMethodInjectorMut<T: ?Sized> {
 
 // === Delegate Traits === //
 
-pub trait Delegate: fmt::Debug + Clone + Send + Sync + Deref<Target = Self::DynFn> {
-    type DynFn: ?Sized + Send + Sync;
-}
+pub trait Delegate: fmt::Debug + Clone + Send + Sync {}
 
 // === Delegate === //
 
@@ -221,7 +219,7 @@ macro_rules! delegate {
             handler: $crate::behavior::delegate_macro_internal::Arc<
                 dyn
                     $($(for<$($fn_lt),*>)?)?
-                    $crate::behavior::delegate_macro_internal::Fn($($para),*) $(-> $ret)? +
+                    $crate::behavior::delegate_macro_internal::Fn($crate::behavior::delegate_macro_internal::PhantomData<Self> $(,$para)*) $(-> $ret)? +
                         $crate::behavior::delegate_macro_internal::Send +
                         $crate::behavior::delegate_macro_internal::Sync
             >,
@@ -245,7 +243,7 @@ macro_rules! delegate {
                     _ty: ($($($crate::behavior::delegate_macro_internal::PhantomData::<fn() -> $generic>,)*)?),
 					#[cfg(debug_assertions)]
 					defined: $crate::behavior::delegate_macro_internal::Location::caller(),
-                    handler: $crate::behavior::delegate_macro_internal::Arc::new(handler),
+                    handler: $crate::behavior::delegate_macro_internal::Arc::new(move |_marker $(,$para_name)*| handler($($para_name),*)),
                 }
             }
 
@@ -255,7 +253,10 @@ macro_rules! delegate {
 				$($(for<$($fn_lt,)*>)?)? fn($($para,)*) $(-> $ret)?: $crate::behavior::delegate_macro_internal::Fn($($para_name,)*) -> __Out,
 			{
 				$crate::behavior::delegate_macro_internal::uber_dangerous_transmute_this_is_unsound(
-					(self)($($crate::behavior::delegate_macro_internal::uber_dangerous_transmute_this_is_unsound($para_name),)*)
+					(self.handler)(
+						$crate::behavior::delegate_macro_internal::PhantomData,
+						$($crate::behavior::delegate_macro_internal::uber_dangerous_transmute_this_is_unsound($para_name),)*
+					)
 				)
 			}
         }
@@ -274,19 +275,6 @@ macro_rules! delegate {
 			#[cfg_attr(debug_assertions, track_caller)]
             fn from(handler: Func) -> Self {
                 Self::new(handler)
-            }
-        }
-
-        impl$(<$($generic),*>)? $crate::behavior::delegate_macro_internal::Deref for $name $(<$($generic),*>)?
-        $(where
-            $($where_token)*
-        )? {
-            type Target = dyn $($(for<$($fn_lt),*>)?)? Fn($($para),*) $(-> $ret)? +
-                $crate::behavior::delegate_macro_internal::Send +
-                $crate::behavior::delegate_macro_internal::Sync;
-
-            fn deref(&self) -> &Self::Target {
-                &*self.handler
             }
         }
 
@@ -336,9 +324,6 @@ macro_rules! delegate {
             $($where_token)*
         )?
 		{
-			type DynFn = dyn $($(for<$($fn_lt),*>)?)? Fn($($para),*) $(-> $ret)? +
-				$crate::behavior::delegate_macro_internal::Send +
-				$crate::behavior::delegate_macro_internal::Sync;
 		}
 
         $crate::behavior::delegate! {
@@ -639,11 +624,11 @@ pub trait Multiplexable: Delegate {
     type Multiplexer<'a, D>
     where
         Self: 'a,
-        D: MultiplexDriver<Item = Self::DynFn> + 'a;
+        D: MultiplexDriver<Item = Self> + 'a;
 
     fn make_multiplexer<'a, D>(driver: D) -> Self::Multiplexer<'a, D>
     where
-        D: MultiplexDriver<Item = Self::DynFn> + 'a;
+        D: MultiplexDriver<Item = Self> + 'a;
 }
 
 pub trait MultiplexDriver: Sized {
@@ -733,14 +718,14 @@ macro_rules! behavior {
 			>
 			where
 				Self: 'a,
-				D: 'a + $crate::behavior::multiplexed_macro_internals::MultiplexDriver<Item = Self::DynFn>;
+				D: 'a + $crate::behavior::multiplexed_macro_internals::MultiplexDriver<Item = Self>;
 
 			fn make_multiplexer<'a, D>(driver: D) -> Self::Multiplexer<'a, D>
 			where
-				D: 'a + $crate::behavior::multiplexed_macro_internals::MultiplexDriver<Item = Self::DynFn>,
+				D: 'a + $crate::behavior::multiplexed_macro_internals::MultiplexDriver<Item = Self>,
 			{
 				$crate::behavior::multiplexed_macro_internals::Box::new(move |$($para_name),*| {
-					driver.drive(|item| item($($para_name),*));
+					driver.drive(|item| item.call($($para_name),*));
 				})
 			}
 		}
@@ -874,7 +859,7 @@ impl<B: BehaviorSafe + Multiplexable> ExtendableBehaviorList for SimpleBehaviorL
 }
 
 impl<B: Multiplexable> MultiplexDriver for SimpleBehaviorList<B> {
-    type Item = B::DynFn;
+    type Item = B;
 
     fn drive<'a>(&'a self, mut target: impl FnMut(&'a Self::Item)) {
         for bhv in &self.behaviors {
@@ -996,7 +981,7 @@ where
     B: BehaviorSafe + Multiplexable,
     D: BehaviorSafe + hash::Hash + Eq,
 {
-    type Item = B::DynFn;
+    type Item = B;
 
     fn drive<'a>(&'a self, mut target: impl FnMut(&'a Self::Item)) {
         let topos = self.behaviors_topos.get_or_init(|| {
