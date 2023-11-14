@@ -196,7 +196,15 @@ impl DbComponentType {
             let comp = {
                 let mut db = DbRoot::get(token);
                 let storage = db.get_storage::<T>();
-                db.remove_component(token, &mut storage.borrow_mut(token), entity)
+
+                // FIXME: AuToken doesn't really know how to handle the interaction between option
+                // pattern matching and its destructor and falsely reports that this function could
+                // drop components. Fixing each individual instance of this would be pretty involved
+                // so we're just ignoring the entire function for now and waiting for AuToken to fix
+                // this issue.
+                autoken::assume_black_box(|| {
+                    db.remove_component(token, &mut storage.borrow_mut(token), entity)
+                })
             };
             debug_assert!(comp.is_ok());
             drop(comp);
@@ -1037,10 +1045,9 @@ impl DbRoot {
         storage: &mut DbStorageInner<T>,
         entity: InertEntity,
     ) -> Result<Option<T>, EntityDeadError> {
-        // (entity liveness checks are deferred until later)
-
         // Unlink the entity
         let Some(removed) = storage.mappings.remove(&entity) else {
+            // We only perform a liveness check if the entity doesn't have this component.
             return if self.alive_entities.contains_key(&entity) {
                 Ok(None)
             } else {
