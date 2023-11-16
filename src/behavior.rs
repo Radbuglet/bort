@@ -129,7 +129,7 @@ macro_rules! delegate {
             $($where_token)*
         )? {
             #[allow(unused)]
-			#[cfg_attr(debug_assertions, track_caller)]
+            #[cfg_attr(debug_assertions, track_caller)]
             pub fn new_method_ref<Injector, Receiver, Func>(_injector: Injector, handler: Func) -> Self
             where
                 Injector: 'static + $crate::behavior::delegate_macro_internal::FuncMethodInjectorRefGetGuard<Receiver>,
@@ -162,7 +162,7 @@ macro_rules! delegate {
             }
 
             #[allow(unused)]
-			#[cfg_attr(debug_assertions, track_caller)]
+            #[cfg_attr(debug_assertions, track_caller)]
             pub fn new_method_mut<Injector, Receiver, Func>(_injector: Injector, handler: Func) -> Self
             where
                 Injector: 'static + $crate::behavior::delegate_macro_internal::FuncMethodInjectorMutGetGuard<Receiver>,
@@ -210,30 +210,35 @@ macro_rules! delegate {
     ) => {
         $(#[$attr_meta])*
         $vis struct $name <
-			$($($generic,)*)?
-			Handler: ?Sized =
-				$($(for<$($fn_lt),*>)?)?
-				dyn $crate::behavior::delegate_macro_internal::Fn(
-					$crate::behavior::delegate_macro_internal::PhantomData<$name<$($($generic,)*)? ()>>
-					$(,$para)*
-				) $(-> $ret)? +
-				$crate::behavior::delegate_macro_internal::Send +
-				$crate::behavior::delegate_macro_internal::Sync>
+            $($($generic,)*)?
+            Marker = (),
+            Handler: ?Sized =
+                $($(for<$($fn_lt),*>)?)?
+                dyn $crate::behavior::delegate_macro_internal::Fn(
+                    $crate::behavior::delegate_macro_internal::PhantomData<$name<$($($generic,)*)? Marker, ()>>
+                    $(,$para)*
+                ) $(-> $ret)? +
+                $crate::behavior::delegate_macro_internal::Send +
+                $crate::behavior::delegate_macro_internal::Sync,
+        >
         $(where
             $($where_token)*
         )? {
-            _ty: ($($($crate::behavior::delegate_macro_internal::PhantomData<fn() -> $generic>,)*)?),
-			#[cfg(debug_assertions)]
-			defined: &'static $crate::behavior::delegate_macro_internal::Location<'static>,
+            _ty: (
+                $crate::behavior::delegate_macro_internal::PhantomData<fn() -> Marker>,
+                $($($crate::behavior::delegate_macro_internal::PhantomData<fn() -> $generic>,)*)?
+            ),
+            #[cfg(debug_assertions)]
+            defined: &'static $crate::behavior::delegate_macro_internal::Location<'static>,
             handler: $crate::behavior::delegate_macro_internal::Arc<Handler>,
         }
 
-		#[allow(unused)]
-        impl$(<$($generic),*>)? $name $(<$($generic),*>)?
+        #[allow(unused)]
+        impl<$($($generic),*)? Marker> $name<$($($generic,)*)? Marker>
         $(where
             $($where_token)*
         )? {
-			#[cfg_attr(debug_assertions, track_caller)]
+            #[cfg_attr(debug_assertions, track_caller)]
             pub fn new<Func>(handler: Func) -> Self
             where
                 Func: 'static +
@@ -243,47 +248,51 @@ macro_rules! delegate {
                         Fn($($para),*) $(-> $ret)?,
             {
                 Self::new_raw($crate::behavior::delegate_macro_internal::Arc::new(
-					move |_marker $(,$para_name)*| handler($($para_name),*)
-				))
+                    move |_marker $(,$para_name)*| handler($($para_name),*)
+                ))
             }
         }
 
-		#[allow(unused)]
+        #[allow(unused)]
         impl<
-			$($($generic,)*)?
-			Handler: ?Sized +
-				$($(for<$($fn_lt),*>)?)?
-				$crate::behavior::delegate_macro_internal::Fn(
-					$crate::behavior::delegate_macro_internal::PhantomData<$name<$($($generic,)*)? ()>>
-					$(,$para)*
-				) $(-> $ret)?
-		> $name <$($($generic,)*)? Handler>
+            $($($generic,)*)?
+            Marker,
+            Handler: ?Sized +
+                $($(for<$($fn_lt),*>)?)?
+                $crate::behavior::delegate_macro_internal::Fn(
+                    $crate::behavior::delegate_macro_internal::PhantomData<$name<$($($generic,)*)? Marker, ()>>
+                    $(,$para)*
+                ) $(-> $ret)?,
+        > $name <$($($generic,)*)? Marker, Handler>
         $(where
             $($where_token)*
         )? {
-			#[cfg_attr(debug_assertions, track_caller)]
-			pub fn new_raw(handler: $crate::behavior::delegate_macro_internal::Arc<Handler>) -> Self {
-				Self {
-					_ty: ($($($crate::behavior::delegate_macro_internal::PhantomData::<fn() -> $generic>,)*)?),
-					#[cfg(debug_assertions)]
-					defined: $crate::behavior::delegate_macro_internal::Location::caller(),
+            #[cfg_attr(debug_assertions, track_caller)]
+            pub fn new_raw(handler: $crate::behavior::delegate_macro_internal::Arc<Handler>) -> Self {
+                Self {
+                    _ty: (
+                        $crate::behavior::delegate_macro_internal::PhantomData::<fn() -> Marker>,
+                        $($($crate::behavior::delegate_macro_internal::PhantomData::<fn() -> $generic>,)*)?
+                    ),
+                    #[cfg(debug_assertions)]
+                    defined: $crate::behavior::delegate_macro_internal::Location::caller(),
                     handler,
-				}
-			}
+                }
+            }
 
-			#[allow(non_camel_case_types)]
-			pub fn call<$($($($fn_lt,)*)?)? $($para_name,)* __Out>(&self $(,$para_name: $para_name)*) -> __Out
-			where
-				$($(for<$($fn_lt,)*>)?)? fn($($para,)*) $(-> $ret)?: $crate::behavior::delegate_macro_internal::Fn($($para_name,)*) -> __Out,
-			{
-				$crate::behavior::delegate_macro_internal::uber_dangerous_transmute_this_is_unsound(
-					(self.handler)(
-						$crate::behavior::delegate_macro_internal::PhantomData,
-						$($crate::behavior::delegate_macro_internal::uber_dangerous_transmute_this_is_unsound($para_name),)*
-					)
-				)
-			}
-		}
+            #[allow(non_camel_case_types)]
+            pub fn call<$($($($fn_lt,)*)?)? $($para_name,)* __Out>(&self $(,$para_name: $para_name)*) -> __Out
+            where
+                $($(for<$($fn_lt,)*>)?)? fn($($para,)*) $(-> $ret)?: $crate::behavior::delegate_macro_internal::Fn($($para_name,)*) -> __Out,
+            {
+                $crate::behavior::delegate_macro_internal::uber_dangerous_transmute_this_is_unsound(
+                    (self.handler)(
+                        $crate::behavior::delegate_macro_internal::PhantomData,
+                        $($crate::behavior::delegate_macro_internal::uber_dangerous_transmute_this_is_unsound($para_name),)*
+                    )
+                )
+            }
+        }
 
         impl<
             Func: 'static +
@@ -296,13 +305,13 @@ macro_rules! delegate {
         $(where
             $($where_token)*
         )? {
-			#[cfg_attr(debug_assertions, track_caller)]
+            #[cfg_attr(debug_assertions, track_caller)]
             fn from(handler: Func) -> Self {
                 Self::new(handler)
             }
         }
 
-        impl<$($($generic,)*)? Handler: ?Sized> $crate::behavior::delegate_macro_internal::fmt::Debug for $name<$($($generic,)*)? Handler>
+        impl<$($($generic,)*)? Marker, Handler: ?Sized> $crate::behavior::delegate_macro_internal::fmt::Debug for $name<$($($generic,)*)? Marker, Handler>
         $(where
             $($where_token)*
         )? {
@@ -315,40 +324,43 @@ macro_rules! delegate {
                 )*
                 fmt.write_str(")")?;
 
-				#[cfg(debug_assertions)]
-				{
-					fmt.write_str(" @ ")?;
-					fmt.write_str(self.defined.file())?;
-					fmt.write_str(":")?;
-					$crate::behavior::delegate_macro_internal::fmt::Debug::fmt(&self.defined.line(), fmt)?;
-					fmt.write_str(":")?;
-					$crate::behavior::delegate_macro_internal::fmt::Debug::fmt(&self.defined.column(), fmt)?;
-				}
+                #[cfg(debug_assertions)]
+                {
+                    fmt.write_str(" @ ")?;
+                    fmt.write_str(self.defined.file())?;
+                    fmt.write_str(":")?;
+                    $crate::behavior::delegate_macro_internal::fmt::Debug::fmt(&self.defined.line(), fmt)?;
+                    fmt.write_str(":")?;
+                    $crate::behavior::delegate_macro_internal::fmt::Debug::fmt(&self.defined.column(), fmt)?;
+                }
 
                 Ok(())
             }
         }
 
-        impl<$($($generic,)*)? Handler: ?Sized> $crate::behavior::delegate_macro_internal::Clone for $name<$($($generic,)*)? Handler>
+        impl<$($($generic,)*)? Marker, Handler: ?Sized> $crate::behavior::delegate_macro_internal::Clone for $name<$($($generic,)*)? Marker, Handler>
         $(where
             $($where_token)*
         )? {
             fn clone(&self) -> Self {
                 Self {
-                    _ty: ($($($crate::behavior::delegate_macro_internal::PhantomData::<fn() -> $generic>,)*)?),
-					#[cfg(debug_assertions)]
-					defined: self.defined,
+                    _ty: (
+                        $crate::behavior::delegate_macro_internal::PhantomData::<fn() -> Marker>,
+                        $($($crate::behavior::delegate_macro_internal::PhantomData::<fn() -> $generic>,)*)?
+                    ),
+                    #[cfg(debug_assertions)]
+                    defined: self.defined,
                     handler: $crate::behavior::delegate_macro_internal::Clone::clone(&self.handler),
                 }
             }
         }
 
-		impl<$($($generic,)*)? Handler: ?Sized + $crate::behavior::delegate_macro_internal::Send + $crate::behavior::delegate_macro_internal::Sync> $crate::behavior::delegate_macro_internal::Delegate for $name<$($($generic,)*)? Handler>
+        impl<$($($generic,)*)? Marker, Handler: ?Sized + $crate::behavior::delegate_macro_internal::Send + $crate::behavior::delegate_macro_internal::Sync> $crate::behavior::delegate_macro_internal::Delegate for $name<$($($generic,)*)? Marker, Handler>
         $(where
             $($where_token)*
         )?
-		{
-		}
+        {
+        }
 
         $crate::behavior::delegate! {
             @__internal_forward_derives
@@ -692,7 +704,7 @@ pub mod multiplexed_macro_internals {
 
 #[macro_export]
 macro_rules! behavior {
-	(
+    (
         $(#[$attr_meta:meta])*
         $vis:vis fn $name:ident
             $(
@@ -700,7 +712,7 @@ macro_rules! behavior {
                 $(<$($fn_lt:lifetime),* $(,)?>)?
             )?
             ($($para_name:ident: $para:ty),* $(,)?) $(-> $ret:ty)?
-		$(as list $list:ty)?
+        $(as list $list:ty)?
         $(as deriving $deriving:path $({ $($deriving_args:tt)* })? )*
         $(where $($where_token:tt)*)?
     ) => {
@@ -734,34 +746,35 @@ macro_rules! behavior {
             ) $(-> $ret:ty)?
         $(where $($where_token:tt)*)?
     ) => {
-		impl<$($($generic,)*)?> $crate::behavior::multiplexed_macro_internals::Multiplexable for $name<$($($generic,)*)?>
-		$(where $($where_token)*)?
-		{
-			type Multiplexer<'a, D> = $name<
-				$($($generic,)*)?
-				dyn $(for<$($fn_lt),*>)? $crate::behavior::multiplexed_macro_internals::Fn(
-					$crate::behavior::delegate_macro_internal::PhantomData<$name<$($($generic,)*)? ()>>,
-					$($para),*
-				) $(-> $ret)? + 'a
-			>
-			where
-				Self: 'a,
-				D: 'a + $crate::behavior::multiplexed_macro_internals::MultiplexDriver<Item = Self>;
+        impl<$($($generic,)*)? Marker> $crate::behavior::multiplexed_macro_internals::Multiplexable for $name<$($($generic,)*)? Marker>
+        $(where $($where_token)*)?
+        {
+            type Multiplexer<'a, D> = $name<
+                $($($generic,)*)?
+                Marker,
+                dyn $(for<$($fn_lt),*>)? $crate::behavior::multiplexed_macro_internals::Fn(
+                    $crate::behavior::delegate_macro_internal::PhantomData<$name<$($($generic,)*)? Marker, ()>>,
+                    $($para),*
+                ) $(-> $ret)? + 'a
+            >
+            where
+                Self: 'a,
+                D: 'a + $crate::behavior::multiplexed_macro_internals::MultiplexDriver<Item = Self>;
 
-			fn make_multiplexer<'a, D>(driver: D) -> Self::Multiplexer<'a, D>
-			where
-				D: 'a + $crate::behavior::multiplexed_macro_internals::MultiplexDriver<Item = Self>,
-				Self: 'a,
-			{
-				$name::new_raw($crate::behavior::multiplexed_macro_internals::Arc::new(move |_marker, $($para_name),*| {
-					driver.drive(|item| {
-						item.call($($para_name),*);
-					});
-				}))
-			}
-		}
-	};
-	(
+            fn make_multiplexer<'a, D>(driver: D) -> Self::Multiplexer<'a, D>
+            where
+                D: 'a + $crate::behavior::multiplexed_macro_internals::MultiplexDriver<Item = Self>,
+                Self: 'a,
+            {
+                $name::new_raw($crate::behavior::multiplexed_macro_internals::Arc::new(move |_marker, $($para_name),*| {
+                    driver.drive(|item| {
+                        item.call($($para_name),*);
+                    });
+                }))
+            }
+        }
+    };
+    (
         args { just_derive $ty:ty }
 
         $(#[$attr_meta:meta])*
@@ -775,13 +788,13 @@ macro_rules! behavior {
             ) $(-> $ret:ty)?
         $(where $($where_token:tt)*)?
     ) => {
-		impl<$($($generic),*)?> $crate::behavior::multiplexed_macro_internals::Behavior for $name<$($($generic),*)?>
-		$(where $($where_token)*)?
-		{
-			type List = $ty;
-		}
-	};
-	(
+        impl<$($($generic),*)?> $crate::behavior::multiplexed_macro_internals::Behavior for $name<$($($generic),*)?>
+        $(where $($where_token)*)?
+        {
+            type List = $ty;
+        }
+    };
+    (
         args { $ty:ty }
 
         $(#[$attr_meta:meta])*
@@ -795,37 +808,37 @@ macro_rules! behavior {
             ) $(-> $ret:ty)?
         $(where $($where_token:tt)*)?
     ) => {
-		$crate::behavior::multiplexed_macro_internals::behavior! {
-			args { just_multiplex }
+        $crate::behavior::multiplexed_macro_internals::behavior! {
+            args { just_multiplex }
 
-			$(#[$attr_meta])*
-			$vis fn $name
-				$(
-					<$($generic),*>
-					$(<$($fn_lt),*>)?
-				)?
-				(
-					$($para_name: $para),*
-				) $(-> $ret)?
-			$(where $($where_token)*)?
-		}
+            $(#[$attr_meta])*
+            $vis fn $name
+                $(
+                    <$($generic),*>
+                    $(<$($fn_lt),*>)?
+                )?
+                (
+                    $($para_name: $para),*
+                ) $(-> $ret)?
+            $(where $($where_token)*)?
+        }
 
-		$crate::behavior::multiplexed_macro_internals::behavior! {
-			args { just_derive $ty }
+        $crate::behavior::multiplexed_macro_internals::behavior! {
+            args { just_derive $ty }
 
-			$(#[$attr_meta])*
-			$vis fn $name
-				$(
-					<$($generic),*>
-					$(<$($fn_lt),*>)?
-				)?
-				(
-					$($para_name: $para),*
-				) $(-> $ret)?
-			$(where $($where_token)*)?
-		}
-	};
-	(
+            $(#[$attr_meta])*
+            $vis fn $name
+                $(
+                    <$($generic),*>
+                    $(<$($fn_lt),*>)?
+                )?
+                (
+                    $($para_name: $para),*
+                ) $(-> $ret)?
+            $(where $($where_token)*)?
+        }
+    };
+    (
         args {}
 
         $(#[$attr_meta:meta])*
@@ -839,21 +852,21 @@ macro_rules! behavior {
             ) $(-> $ret:ty)?
         $(where $($where_token:tt)*)?
     ) => {
-		$crate::behavior::multiplexed_macro_internals::behavior! {
-			args { $crate::behavior::multiplexed_macro_internals::SimpleBehaviorList<Self> }
+        $crate::behavior::multiplexed_macro_internals::behavior! {
+            args { $crate::behavior::multiplexed_macro_internals::SimpleBehaviorList<Self> }
 
-			$(#[$attr_meta])*
-			$vis fn $name
-				$(
-					<$($generic),*>
-					$(<$($fn_lt),*>)?
-				)?
-				(
-					$($para_name: $para),*
-				) $(-> $ret)?
-			$(where $($where_token)*)?
-		}
-	};
+            $(#[$attr_meta])*
+            $vis fn $name
+                $(
+                    <$($generic),*>
+                    $(<$($fn_lt),*>)?
+                )?
+                (
+                    $($para_name: $para),*
+                ) $(-> $ret)?
+            $(where $($where_token)*)?
+        }
+    };
 }
 
 pub use behavior;
@@ -1035,17 +1048,17 @@ where
             for (_key, dependents) in &self.dependents_on {
                 if dependents.resolvers == 0 {
                     for &blocked_id in &dependents.dependents {
-						behavior_counts[blocked_id] -= 1;
-					}
+                        behavior_counts[blocked_id] -= 1;
+                    }
                 }
             }
 
-			// Collect the initial set of behaviors which are ready to run
-			let mut ready_to_run = behavior_counts
-				.iter()
-				.enumerate()
-				.filter_map(|(i, &blockers)| (blockers == 0).then_some(i))
-				.collect::<Vec<_>>();
+            // Collect the initial set of behaviors which are ready to run
+            let mut ready_to_run = behavior_counts
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &blockers)| (blockers == 0).then_some(i))
+                .collect::<Vec<_>>();
 
             // Propagate execution to build the toposorted array
             while let Some(ran) = ready_to_run.pop() {
@@ -1084,7 +1097,7 @@ where
                 .collect::<Vec<_>>();
 
             if !blocked.is_empty() {
-				// TODO: Improve error message.
+                // TODO: Improve error message.
                 panic!("the following behaviors could never run due to cyclic dependencies: {blocked:#?}");
             }
 
