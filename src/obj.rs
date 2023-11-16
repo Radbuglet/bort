@@ -32,6 +32,10 @@ impl<T: 'static> Obj<T> {
         entity.insert_with_obj(value).1
     }
 
+    pub fn try_wrap(entity: Entity) -> Option<Self> {
+        entity.try_get_slot().map(|value| Self { entity, value })
+    }
+
     pub fn wrap(entity: Entity) -> Self {
         Self {
             entity,
@@ -114,6 +118,33 @@ impl<T: 'static> Obj<T> {
     }
 
     #[track_caller]
+    pub fn get_maybe_aba(self) -> CompRef<'static, T, T> {
+        let token = MainThreadToken::acquire_fmt("fetch entity component data");
+        debug_assert!(
+            self.is_alive_internal(token),
+            "attempted to get the value of a dead `Obj<{}>` corresponding to {:?}",
+            type_name::<T>(),
+            self.entity(),
+        );
+        CompRef::new(self, self.value.borrow(token))
+    }
+
+    #[track_caller]
+    pub fn get_maybe_aba_on_loan(
+        self,
+        loaner: &ImmutableBorrow<T>,
+    ) -> CompRef<'static, T, Nothing<'_>> {
+        let token = MainThreadToken::acquire_fmt("fetch entity component data");
+        debug_assert!(
+            self.is_alive_internal(token),
+            "attempted to get the value of a dead `Obj<{}>` corresponding to {:?}",
+            type_name::<T>(),
+            self.entity(),
+        );
+        CompRef::new(self, self.value.borrow_on_loan(token, loaner))
+    }
+
+    #[track_caller]
     pub fn get_mut(self) -> CompMut<'static, T, T> {
         let token = MainThreadToken::acquire_fmt("fetch entity component data");
         assert!(
@@ -132,6 +163,33 @@ impl<T: 'static> Obj<T> {
     ) -> CompMut<'static, T, Nothing<'_>> {
         let token = MainThreadToken::acquire_fmt("fetch entity component data");
         assert!(
+            self.is_alive_internal(token),
+            "attempted to get the value of a dead `Obj<{}>` corresponding to {:?}",
+            type_name::<T>(),
+            self.entity(),
+        );
+        CompMut::new(self, self.value.borrow_mut_on_loan(token, loaner))
+    }
+
+    #[track_caller]
+    pub fn get_mut_maybe_aba(self) -> CompMut<'static, T, T> {
+        let token = MainThreadToken::acquire_fmt("fetch entity component data");
+        debug_assert!(
+            self.is_alive_internal(token),
+            "attempted to get the value of a dead `Obj<{}>` corresponding to {:?}",
+            type_name::<T>(),
+            self.entity(),
+        );
+        CompMut::new(self, self.value.borrow_mut(token))
+    }
+
+    #[track_caller]
+    pub fn get_mut_maybe_aba_on_loan(
+        self,
+        loaner: &mut MutableBorrow<T>,
+    ) -> CompMut<'static, T, Nothing<'_>> {
+        let token = MainThreadToken::acquire_fmt("fetch entity component data");
+        debug_assert!(
             self.is_alive_internal(token),
             "attempted to get the value of a dead `Obj<{}>` corresponding to {:?}",
             type_name::<T>(),
@@ -184,6 +242,10 @@ impl<T: 'static> OwnedObj<T> {
 
     pub fn new(value: T) -> Self {
         Self::from_raw_obj(Obj::new_unmanaged(value))
+    }
+
+    pub fn new_self_referential(func: impl FnOnce(Entity) -> T) -> Self {
+        OwnedEntity::new().with_self_referential(func).into_obj()
     }
 
     pub fn from_raw_obj(obj: Obj<T>) -> Self {
@@ -246,6 +308,14 @@ impl<T: 'static> OwnedObj<T> {
         self.obj.get_mut()
     }
 
+    pub fn get_maybe_aba(&self) -> CompRef<'static, T, T> {
+        self.obj.get_maybe_aba()
+    }
+
+    pub fn get_mut_maybe_aba(&self) -> CompMut<'static, T, T> {
+        self.obj.get_mut_maybe_aba()
+    }
+
     pub fn get_on_loan<'l>(
         &self,
         loaner: &'l ImmutableBorrow<T>,
@@ -258,6 +328,20 @@ impl<T: 'static> OwnedObj<T> {
         loaner: &'l mut MutableBorrow<T>,
     ) -> CompMut<'static, T, Nothing<'l>> {
         self.obj.get_mut_on_loan(loaner)
+    }
+
+    pub fn get_maybe_aba_on_loan<'l>(
+        &self,
+        loaner: &'l ImmutableBorrow<T>,
+    ) -> CompRef<'static, T, Nothing<'l>> {
+        self.obj.get_maybe_aba_on_loan(loaner)
+    }
+
+    pub fn get_mut_maybe_aba_on_loan<'l>(
+        &self,
+        loaner: &'l mut MutableBorrow<T>,
+    ) -> CompMut<'static, T, Nothing<'l>> {
+        self.obj.get_mut_maybe_aba_on_loan(loaner)
     }
 
     pub fn is_alive(&self) -> bool {

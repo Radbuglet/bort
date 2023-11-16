@@ -297,6 +297,10 @@ impl Entity {
         Obj::wrap(self)
     }
 
+    pub fn try_obj<T: 'static>(self) -> Option<Obj<T>> {
+        Obj::try_wrap(self)
+    }
+
     pub fn tag(self, tag: impl Into<RawTag>) {
         let tag = tag.into().0;
 
