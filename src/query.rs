@@ -327,15 +327,6 @@ pub mod query_internals {
     }
 
     impl<T: ?Sized + QueryableEventList> QueryableEventListCallSyntaxHelper for T {}
-
-    // === Force Flush === //
-
-    pub fn flush() {
-        super::flush_with_custom_msg(
-            "Attempted to run a query inside another query, which is forbidden by default. \
-		     If this behavior is intended, use the `rec for` syntax instead of the `for` syntax.",
-        );
-    }
 }
 
 #[macro_export]
@@ -442,52 +433,6 @@ macro_rules! query {
     // === Global query === //
     (
         for (
-            $(@$entity:ident $(,)?)?
-            $($prefix:ident $name:ident in $tag:expr),*
-            $(,)?
-        )
-        $(+ [$($vtag:expr),*$(,)?])?
-        {
-            $($body:tt)*
-        }
-    ) => {{
-        $crate::query::query_internals::flush();
-
-        $crate::query! {
-            rec for (
-                $(@$entity)?
-                $($prefix $name in $tag,)*
-            ) $(+ [$($vtag,)*])?
-            {
-                $($body)*
-            }
-        }
-    }};
-    (
-        rec for (
-            $(@$entity:ident $(,)?)?
-            $($prefix:ident $name:ident in $tag:expr),*
-            $(,)?
-        )
-        $(+ [$($vtag:expr),*$(,)?])?
-        {
-            $($body:tt)*
-        }
-    ) => {{
-        let _ = $crate::query::query_internals::try_flush();
-
-        $crate::query! {
-            noflush for (
-                $(@$entity)?
-                $($prefix $name in $tag,)*
-            ) $(+ [$($vtag,)*])?
-            {
-                $($body)*
-            }
-        }
-    }};
-    (
-        noflush for (
             $(@$entity:ident $(,)?)?
             $($prefix:ident $name:ident in $tag:expr),*
             $(,)?

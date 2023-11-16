@@ -653,8 +653,8 @@ impl DbRoot {
             // Determine the right candidate for the swap-remove.
             let (last_entity, last_entity_info) = {
                 let Some(mut curr_last_heap) = arch.entity_heaps.last() else {
-                    // There are no more heaps to work with because there are no more entities in this
-                    // archetype.
+                    // There are no more heaps to work with because there are no more entities in
+                    // this archetype.
                     continue 'delete_dead;
                 };
 

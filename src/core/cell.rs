@@ -544,6 +544,8 @@ impl<T> OptRefCell<T> {
     where
         F: FnOnce(Option<&mut T>) -> Option<T>,
     {
+        autoken::assert_mutably_borrowable::<T>();
+
         let state = self.state.get();
         if state == NEUTRAL {
             let value_container = unsafe { &mut *self.value.get() };
