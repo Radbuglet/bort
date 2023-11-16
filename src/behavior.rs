@@ -209,20 +209,23 @@ macro_rules! delegate {
         $(where $($where_token:tt)*)?
     ) => {
         $(#[$attr_meta])*
-        $vis struct $name $(<$($generic),*>)?
+        $vis struct $name <
+			$($($generic,)*)?
+			Handler: ?Sized =
+				$($(for<$($fn_lt),*>)?)?
+				dyn $crate::behavior::delegate_macro_internal::Fn(
+					$crate::behavior::delegate_macro_internal::PhantomData<$name<$($($generic,)*)? ()>>
+					$(,$para)*
+				) $(-> $ret)? +
+				$crate::behavior::delegate_macro_internal::Send +
+				$crate::behavior::delegate_macro_internal::Sync>
         $(where
             $($where_token)*
         )? {
             _ty: ($($($crate::behavior::delegate_macro_internal::PhantomData<fn() -> $generic>,)*)?),
 			#[cfg(debug_assertions)]
 			defined: &'static $crate::behavior::delegate_macro_internal::Location<'static>,
-            handler: $crate::behavior::delegate_macro_internal::Arc<
-                dyn
-                    $($(for<$($fn_lt),*>)?)?
-                    $crate::behavior::delegate_macro_internal::Fn($crate::behavior::delegate_macro_internal::PhantomData<Self> $(,$para)*) $(-> $ret)? +
-                        $crate::behavior::delegate_macro_internal::Send +
-                        $crate::behavior::delegate_macro_internal::Sync
-            >,
+            handler: $crate::behavior::delegate_macro_internal::Arc<Handler>,
         }
 
 		#[allow(unused)]
@@ -239,13 +242,34 @@ macro_rules! delegate {
                     $($(for<$($fn_lt),*>)?)?
                         Fn($($para),*) $(-> $ret)?,
             {
-                Self {
-                    _ty: ($($($crate::behavior::delegate_macro_internal::PhantomData::<fn() -> $generic>,)*)?),
+                Self::new_raw($crate::behavior::delegate_macro_internal::Arc::new(
+					move |_marker $(,$para_name)*| handler($($para_name),*)
+				))
+            }
+        }
+
+		#[allow(unused)]
+        impl<
+			$($($generic,)*)?
+			Handler: ?Sized +
+				$($(for<$($fn_lt),*>)?)?
+				$crate::behavior::delegate_macro_internal::Fn(
+					$crate::behavior::delegate_macro_internal::PhantomData<$name<$($($generic,)*)? ()>>
+					$(,$para)*
+				) $(-> $ret)?
+		> $name <$($($generic,)*)? Handler>
+        $(where
+            $($where_token)*
+        )? {
+			#[cfg_attr(debug_assertions, track_caller)]
+			pub fn new_raw(handler: $crate::behavior::delegate_macro_internal::Arc<Handler>) -> Self {
+				Self {
+					_ty: ($($($crate::behavior::delegate_macro_internal::PhantomData::<fn() -> $generic>,)*)?),
 					#[cfg(debug_assertions)]
 					defined: $crate::behavior::delegate_macro_internal::Location::caller(),
-                    handler: $crate::behavior::delegate_macro_internal::Arc::new(move |_marker $(,$para_name)*| handler($($para_name),*)),
-                }
-            }
+                    handler,
+				}
+			}
 
 			#[allow(non_camel_case_types)]
 			pub fn call<$($($($fn_lt,)*)?)? $($para_name,)* __Out>(&self $(,$para_name: $para_name)*) -> __Out
@@ -259,7 +283,7 @@ macro_rules! delegate {
 					)
 				)
 			}
-        }
+		}
 
         impl<
             Func: 'static +
@@ -278,7 +302,7 @@ macro_rules! delegate {
             }
         }
 
-        impl$(<$($generic),*>)? $crate::behavior::delegate_macro_internal::fmt::Debug for $name $(<$($generic),*>)?
+        impl<$($($generic,)*)? Handler: ?Sized> $crate::behavior::delegate_macro_internal::fmt::Debug for $name<$($($generic,)*)? Handler>
         $(where
             $($where_token)*
         )? {
@@ -305,7 +329,7 @@ macro_rules! delegate {
             }
         }
 
-        impl$(<$($generic),*>)? $crate::behavior::delegate_macro_internal::Clone for $name $(<$($generic),*>)?
+        impl<$($($generic,)*)? Handler: ?Sized> $crate::behavior::delegate_macro_internal::Clone for $name<$($($generic,)*)? Handler>
         $(where
             $($where_token)*
         )? {
@@ -319,7 +343,7 @@ macro_rules! delegate {
             }
         }
 
-		impl$(<$($generic),*>)? $crate::behavior::delegate_macro_internal::Delegate for $name $(<$($generic),*>)?
+		impl<$($($generic,)*)? Handler: ?Sized + $crate::behavior::delegate_macro_internal::Send + $crate::behavior::delegate_macro_internal::Sync> $crate::behavior::delegate_macro_internal::Delegate for $name<$($($generic,)*)? Handler>
         $(where
             $($where_token)*
         )?
@@ -662,7 +686,7 @@ pub mod multiplexed_macro_internals {
             behavior, delegate, Behavior, BehaviorRegistry, MultiplexDriver, Multiplexable,
             SimpleBehaviorList,
         },
-        std::{boxed::Box, clone::Clone, iter::IntoIterator, ops::Fn},
+        std::{boxed::Box, clone::Clone, iter::IntoIterator, ops::Fn, sync::Arc},
     };
 }
 
@@ -710,11 +734,15 @@ macro_rules! behavior {
             ) $(-> $ret:ty)?
         $(where $($where_token:tt)*)?
     ) => {
-		impl<$($generic),*> $crate::behavior::multiplexed_macro_internals::Multiplexable for $name<$($generic),*>
+		impl<$($($generic,)*)?> $crate::behavior::multiplexed_macro_internals::Multiplexable for $name<$($($generic,)*)?>
 		$(where $($where_token)*)?
 		{
-			type Multiplexer<'a, D> = $crate::behavior::multiplexed_macro_internals::Box<
-				dyn $(for<$($fn_lt),*>)? $crate::behavior::multiplexed_macro_internals::Fn($($para),*) + 'a
+			type Multiplexer<'a, D> = $name<
+				$($($generic,)*)?
+				dyn $(for<$($fn_lt),*>)? $crate::behavior::multiplexed_macro_internals::Fn(
+					$crate::behavior::delegate_macro_internal::PhantomData<$name<$($($generic,)*)? ()>>,
+					$($para),*
+				) $(-> $ret)? + 'a
 			>
 			where
 				Self: 'a,
@@ -723,10 +751,13 @@ macro_rules! behavior {
 			fn make_multiplexer<'a, D>(driver: D) -> Self::Multiplexer<'a, D>
 			where
 				D: 'a + $crate::behavior::multiplexed_macro_internals::MultiplexDriver<Item = Self>,
+				Self: 'a,
 			{
-				$crate::behavior::multiplexed_macro_internals::Box::new(move |$($para_name),*| {
-					driver.drive(|item| item.call($($para_name),*));
-				})
+				$name::new_raw($crate::behavior::multiplexed_macro_internals::Arc::new(move |_marker, $($para_name),*| {
+					driver.drive(|item| {
+						item.call($($para_name),*);
+					});
+				}))
 			}
 		}
 	};
@@ -744,7 +775,7 @@ macro_rules! behavior {
             ) $(-> $ret:ty)?
         $(where $($where_token:tt)*)?
     ) => {
-		impl<$($generic),*> $crate::behavior::multiplexed_macro_internals::Behavior for $name<$($generic),*>
+		impl<$($($generic),*)?> $crate::behavior::multiplexed_macro_internals::Behavior for $name<$($($generic),*)?>
 		$(where $($where_token)*)?
 		{
 			type List = $ty;
