@@ -215,6 +215,7 @@ pub mod query_internals {
             query::try_flush,
         },
         std::{
+            compile_error,
             convert::Into,
             hint::unreachable_unchecked,
             iter::{empty, Iterator},
@@ -632,6 +633,16 @@ macro_rules! query {
             ),
             $name.borrow_mut($token),
         );
+        $crate::query::query!(@__internal_xform $entity; $($rest)*);
+    };
+	(@__internal_xform; obj $name:ident $token:ident; $($rest:tt)*) => {
+        $crate::query::query_internals::compile_error!("`obj` qualifier can only be used on queries which also request the entity ID");
+    };
+    (@__internal_xform $entity:ident; obj $name:ident $token:ident; $($rest:tt)*) => {
+        let $name = $crate::query::query_internals::Obj::from_raw_parts(
+			$entity,
+			$crate::query::query_internals::Into::into($name),
+		);
         $crate::query::query!(@__internal_xform $entity; $($rest)*);
     };
 }
