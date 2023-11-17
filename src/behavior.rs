@@ -234,7 +234,7 @@ macro_rules! delegate {
         }
 
         #[allow(unused)]
-        impl<$($($generic),*)? Marker> $name<$($($generic,)*)? Marker>
+        impl<$($($generic),*)?> $name<$($($generic,)*)?>
         $(where
             $($where_token)*
         )? {

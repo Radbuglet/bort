@@ -1,4 +1,4 @@
-use bort::{core::token::MainThreadToken, query, Entity, Tag};
+use bort::{core::token::MainThreadToken, flush, query, Entity, Tag};
 use rustc_hash::FxHashSet;
 
 fn main() {
@@ -61,6 +61,8 @@ fn main() {
                 alive_list.push(entity);
             }
         }
+
+        flush();
 
         // Validate liveness states
         for entity in &alive_list {

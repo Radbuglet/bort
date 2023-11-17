@@ -10,6 +10,7 @@ use std::{
 
 use autoken::PotentialMutableBorrow;
 use derive_where::derive_where;
+use hashbrown::hash_map::Entry as HmEntry;
 
 use crate::{
     core::{
@@ -109,7 +110,6 @@ struct DbDirtyDeadEntity {
 
 #[derive(Debug, Default)]
 struct DbTag {
-    contained_by: FxHashSet<DbArchetypeRef>,
     sorted_containers: Vec<DbArchetypeRef>,
     are_sorted_containers_sorted: bool,
 }
@@ -251,6 +251,7 @@ type DbComponentListRef = SetMapPtr<DbComponentType, (), LeakyArena>;
 
 #[derive(Debug)]
 struct DbArchetype {
+    tags: Box<[InertTag]>,
     managed: FxHashSet<NamedTypeId>,
     managed_sorted: Box<[NamedTypeId]>,
     entity_heaps: Vec<Arc<[NMainCell<InertEntity>]>>,
@@ -267,6 +268,7 @@ impl DbArchetype {
         managed_sorted.sort();
 
         Self {
+            tags: Box::from_iter(tags.iter().copied()),
             managed: FxHashSet::from_iter(managed_sorted.iter().copied()),
             managed_sorted,
             entity_heaps: Vec::new(),
@@ -455,7 +457,6 @@ impl DbRoot {
             for tag in target.keys() {
                 let tag_state = self.tag_map.entry(*tag).or_insert_with(Default::default);
 
-                tag_state.contained_by.insert(*target_ptr);
                 tag_state.sorted_containers.push(*target_ptr);
                 tag_state.are_sorted_containers_sorted = false;
             }
@@ -639,6 +640,7 @@ impl DbRoot {
             .map_err(|_| ConcurrentFlushError)?;
 
         let mut may_need_truncation = FxHashSet::default();
+        let mut may_need_arch_deletion = Vec::new();
 
         // Begin by removing dead entities.
         'delete_dead: for info in mem::take(&mut self.dead_dirty_entities) {
@@ -683,6 +685,8 @@ impl DbRoot {
                         may_need_truncation.insert(arch_id);
 
                         let Some(new_last_heap) = arch.entity_heaps.last() else {
+                            may_need_arch_deletion.push(arch_id);
+
                             // If we managed to consume all the entities in this archetype, we know
                             // our target entity is already dead
                             continue 'delete_dead;
@@ -735,6 +739,8 @@ impl DbRoot {
 
                 if let Some(new_last) = arch.entity_heaps.last() {
                     arch.last_heap_len = new_last.len();
+                } else {
+                    may_need_arch_deletion.push(arch_id);
                 }
             }
 
@@ -923,6 +929,30 @@ impl DbRoot {
 
                 storage.truncate_archetype_heap_len(token, arch_id, arch.entity_heaps.len());
             }
+        }
+
+        // Destroy archetypes which no longer exist.
+        for arch_id in may_need_arch_deletion {
+            let arch = self.arch_map.arena().get(&arch_id).value();
+            if !arch.entity_heaps.is_empty() {
+                continue;
+            }
+
+            // Remove the archetype from the tags
+            for tag in arch.tags.iter().copied() {
+                let HmEntry::Occupied(mut entry) = self.tag_map.entry(tag) else {
+                    unreachable!()
+                };
+
+                entry.get_mut().sorted_containers.retain(|v| *v != arch_id);
+
+                if entry.get().sorted_containers.is_empty() {
+                    entry.remove();
+                }
+            }
+
+            // Remove the archetype from the map
+            self.arch_map.remove(arch_id);
         }
 
         Ok(())
@@ -1274,11 +1304,16 @@ impl<T: 'static> DbAnyStorage for DbStorage<T> {
         heap_count: usize,
     ) {
         let storage = &mut *self.borrow_mut(token);
-        let Some(heap_list) = storage.heaps.get_mut(&arch) else {
-            return;
-        };
 
-        heap_list.truncate(heap_count);
+        if heap_count > 0 {
+            let Some(heap_list) = storage.heaps.get_mut(&arch) else {
+                return;
+            };
+
+            heap_list.truncate(heap_count);
+        } else {
+            drop(storage.heaps.remove(&arch));
+        }
     }
 
     fn contains_entity(&self, token: &'static MainThreadToken, entity: InertEntity) -> bool {
