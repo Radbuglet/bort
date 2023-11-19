@@ -34,6 +34,10 @@ pub fn slot_count() -> u64 {
     DEBUG_SLOT_COUNTER.load(atomic::Ordering::Relaxed)
 }
 
+pub fn archetype_count() -> u64 {
+    DbRoot::get(MainThreadToken::acquire_fmt("fetch entity diagnostics")).debug_archetype_count()
+}
+
 pub fn dump_database_state() -> String {
     format!(
         "{:#?}",

@@ -1,11 +1,17 @@
-use bort::{debug::dump_database_state, flush, OwnedEntity, Tag};
+use bort::{debug::archetype_count, flush, Entity, Tag};
 
 fn main() {
-    let hehe = Tag::<i32>::new();
-    let haha = OwnedEntity::new().with_tagged(hehe, 3);
+    let tag_1 = Tag::<i32>::new();
+    let tag_2 = Tag::<u32>::new();
+    let haha = Entity::new_unmanaged()
+        .with_tagged(tag_1, 3)
+        .with_tagged(tag_2, 4);
+
     flush();
-    drop(haha);
+    haha.untag(tag_1);
+    haha.destroy();
     flush();
 
-    println!("{}", dump_database_state());
+    // Test
+    assert_eq!(archetype_count(), 1);
 }

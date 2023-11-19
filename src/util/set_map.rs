@@ -244,7 +244,7 @@ where
         )
     }
 
-    pub fn remove(&mut self, removed_ptr: SetMapPtr<K, V, A>)
+    pub fn remove(&mut self, removed_ptr: SetMapPtr<K, V, A>) -> SetMapEntry<K, V, A>
     where
         A: FreeableArenaKind,
     {
@@ -278,6 +278,8 @@ where
             .remove_entry(removed_hash, |((_, candidate_ptr), _)| {
                 &removed_ptr == candidate_ptr
             });
+
+        removed_data
     }
 
     pub fn arena(&self) -> &Arena<SetMapEntry<K, V, A>, A> {
@@ -286,6 +288,10 @@ where
 
     pub fn arena_mut(&mut self) -> &mut Arena<SetMapEntry<K, V, A>, A> {
         &mut self.arena
+    }
+
+    pub fn len(&self) -> usize {
+        self.map.len()
     }
 }
 
@@ -367,5 +373,13 @@ where
 
     pub fn pair_mut(&mut self) -> (&[K], &mut V) {
         (&self.keys, &mut self.value)
+    }
+
+    pub fn extensions(&self) -> &FxHashMap<K, SetMapPtr<K, V, A>> {
+        &self.extensions
+    }
+
+    pub fn de_extensions(&self) -> &FxHashMap<K, SetMapPtr<K, V, A>> {
+        &self.de_extensions
     }
 }

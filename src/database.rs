@@ -256,6 +256,7 @@ struct DbArchetype {
     managed_sorted: Box<[NamedTypeId]>,
     entity_heaps: Vec<Arc<[NMainCell<InertEntity>]>>,
     last_heap_len: usize,
+    virtual_count: u64,
 }
 
 impl DbArchetype {
@@ -273,6 +274,7 @@ impl DbArchetype {
             managed_sorted,
             entity_heaps: Vec::new(),
             last_heap_len: 0,
+            virtual_count: 0,
         }
     }
 }
@@ -420,6 +422,22 @@ impl DbRoot {
             });
         }
 
+        // Update the virtual archetype counters and do cleanup if possible
+        if &entity_info.virtual_arch != self.arch_map.root() {
+            self.arch_map
+                .arena_mut()
+                .get_mut(&entity_info.virtual_arch)
+                .value_mut()
+                .virtual_count -= 1;
+
+            if Self::can_remove_archetype(&self.arch_map, entity_info.virtual_arch) {
+                Self::rec_remove_stepping_stone_arches(
+                    &mut self.arch_map,
+                    entity_info.virtual_arch,
+                );
+            }
+        }
+
         Ok(ComponentListSnapshot(entity_info.comp_list))
     }
 
@@ -450,6 +468,15 @@ impl DbRoot {
         // Determine whether we began dirty
         let was_dirty = entity_info.physical_arch != entity_info.virtual_arch;
 
+        // Decrement old virtual counter
+        if &entity_info.virtual_arch != self.arch_map.root() {
+            self.arch_map
+                .arena_mut()
+                .get_mut(&entity_info.virtual_arch)
+                .value_mut()
+                .virtual_count -= 1;
+        }
+
         // Update the list
         let post_ctor = |arena: &mut DbArchetypeArena, target_ptr: &DbArchetypeRef| {
             let target = arena.get(target_ptr);
@@ -461,6 +488,8 @@ impl DbRoot {
                 tag_state.are_sorted_containers_sorted = false;
             }
         };
+
+        let old_virtual_arch = entity_info.virtual_arch;
 
         entity_info.virtual_arch = if is_add {
             self.arch_map.lookup_extension(
@@ -478,11 +507,26 @@ impl DbRoot {
             )
         };
 
+        // Increment new virtual counter
+        if &entity_info.virtual_arch != self.arch_map.root() {
+            self.arch_map
+                .arena_mut()
+                .get_mut(&entity_info.virtual_arch)
+                .value_mut()
+                .virtual_count += 1;
+        }
+
+        // Try to delete the old archetype
+        if Self::can_remove_archetype(&self.arch_map, old_virtual_arch) {
+            Self::rec_remove_stepping_stone_arches(&mut self.arch_map, old_virtual_arch);
+        }
+
         // Determine whether we became dirty
         let is_dirty = entity_info.physical_arch != entity_info.virtual_arch;
 
-        // Add the entity to the dirty list if it became dirty. This may happen multiple times but
-        // we don't really mind since this list can accept false positives.
+        // Add the entity to the dirty list if it became dirty. This is only a heuristic and may
+        // happen multiple times if we keep on returning to our original archetype but we don't really
+        // mind since this list can accept false positives.
         if is_dirty && !was_dirty {
             self.probably_alive_dirty_entities.push(entity);
         }
@@ -911,6 +955,10 @@ impl DbRoot {
                         src_arch.entity_heaps.pop();
                         may_need_truncation.insert(src_arch_id);
 
+                        if src_arch.entity_heaps.is_empty() {
+                            may_need_arch_deletion.push(src_arch_id);
+                        }
+
                         if let Some(new_last) = src_arch.entity_heaps.last() {
                             src_arch.last_heap_len = new_last.len();
                         }
@@ -933,12 +981,15 @@ impl DbRoot {
 
         // Destroy archetypes which no longer exist.
         for arch_id in may_need_arch_deletion {
-            let arch = self.arch_map.arena().get(&arch_id).value();
-            if !arch.entity_heaps.is_empty() {
+            debug_assert_ne!(&arch_id, self.arch_map.root());
+
+            if !Self::can_remove_archetype(&self.arch_map, arch_id) {
                 continue;
             }
 
             // Remove the archetype from the tags
+            let arch = self.arch_map.arena().get(&arch_id).value();
+
             for tag in arch.tags.iter().copied() {
                 let HmEntry::Occupied(mut entry) = self.tag_map.entry(tag) else {
                     unreachable!()
@@ -952,10 +1003,49 @@ impl DbRoot {
             }
 
             // Remove the archetype from the map
-            self.arch_map.remove(arch_id);
+            Self::rec_remove_stepping_stone_arches(&mut self.arch_map, arch_id);
         }
 
         Ok(())
+    }
+
+    fn can_remove_archetype(arch_map: &DbArchetypeMap, arch_id: DbArchetypeRef) -> bool {
+        // We can't remove the root.
+        if &arch_id == arch_map.root() {
+            return false;
+        }
+
+        let arch_entry = arch_map.arena().get(&arch_id);
+        let arch = arch_entry.value();
+
+        // We can't remove archetypes with virtual or physical entities in them.
+        if !arch.entity_heaps.is_empty() || arch.virtual_count > 0 {
+            return false;
+        }
+
+        // We shouldn't remove archetypes who are used as stepping stones to other archetypes.
+        if arch_entry
+            .extensions()
+            .iter()
+            .any(|(_, target)| target != &arch_id)
+        {
+            return false;
+        }
+
+        // Otherwise, it's safe to remove.
+        true
+    }
+
+    fn rec_remove_stepping_stone_arches(arch_map: &mut DbArchetypeMap, arch_id: DbArchetypeRef) {
+        debug_assert!(Self::can_remove_archetype(arch_map, arch_id));
+
+        let arch = arch_map.remove(arch_id);
+
+        for src in arch.de_extensions().values() {
+            if Self::can_remove_archetype(arch_map, *src) && *src != arch_id {
+                Self::rec_remove_stepping_stone_arches(arch_map, *src);
+            }
+        }
     }
 
     // === Storage management === //
@@ -1141,6 +1231,10 @@ impl DbRoot {
 
     pub fn debug_alive_list(&self) -> impl ExactSizeIterator<Item = InertEntity> + '_ {
         self.alive_entities.keys().copied()
+    }
+
+    pub fn debug_archetype_count(&self) -> u64 {
+        self.arch_map.len() as u64
     }
 
     pub fn debug_format_entity(
