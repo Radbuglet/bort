@@ -131,8 +131,8 @@ fn access_tests() {
 
         c.iter(|| {
             query! {
-                for (slot _pos in pos_tag, slot _vel in vel_tag) {
-
+                for (slot pos in pos_tag, slot vel in vel_tag) {
+                    black_box((pos, vel));
                 }
             }
         });
