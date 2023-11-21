@@ -348,27 +348,30 @@ impl InertTag {
 
 // === Methods === //
 
+impl Default for DbRoot {
+    fn default() -> Self {
+        Self {
+            uid_gen: NonZeroU64::new(1).unwrap(),
+            alive_entities: NopHashMap::default(),
+            comp_list_map: SetMap::default(),
+            arch_map: SetMap::new(DbArchetype::new(&[])),
+            tag_map: NopHashMap::default(),
+            storages: FxHashMap::default(),
+            probably_alive_dirty_entities: Vec::new(),
+            dead_dirty_entities: Vec::new(),
+            debug_total_spawns: 0,
+            query_guard: leak(NOptRefCell::new_full(RecursiveQueryGuardTy)),
+        }
+    }
+}
+
 impl DbRoot {
     #[track_caller]
     pub fn get(token: &'static MainThreadToken) -> OptRefMut<'static, DbRoot, DbRoot> {
         static DB: NOptRefCell<DbRoot> = NOptRefCell::new_empty();
 
         if DB.is_empty(token) {
-            DB.replace(
-                token,
-                Some(DbRoot {
-                    uid_gen: NonZeroU64::new(1).unwrap(),
-                    alive_entities: NopHashMap::default(),
-                    comp_list_map: SetMap::default(),
-                    arch_map: SetMap::new(DbArchetype::new(&[])),
-                    tag_map: NopHashMap::default(),
-                    storages: FxHashMap::default(),
-                    probably_alive_dirty_entities: Vec::new(),
-                    dead_dirty_entities: Vec::new(),
-                    debug_total_spawns: 0,
-                    query_guard: leak(NOptRefCell::new_full(RecursiveQueryGuardTy)),
-                }),
-            );
+            DB.replace(token, Some(Self::default()));
         }
 
         DB.borrow_mut(token)

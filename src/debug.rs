@@ -38,6 +38,10 @@ pub fn archetype_count() -> u64 {
     DbRoot::get(MainThreadToken::acquire_fmt("fetch entity diagnostics")).debug_archetype_count()
 }
 
+pub fn force_reset_database() {
+    *DbRoot::get(MainThreadToken::acquire_fmt("force reset database")) = DbRoot::default();
+}
+
 pub fn dump_database_state() -> String {
     format!(
         "{:#?}",

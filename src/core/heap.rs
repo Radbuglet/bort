@@ -198,6 +198,10 @@ impl<T> Heap<T> {
             })
     }
 
+    pub fn cells(&self) -> (impl ExactSizeIterator<Item = &'_ NOptRefCell<T>> + Clone + '_) {
+        self.values().iter().map(|v| &v.value)
+    }
+
     pub fn clear_slots(&self, token: &'static MainThreadToken) {
         for slot in self.slots(token) {
             slot.set_value_owner_pair(token, None);
