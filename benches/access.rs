@@ -2,7 +2,7 @@ use std::hint::black_box;
 
 use bort::{
     core::{
-        cell::OptRefCell,
+        cell::{MultiOptRefCell, MultiRefCellIndex, OptRefCell},
         heap::Heap,
         token::{is_main_thread, MainThreadToken},
     },
@@ -61,14 +61,21 @@ fn access_tests() {
         });
     });
 
-    c.bench_function("get.entity.normal", |c| {
+    c.bench_function("get.entity.normal.ref", |c| {
         let _pop = spawn_anon_pos_pop();
         let obj = OwnedEntity::new().with(Position(1.0));
 
         c.iter(|| obj.get::<Position>());
     });
 
-    c.bench_function("get.entity.storage", |c| {
+    c.bench_function("get.entity.normal.mut", |c| {
+        let _pop = spawn_anon_pos_pop();
+        let obj = OwnedEntity::new().with(Position(1.0));
+
+        c.iter(|| obj.get_mut::<Position>());
+    });
+
+    c.bench_function("get.entity.storage.ref", |c| {
         let _pop = spawn_anon_pos_pop();
         let obj = OwnedEntity::new().with(Position(1.0));
         let storage = storage::<Position>();
@@ -76,21 +83,43 @@ fn access_tests() {
         c.iter(|| storage.get(obj.entity()));
     });
 
-    c.bench_function("get.obj.normal", |c| {
+    c.bench_function("get.entity.storage.mut", |c| {
+        let _pop = spawn_anon_pos_pop();
+        let obj = OwnedEntity::new().with(Position(1.0));
+        let storage = storage::<Position>();
+
+        c.iter(|| storage.get_mut(obj.entity()));
+    });
+
+    c.bench_function("get.obj.normal.ref", |c| {
         let _pop = spawn_anon_pos_pop();
         let obj = OwnedObj::new(Position(1.0));
 
         c.iter(|| obj.get());
     });
 
-    c.bench_function("get.obj.may_aba", |c| {
+    c.bench_function("get.obj.normal.mut", |c| {
+        let _pop = spawn_anon_pos_pop();
+        let obj = OwnedObj::new(Position(1.0));
+
+        c.iter(|| obj.get_mut());
+    });
+
+    c.bench_function("get.obj.may_aba.ref", |c| {
         let _pop = spawn_anon_pos_pop();
         let obj = OwnedObj::new(Position(1.0));
 
         c.iter(|| obj.get_maybe_aba());
     });
 
-    c.bench_function("get.slot.re_token", |c| {
+    c.bench_function("get.obj.may_aba.mut", |c| {
+        let _pop = spawn_anon_pos_pop();
+        let obj = OwnedObj::new(Position(1.0));
+
+        c.iter(|| obj.get_mut_maybe_aba());
+    });
+
+    c.bench_function("get.slot.re_token.ref", |c| {
         let _pop = spawn_anon_pos_pop();
         let obj = OwnedObj::new(Position(1.0));
         let slot = obj.value();
@@ -98,7 +127,15 @@ fn access_tests() {
         c.iter(|| slot.borrow(MainThreadToken::acquire()));
     });
 
-    c.bench_function("get.slot.store_token", |c| {
+    c.bench_function("get.slot.re_token.mut", |c| {
+        let _pop = spawn_anon_pos_pop();
+        let obj = OwnedObj::new(Position(1.0));
+        let slot = obj.value();
+
+        c.iter(|| slot.borrow_mut(MainThreadToken::acquire()));
+    });
+
+    c.bench_function("get.slot.store_token.ref", |c| {
         let _pop = spawn_anon_pos_pop();
         let obj = OwnedObj::new(Position(1.0));
         let slot = obj.value();
@@ -107,7 +144,16 @@ fn access_tests() {
         c.iter(|| slot.borrow(token));
     });
 
-    c.bench_function("get.slot.direct", |c| {
+    c.bench_function("get.slot.store_token.mut", |c| {
+        let _pop = spawn_anon_pos_pop();
+        let obj = OwnedObj::new(Position(1.0));
+        let slot = obj.value();
+        let token = MainThreadToken::acquire();
+
+        c.iter(|| slot.borrow(token));
+    });
+
+    c.bench_function("get.slot.direct.ref", |c| {
         let _pop = spawn_anon_pos_pop();
         let obj = OwnedObj::new(Position(1.0));
 
@@ -117,10 +163,14 @@ fn access_tests() {
         c.iter(|| slot.borrow(token));
     });
 
-    c.bench_function("get.cell", |c| {
-        let cell = OptRefCell::new(Some(Position(1.0)));
+    c.bench_function("get.slot.direct.mut", |c| {
+        let _pop = spawn_anon_pos_pop();
+        let obj = OwnedObj::new(Position(1.0));
 
-        c.iter(|| cell.borrow());
+        let token = MainThreadToken::acquire();
+        let slot = unsafe { obj.value().direct_slot(token) };
+
+        c.iter(|| slot.borrow_mut(token));
     });
 
     c.bench_function("query.slots.only_slots", |c| {
@@ -262,6 +312,64 @@ fn access_tests() {
                 black_box(slot);
             }
         });
+    });
+
+    c.bench_function("refcell.single.ref", |c| {
+        let cell = OptRefCell::new_full(3);
+
+        c.iter(|| cell.borrow());
+    });
+
+    c.bench_function("refcell.single.mut", |c| {
+        let cell = OptRefCell::new_full(3);
+
+        c.iter(|| cell.borrow_mut());
+    });
+
+    c.bench_function("refcell.multi.single.ref.static", |c| {
+        let mut cell = MultiOptRefCell::new();
+        cell.set(MultiRefCellIndex::Slot3, Some(3));
+
+        c.iter(|| cell.borrow(MultiRefCellIndex::Slot3));
+    });
+
+    c.bench_function("refcell.multi.single.ref.bb", |c| {
+        let mut cell = MultiOptRefCell::new();
+        cell.set(MultiRefCellIndex::Slot3, Some(3));
+
+        c.iter(|| cell.borrow(black_box(MultiRefCellIndex::Slot3)));
+    });
+
+    c.bench_function("refcell.multi.single.mut.static", |c| {
+        let mut cell = MultiOptRefCell::new();
+        cell.set(MultiRefCellIndex::Slot3, Some(3));
+
+        c.iter(|| cell.borrow_mut(MultiRefCellIndex::Slot3));
+    });
+
+    c.bench_function("refcell.multi.single.mut.bb", |c| {
+        let mut cell = MultiOptRefCell::new();
+        cell.set(MultiRefCellIndex::Slot3, Some(3));
+
+        c.iter(|| cell.borrow_mut(black_box(MultiRefCellIndex::Slot3)));
+    });
+
+    c.bench_function("refcell.multi.multi.ref", |c| {
+        let mut cell = MultiOptRefCell::new();
+        for slot in MultiRefCellIndex::iter() {
+            cell.set(slot, Some(slot as u32));
+        }
+
+        c.iter(|| cell.borrow_all());
+    });
+
+    c.bench_function("refcell.multi.multi.mut", |c| {
+        let mut cell = MultiOptRefCell::new();
+        for slot in MultiRefCellIndex::iter() {
+            cell.set(slot, Some(slot as u32));
+        }
+
+        c.iter(|| cell.borrow_all_mut());
     });
 }
 
