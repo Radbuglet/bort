@@ -26,7 +26,7 @@ use crate::{
 pub fn storage<T: 'static>() -> Storage<T> {
     let token = MainThreadToken::acquire_fmt("fetch entity component data");
 
-    Storage::from_database(token, DbRoot::get(token).get_storage::<T>())
+    Storage::from_database(token, DbRoot::get(token).get_storage::<T>(token))
 }
 
 #[derive_where(Debug, Copy, Clone)]

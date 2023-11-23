@@ -183,7 +183,7 @@ pub trait ExclusiveTokenHint<T: ?Sized>: TokenFor<T> {}
 ///   at once
 ///
 ///
-pub unsafe trait UnJailRefToken<T: ?Sized>: Token {}
+pub unsafe trait UnJailRefToken<T: ?Sized> {}
 
 /// Many token-based cells in [`token_cell`](super::token_cell) implement an "unjailing" system where
 /// users can only get references to non-`Sync` values on the main thread. This trait asserts that a
@@ -200,7 +200,7 @@ pub unsafe trait UnJailRefToken<T: ?Sized>: Token {}
 /// - this token is a main thread token
 /// - the value `T` is `Send` and can therefore be safely acquired mutably from the current thread
 ///
-pub unsafe trait UnJailMutToken<T: ?Sized>: Token {}
+pub unsafe trait UnJailMutToken<T: ?Sized> {}
 
 mod unjail_impl {
     use super::*;
@@ -235,6 +235,19 @@ mod unjail_impl {
 
     unsafe impl<T: Token + UnJailMutTokenDisamb<V, T::Kind>, V: ?Sized> UnJailMutToken<V> for T {}
 }
+
+#[derive(Debug, Copy, Clone)]
+pub struct TrivialUnjailToken;
+
+impl TrivialUnjailToken {
+    pub fn new() -> &'static Self {
+        &Self
+    }
+}
+
+unsafe impl<T: ?Sized + Sync> UnJailRefToken<T> for TrivialUnjailToken {}
+
+unsafe impl<T: ?Sized + Sync> UnJailMutToken<T> for TrivialUnjailToken {}
 
 // === Token Trait Aliases === //
 

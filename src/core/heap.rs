@@ -19,7 +19,9 @@ use crate::{
 
 use super::{
     cell::{OptRef, OptRefMut},
-    token::{BorrowMutToken, BorrowToken, GetToken, MainThreadToken, Token, TokenFor},
+    token::{
+        BorrowMutToken, BorrowToken, GetToken, MainThreadToken, Token, TokenFor, TrivialUnjailToken,
+    },
     token_cell::{NMainCell, NOptRefCell},
 };
 
@@ -37,8 +39,10 @@ unsafe impl<T: ?Sized> Sync for ThreadedPtrRef<T> {}
 
 // === Indirector === //
 
-static FREE_INDIRECTORS: NOptRefCell<FxHashMap<NamedTypeId, IndirectorSet>> =
-    NOptRefCell::new_full(FxHashMap::with_hasher(FxHashBuilder::new()));
+static FREE_INDIRECTORS: NOptRefCell<FxHashMap<NamedTypeId, IndirectorSet>> = NOptRefCell::new_full(
+    &TrivialUnjailToken,
+    FxHashMap::with_hasher(FxHashBuilder::new()),
+);
 
 struct IndirectorSet {
     empty: ThreadedPtrRef<()>,

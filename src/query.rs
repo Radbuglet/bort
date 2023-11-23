@@ -235,9 +235,10 @@ pub mod query_internals {
 
     pub fn get_storage<T: 'static>(
         db: &mut DbRoot,
+        token: &'static MainThreadToken,
         _infer: (Tag<T>, InertTag),
     ) -> &'static DbStorage<T> {
-        db.get_storage::<T>()
+        db.get_storage::<T>(token)
     }
 
     pub fn inner_storage_to_api_storage<T: 'static>(
@@ -371,7 +372,7 @@ macro_rules! query {
         let mut db = $crate::query::query_internals::DbRoot::get(token);
 
         $($(
-            let $name = $crate::query::query_internals::get_storage(&mut db, $name);
+            let $name = $crate::query::query_internals::get_storage(&mut db, token, $name);
             let $name = $crate::query::query_internals::inner_storage_to_api_storage(token, $name);
         )*)?
         $crate::query::query_internals::drop(db);
@@ -460,7 +461,7 @@ macro_rules! query {
         let mut db = $crate::query::query_internals::DbRoot::get(token);
 
         // Collect the necessary storages and tags
-        $( let $name = $crate::query::query_internals::get_storage(&mut db, $name); )*
+        $( let $name = $crate::query::query_internals::get_storage(&mut db, token, $name); )*
 
         // Acquire a chunk iterator
         let chunks = $crate::query::query!(

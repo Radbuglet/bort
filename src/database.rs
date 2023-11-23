@@ -16,7 +16,7 @@ use crate::{
     core::{
         cell::{OptRef, OptRefMut},
         heap::{Heap, Slot},
-        token::MainThreadToken,
+        token::{MainThreadToken, TrivialUnjailToken},
         token_cell::{NMainCell, NOptRefCell},
     },
     debug::DebugLabel,
@@ -195,7 +195,7 @@ impl DbComponentType {
         ) {
             let comp = {
                 let mut db = DbRoot::get(token);
-                let storage = db.get_storage::<T>();
+                let storage = db.get_storage::<T>(token);
 
                 // FIXME: AuToken doesn't really know how to handle the interaction between option
                 // pattern matching and its destructor and falsely reports that this function could
@@ -360,7 +360,10 @@ impl Default for DbRoot {
             probably_alive_dirty_entities: Vec::new(),
             dead_dirty_entities: Vec::new(),
             debug_total_spawns: 0,
-            query_guard: leak(NOptRefCell::new_full(RecursiveQueryGuardTy)),
+            query_guard: leak(NOptRefCell::new_full(
+                &TrivialUnjailToken,
+                RecursiveQueryGuardTy,
+            )),
         }
     }
 }
@@ -1053,15 +1056,21 @@ impl DbRoot {
 
     // === Storage management === //
 
-    pub fn get_storage<T: 'static>(&mut self) -> &'static DbStorage<T> {
+    pub fn get_storage<T: 'static>(
+        &mut self,
+        token: &'static MainThreadToken,
+    ) -> &'static DbStorage<T> {
         self.storages
             .entry(NamedTypeId::of::<T>())
             .or_insert_with(|| {
-                leak(DbStorage::new_full(DbStorageInner::<T> {
-                    anon_block_alloc: BlockAllocator::default(),
-                    mappings: NopHashMap::default(),
-                    heaps: FxHashMap::default(),
-                }))
+                leak(DbStorage::new_full(
+                    token,
+                    DbStorageInner::<T> {
+                        anon_block_alloc: BlockAllocator::default(),
+                        mappings: NopHashMap::default(),
+                        heaps: FxHashMap::default(),
+                    },
+                ))
             })
             .as_any()
             .downcast_ref()
@@ -1260,7 +1269,7 @@ impl DbRoot {
         if let Some(&entity_info) = self.alive_entities.get(&entity) {
             // Format the component list
             if let Some(label) =
-                Self::get_component(&self.get_storage::<DebugLabel>().borrow(token), entity)
+                Self::get_component(&self.get_storage::<DebugLabel>(token).borrow(token), entity)
             {
                 builder.field(&label.borrow(token));
             }
