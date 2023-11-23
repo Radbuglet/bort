@@ -739,6 +739,10 @@ impl MultiRefCellIndex {
     pub fn iter() -> impl Iterator<Item = Self> {
         Self::VALUES.into_iter()
     }
+
+    pub fn decompose(v: usize) -> (usize, Self) {
+        (v / 8, Self::from_index(v % 8))
+    }
 }
 
 pub struct MultiOptRefCell<T> {

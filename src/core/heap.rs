@@ -18,11 +18,11 @@ use crate::{
 };
 
 use super::{
-    cell::{OptRef, OptRefMut},
+    cell::{MultiRefCellIndex, OptRef, OptRefMut},
     token::{
         BorrowMutToken, BorrowToken, GetToken, MainThreadToken, Token, TokenFor, TrivialUnjailToken,
     },
-    token_cell::{NMainCell, NOptRefCell},
+    token_cell::{NMainCell, NMultiOptRefCell, NOptRefCell},
 };
 
 pub(crate) static DEBUG_HEAP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -52,6 +52,7 @@ struct IndirectorSet {
 struct Indirector {
     owner: NMainCell<Option<InertEntity>>,
     value: NMainCell<ThreadedPtrRef<()>>,
+    index: NMainCell<MultiRefCellIndex>,
 }
 
 impl Default for Indirector {
@@ -59,6 +60,7 @@ impl Default for Indirector {
         Self {
             owner: NMainCell::new(None),
             value: NMainCell::new(ThreadedPtrRef(null_mut())),
+            index: NMainCell::new(MultiRefCellIndex::Slot0),
         }
     }
 }
@@ -66,20 +68,15 @@ impl Default for Indirector {
 // === Heap === //
 
 pub struct Heap<T: 'static> {
-    values: NonNull<[HeapValue<T>]>,
+    values: NonNull<[NMultiOptRefCell<T>]>,
     slots: Box<[NMainCell<Slot<T>>]>,
-}
-
-struct HeapValue<T> {
-    value: NOptRefCell<T>,
 }
 
 impl<T> Heap<T> {
     pub fn new(token: &'static MainThreadToken, len: usize) -> Self {
         // Allocate slot data
-        let values = Box::from_iter((0..len).map(|_| HeapValue {
-            value: NOptRefCell::new_empty(),
-        }));
+        let cell_count = (len.checked_add(7).unwrap()) / 8;
+        let values = Box::from_iter((0..cell_count).map(|_| NMultiOptRefCell::new()));
 
         // Allocate free slots
         let mut free_slots = FREE_INDIRECTORS.borrow_mut(token);
@@ -87,9 +84,8 @@ impl<T> Heap<T> {
             free_slots
                 .entry(NamedTypeId::of::<T>())
                 .or_insert_with(|| IndirectorSet {
-                    empty: ThreadedPtrRef(leak(HeapValue {
-                        value: NOptRefCell::new_empty(),
-                    }) as *const HeapValue<T>
+                    empty: ThreadedPtrRef(leak(NMultiOptRefCell::new())
+                        as *const NMultiOptRefCell<T>
                         as *const ()),
                     free_indirectors: Vec::new(),
                 });
@@ -116,10 +112,13 @@ impl<T> Heap<T> {
                 .drain((free_slots.len() - len)..)
                 .enumerate()
                 .map(|(i, data)| {
+                    let (major, minor) = MultiRefCellIndex::decompose(i);
+
                     data.value.set(
                         token,
-                        ThreadedPtrRef(&values[i] as *const HeapValue<T> as *const ()),
+                        ThreadedPtrRef(&values[major] as *const NMultiOptRefCell<T> as *const ()),
                     );
+                    data.index.set(token, minor);
 
                     NMainCell::new(Slot {
                         _ty: PhantomData,
@@ -148,14 +147,17 @@ impl<T> Heap<T> {
         self.len() == 0
     }
 
-    fn values(&self) -> &[HeapValue<T>] {
+    pub fn values(&self) -> &[NMultiOptRefCell<T>] {
         unsafe { self.values.as_ref() }
     }
 
     pub fn slot(&self, token: &impl Token, i: usize) -> DirectSlot<'_, T> {
+        let (major, minor) = MultiRefCellIndex::decompose(i);
+
         DirectSlot {
             slot: self.slots[i].get(token),
-            heap_value: &unsafe { self.values.as_ref() }[i],
+            heap_value: &unsafe { self.values.as_ref() }[major],
+            heap_index: minor,
         }
     }
 
@@ -170,9 +172,10 @@ impl<T> Heap<T> {
         // which value.
 
         // We swap the underlying values first because this is the only call capable of panicking.
-        self.values()[my_index]
-            .value
-            .swap(token, &other.values()[other_index].value);
+        let (my_major, my_minor) = MultiRefCellIndex::decompose(my_index);
+        let (other_major, other_minor) = MultiRefCellIndex::decompose(other_index);
+
+        self.values()[my_major].swap(token, &other.values()[other_major], my_minor, other_minor);
 
         // Get the relevant slots
         let my_slot_container = &self.slots[my_index];
@@ -185,6 +188,12 @@ impl<T> Heap<T> {
             .value
             .swap(token, &other_slot_container.get(token).indirector.value);
 
+        my_slot_container
+            .get(token)
+            .indirector
+            .index
+            .swap(token, &other_slot_container.get(token).indirector.index);
+
         // Finally, we swap which slots are in which heaps.
         my_slot_container.swap(token, other_slot_container);
     }
@@ -193,17 +202,14 @@ impl<T> Heap<T> {
         &'a self,
         token: &'a impl Token,
     ) -> (impl ExactSizeIterator<Item = DirectSlot<'a, T>> + Clone + 'a) {
-        self.slots
-            .iter()
-            .zip(self.values().iter())
-            .map(|(slot, heap_value)| DirectSlot {
+        self.slots.iter().enumerate().map(|(index, slot)| {
+            let (major, minor) = MultiRefCellIndex::decompose(index);
+            DirectSlot {
                 slot: slot.get(token),
-                heap_value,
-            })
-    }
-
-    pub fn cells(&self) -> (impl ExactSizeIterator<Item = &'_ NOptRefCell<T>> + Clone + '_) {
-        self.values().iter().map(|v| &v.value)
+                heap_value: &self.values()[major],
+                heap_index: minor,
+            }
+        })
     }
 
     pub fn clear_slots(&self, token: &'static MainThreadToken) {
@@ -237,6 +243,7 @@ impl<T> Drop for Heap<T> {
         for slot in self.slots.iter() {
             let slot = slot.get(token);
             slot.indirector.value.set(token, entry.empty);
+            slot.indirector.index.set(token, MultiRefCellIndex::Slot0);
             entry.free_indirectors.push(slot.indirector);
         }
 
@@ -250,12 +257,13 @@ impl<T> Drop for Heap<T> {
 #[derive_where(Copy, Clone)]
 pub struct DirectSlot<'a, T: 'static> {
     slot: Slot<T>,
-    heap_value: &'a HeapValue<T>,
+    heap_value: &'a NMultiOptRefCell<T>,
+    heap_index: MultiRefCellIndex,
 }
 
 impl<'a, T: 'static> DirectSlot<'a, T> {
-    unsafe fn heap_value_prolonged<'b>(self) -> &'b HeapValue<T> {
-        &*(self.heap_value as *const HeapValue<T>)
+    unsafe fn heap_value_prolonged<'b>(self) -> &'b NMultiOptRefCell<T> {
+        &*(self.heap_value as *const NMultiOptRefCell<T>)
     }
 
     pub fn slot(self) -> Slot<T> {
@@ -271,7 +279,7 @@ impl<'a, T: 'static> DirectSlot<'a, T> {
 
     pub fn set_value(self, token: &impl BorrowMutToken<T>, value: Option<T>) -> Option<T> {
         let new_state = value.is_some();
-        let old_state = self.heap_value.value.replace(token, value);
+        let old_state = self.heap_value.replace(token, self.heap_index, value);
 
         match new_state as i8 - old_state.is_some() as i8 {
             1 => {
@@ -314,8 +322,7 @@ impl<'a, T: 'static> DirectSlot<'a, T> {
             // Safety: a valid `GetToken` precludes main thread access for its lifetime.
             self.heap_value_prolonged()
         }
-        .value
-        .get_or_none(token)
+        .get_or_none(token, self.heap_index)
     }
 
     pub fn get(self, token: &impl GetToken<T>) -> &T {
@@ -323,8 +330,7 @@ impl<'a, T: 'static> DirectSlot<'a, T> {
             // Safety: a valid `GetToken` precludes main thread access for its lifetime.
             self.heap_value_prolonged()
         }
-        .value
-        .get(token)
+        .get(token, self.heap_index)
     }
 
     #[track_caller]
@@ -338,8 +344,7 @@ impl<'a, T: 'static> DirectSlot<'a, T> {
             // precludes deletion until the reference expires.
             self.heap_value_prolonged()
         }
-        .value
-        .borrow_or_none(token, loaner)
+        .borrow_or_none(token, self.heap_index, loaner)
     }
 
     #[track_caller]
@@ -349,8 +354,7 @@ impl<'a, T: 'static> DirectSlot<'a, T> {
             // precludes deletion until the reference expires.
             self.heap_value_prolonged()
         }
-        .value
-        .borrow(token)
+        .borrow(token, self.heap_index)
     }
 
     #[track_caller]
@@ -364,8 +368,7 @@ impl<'a, T: 'static> DirectSlot<'a, T> {
             // precludes deletion until the reference expires.
             self.heap_value_prolonged()
         }
-        .value
-        .borrow_on_loan(token, loaner)
+        .borrow_on_loan(token, self.heap_index, loaner)
     }
 
     #[track_caller]
@@ -379,8 +382,7 @@ impl<'a, T: 'static> DirectSlot<'a, T> {
             // precludes deletion until the reference expires.
             self.heap_value_prolonged()
         }
-        .value
-        .borrow_mut_or_none(token, loaner)
+        .borrow_mut_or_none(token, self.heap_index, loaner)
     }
 
     #[track_caller]
@@ -390,8 +392,7 @@ impl<'a, T: 'static> DirectSlot<'a, T> {
             // precludes deletion until the reference expires.
             self.heap_value_prolonged()
         }
-        .value
-        .borrow_mut(token)
+        .borrow_mut(token, self.heap_index)
     }
 
     #[track_caller]
@@ -405,13 +406,12 @@ impl<'a, T: 'static> DirectSlot<'a, T> {
             // precludes deletion until the reference expires.
             self.heap_value_prolonged()
         }
-        .value
-        .borrow_mut_on_loan(token, loaner)
+        .borrow_mut_on_loan(token, self.heap_index, loaner)
     }
 
     #[track_caller]
     pub fn take(self, token: &impl BorrowMutToken<T>) -> Option<T> {
-        let taken = self.heap_value.value.take(token);
+        let taken = self.heap_value.take(token, self.heap_index);
 
         if taken.is_some() {
             DEBUG_SLOT_COUNTER.fetch_sub(1, Relaxed);
@@ -420,7 +420,7 @@ impl<'a, T: 'static> DirectSlot<'a, T> {
     }
 
     pub fn is_empty(self, token: &impl TokenFor<T>) -> bool {
-        self.heap_value.value.is_empty(token)
+        self.heap_value.is_empty(token, self.heap_index)
     }
 }
 
@@ -432,7 +432,7 @@ impl<T> From<DirectSlot<'_, T>> for Slot<T> {
 
 #[derive_where(Copy, Clone)]
 pub struct Slot<T: 'static> {
-    _ty: PhantomData<&'static HeapValue<T>>,
+    _ty: PhantomData<&'static NMultiOptRefCell<T>>,
     // Invariants: this indirector must always point to a valid instance of `HeapValue<T>`.
     // Additionally, the active indirect pointee cannot be invalidated until:
     //
@@ -456,12 +456,19 @@ impl<T> Slot<T> {
     pub unsafe fn direct_slot<'a>(self, token: &impl Token) -> DirectSlot<'a, T> {
         let heap_value = unsafe {
             // Safety: provided by caller
-            &*self.indirector.value.get(token).0.cast::<HeapValue<T>>()
+            &*self
+                .indirector
+                .value
+                .get(token)
+                .0
+                .cast::<NMultiOptRefCell<T>>()
         };
+        let heap_index = self.indirector.index.get(token);
 
         DirectSlot {
             slot: self,
             heap_value,
+            heap_index,
         }
     }
 

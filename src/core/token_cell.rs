@@ -8,8 +8,8 @@ use crate::util::misc::NOT_ON_MAIN_THREAD_MSG;
 
 use super::{
     cell::{
-        BorrowError, BorrowMutError, MultiOptRefCell, MultiRefCellIndex, OptRef, OptRefCell,
-        OptRefMut,
+        BorrowError, BorrowMutError, MultiOptRef, MultiOptRefCell, MultiOptRefMut,
+        MultiRefCellIndex, OptRef, OptRefCell, OptRefMut,
     },
     token::{
         is_main_thread, BorrowMutToken, BorrowToken, GetToken, MainThreadToken, ThreadAccess,
@@ -609,8 +609,8 @@ impl<T> NMultiOptRefCell<T> {
     #[track_caller]
     pub fn borrow<'a>(
         &'a self,
-        i: MultiRefCellIndex,
         token: &'a impl BorrowToken<T>,
+        i: MultiRefCellIndex,
     ) -> OptRef<'a, T, T> {
         self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
 
@@ -680,6 +680,22 @@ impl<T> NMultiOptRefCell<T> {
 
         // Safety: see `try_borrow`.
         self.value.borrow_mut_on_loan(i, loaner)
+    }
+
+    // === Multi-borrows === //
+
+    pub fn borrow_all<'a>(&'a self, token: &'a impl BorrowToken<T>) -> MultiOptRef<'a, T> {
+        self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
+
+        // Safety: see `try_borrow`.
+        self.value.borrow_all()
+    }
+
+    pub fn borrow_all_mut<'a>(&'a self, token: &'a impl BorrowToken<T>) -> MultiOptRefMut<'a, T> {
+        self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
+
+        // Safety: see `try_borrow`.
+        self.value.borrow_all_mut()
     }
 
     // === Replace === //

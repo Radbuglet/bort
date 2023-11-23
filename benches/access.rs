@@ -269,7 +269,25 @@ fn access_tests() {
         })
     });
 
-    c.bench_function("query.heap.single.slots", |c| {
+    c.bench_function("query.heap.single", |c| {
+        let token = MainThreadToken::acquire();
+
+        let pos_heap = Heap::new(token, 100_000);
+        for slot in pos_heap.slots(token) {
+            slot.set_value(token, Some(Position(1.)));
+        }
+
+        c.iter(|| {
+            for group in pos_heap.values() {
+                let mut group = group.borrow_all_mut(token);
+                for slot in &mut *group {
+                    slot.0 += 1.;
+                }
+            }
+        })
+    });
+
+    c.bench_function("query.heap.single.individual", |c| {
         let token = MainThreadToken::acquire();
 
         let pos_heap = Heap::new(token, 100_000);
@@ -282,36 +300,6 @@ fn access_tests() {
                 slot.borrow_mut(token).0 += 1.;
             }
         })
-    });
-
-    c.bench_function("query.heap.single.values.checked_borrows", |c| {
-        let token = MainThreadToken::acquire();
-
-        let pos_heap = Heap::new(token, 100_000);
-        for slot in pos_heap.slots(token) {
-            slot.set_value(token, Some(Position(1.)));
-        }
-
-        c.iter(|| {
-            for slot in pos_heap.cells() {
-                slot.borrow_mut(token).0 += 1.;
-            }
-        });
-    });
-
-    c.bench_function("query.heap.single.values.nop", |c| {
-        let token = MainThreadToken::acquire();
-
-        let pos_heap = Heap::new(token, 100_000);
-        for slot in pos_heap.slots(token) {
-            slot.set_value(token, Some(Position(1.)));
-        }
-
-        c.iter(|| {
-            for slot in pos_heap.cells() {
-                black_box(slot);
-            }
-        });
     });
 
     c.bench_function("refcell.single.ref", |c| {
