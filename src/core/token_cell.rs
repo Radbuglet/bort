@@ -1,9 +1,4 @@
-use std::{
-    cell::Cell,
-    fmt,
-    num::NonZeroU64,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::{cell::Cell, fmt};
 
 use autoken::{
     ImmutableBorrow, MutableBorrow, Nothing, PotentialImmutableBorrow, PotentialMutableBorrow,
@@ -14,8 +9,8 @@ use crate::util::misc::NOT_ON_MAIN_THREAD_MSG;
 use super::{
     cell::{BorrowError, BorrowMutError, OptRef, OptRefCell, OptRefMut},
     token::{
-        is_main_thread, BorrowMutToken, BorrowToken, ExclusiveTokenHint, GetToken, MainThreadToken,
-        Namespace, ThreadAccess, Token, TokenFor, UnJailRefToken,
+        is_main_thread, BorrowMutToken, BorrowToken, GetToken, MainThreadToken, ThreadAccess,
+        Token, TokenFor, UnJailRefToken,
     },
 };
 
@@ -148,7 +143,6 @@ impl<T> NMainCell<T> {
 // === NOptRefCell === //
 
 pub struct NOptRefCell<T> {
-    namespace: AtomicU64,
     value: OptRefCell<T>,
 }
 
@@ -165,38 +159,15 @@ impl<T> NOptRefCell<T> {
         }
     }
 
-    pub fn new_namespaced(value: Option<T>, namespace: Option<Namespace>) -> Self {
-        match value {
-            Some(value) => Self::new_namespaced_full(value, namespace),
-            None => Self::new_namespaced_empty(namespace),
-        }
-    }
-
     pub const fn new_full(value: T) -> Self {
-        Self::new_namespaced_full(value, None)
+        Self {
+            value: OptRefCell::new_full(value),
+        }
     }
 
     pub const fn new_empty() -> Self {
-        Self::new_namespaced_empty(None)
-    }
-
-    pub const fn new_namespaced_full(value: T, namespace: Option<Namespace>) -> Self {
-        Self {
-            value: OptRefCell::new_full(value),
-            namespace: AtomicU64::new(match namespace {
-                Some(Namespace(id)) => id.get(),
-                None => 0,
-            }),
-        }
-    }
-
-    pub const fn new_namespaced_empty(namespace: Option<Namespace>) -> Self {
         Self {
             value: OptRefCell::new_empty(),
-            namespace: AtomicU64::new(match namespace {
-                Some(Namespace(id)) => id.get(),
-                None => 0,
-            }),
         }
     }
 
@@ -245,63 +216,13 @@ impl<T> NOptRefCell<T> {
         self.value.undo_leak()
     }
 
-    // === Namespace management === //
-
-    pub fn namespace(&self) -> Option<Namespace> {
-        NonZeroU64::new(self.namespace.load(Ordering::Relaxed)).map(Namespace)
-    }
-
     fn assert_accessible_by(&self, token: &impl TokenFor<T>, access: Option<ThreadAccess>) {
-        let owner = self.namespace();
         let can_access = match access {
-            Some(access) => token.check_access(owner) == Some(access),
-            None => token.check_access(owner).is_some(),
+            Some(access) => token.check_access(None) == Some(access),
+            None => token.check_access(None).is_some(),
         };
 
-        assert!(
-            can_access,
-            "{token:?} cannot access NOptRefCell under namespace {owner:?}.",
-        );
-    }
-
-    pub fn set_namespace(&mut self, namespace: Option<Namespace>) {
-        *self.namespace.get_mut() = namespace.map_or(0, |Namespace(id)| id.get());
-    }
-
-    #[track_caller]
-    pub fn set_namespace_ref(
-        &self,
-        token: &impl ExclusiveTokenHint<T>,
-        namespace: Option<Namespace>,
-    ) {
-        self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
-
-        // This borrow either happens or it results in a panic.
-        let mut loaner = MutableBorrow::new();
-
-        // Safety: we can read and mutate the `value`'s borrow count safely because we are the
-        // only thread with "write" namespace access and we know that fact will not change during
-        // this operation because *this is the operation we're using to change that fact!*
-        match self.value.try_borrow_mut(loaner.downgrade_mut()) {
-            Ok(_) => {}
-            Err(err) => {
-                panic!(
-                    "Failed to release NOptRefCell from namespace {:?}; dynamic borrows are still \
-                     ongoing: {err}",
-                    self.namespace(),
-                );
-            }
-        }
-
-        // Safety: It is forget our namespace because all write tokens on this thread acting on
-        // this object have relinquished their dynamic borrows.
-        self.namespace.store(
-            match namespace {
-                Some(Namespace(id)) => id.get(),
-                None => 0,
-            },
-            Ordering::Relaxed,
-        );
+        assert!(can_access, "{token:?} cannot access NOptRefCell.");
     }
 
     // === Borrowing === //
@@ -520,12 +441,10 @@ impl<T: fmt::Debug> fmt::Debug for NOptRefCell<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if is_main_thread() {
             f.debug_struct("NOptRefCell")
-                .field("namespace", &self.namespace())
                 .field("value", &self.value)
                 .finish()
         } else {
             f.debug_struct("NOptRefCell")
-                .field("namespace", &self.namespace())
                 .field("value", &NOT_ON_MAIN_THREAD_MSG)
                 .finish()
         }

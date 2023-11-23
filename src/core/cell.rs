@@ -546,36 +546,40 @@ impl<T> OptRefCell<T> {
 
     // === Replace === //
 
-    // FIXME: This is currently unsound and incorrect
     #[track_caller]
     pub fn try_replace_with<F>(&self, f: F) -> Result<Option<T>, BorrowMutError>
     where
         F: FnOnce(Option<&mut T>) -> Option<T>,
     {
-        autoken::assert_mutably_borrowable::<T>();
+        let mut loaner = PotentialMutableBorrow::new();
 
-        let state = self.state.get();
-        if state == NEUTRAL {
-            let value_container = unsafe { &mut *self.value.get() };
-            let curr_value = unsafe { value_container.assume_init_mut() };
+        let mut guard = self.try_borrow_mut(&mut loaner)?;
+        let value = f(guard.as_deref_mut());
 
-            if let Some(value) = f(Some(curr_value)) {
-                Ok(Some(mem::replace(curr_value, value)))
-            } else {
-                self.state.set(EMPTY);
-                Ok(Some(unsafe { value_container.assume_init_read() }))
+        match value {
+            Some(value) => {
+                if let Some(mut guard) = guard {
+                    Ok(Some(mem::replace(&mut *guard, value)))
+                } else {
+                    debug_assert_eq!(self.state.get(), EMPTY);
+                    self.state.set(NEUTRAL);
+                    unsafe { &mut *self.value.get() }.write(value);
+
+                    Ok(None)
+                }
             }
-        } else if state == EMPTY {
-            if let Some(value) = f(None) {
-                self.state.set(NEUTRAL);
-                unsafe { *self.value.get() = MaybeUninit::new(value) };
+            None => {
+                if let Some(guard) = guard {
+                    // Drop the guard and make the cell empty.
+                    mem::forget(guard);
+                    self.state.set(EMPTY);
+
+                    // Take the value out of the cell.
+                    Ok(Some(unsafe { (*self.value.get()).assume_init_read() }))
+                } else {
+                    Ok(None)
+                }
             }
-            Ok(None)
-        } else {
-            Err(BorrowMutError(CommonBorrowError::new(
-                &self.state,
-                &self.borrowed_at,
-            )))
         }
     }
 
@@ -584,6 +588,7 @@ impl<T> OptRefCell<T> {
     where
         F: FnOnce(Option<&mut T>) -> Option<T>,
     {
+        autoken::assert_mutably_borrowable::<T>();
         unwrap_error(self.try_replace_with(f))
     }
 
@@ -1023,7 +1028,6 @@ impl<T> MultiOptRefCell<T> {
 
     // === Replace === //
 
-    // FIXME: This is currently unsound and incorrect
     #[track_caller]
     pub fn try_replace_with<F>(
         &self,
@@ -1033,30 +1037,38 @@ impl<T> MultiOptRefCell<T> {
     where
         F: FnOnce(Option<&mut T>) -> Option<T>,
     {
-        autoken::assert_mutably_borrowable::<T>();
-
         let state = &cell_u64_to_cell_u8(&self.states)[i as usize];
-        let borrowed_at = &self.borrowed_ats[i as usize];
-        let value = &self.values[i as usize];
+        let value_ptr = &self.values[i as usize];
 
-        if state.get() == NEUTRAL {
-            let value_container = unsafe { &mut *value.get() };
-            let curr_value = unsafe { value_container.assume_init_mut() };
+        let mut loaner = PotentialMutableBorrow::new();
+        let mut guard = self.try_borrow_mut(i, &mut loaner)?;
 
-            if let Some(value) = f(Some(curr_value)) {
-                Ok(Some(mem::replace(curr_value, value)))
-            } else {
-                state.set(EMPTY);
-                Ok(Some(unsafe { value_container.assume_init_read() }))
+        let value = f(guard.as_deref_mut());
+
+        match value {
+            Some(value) => {
+                if let Some(mut guard) = guard {
+                    Ok(Some(mem::replace(&mut *guard, value)))
+                } else {
+                    debug_assert_eq!(state.get(), EMPTY);
+                    state.set(NEUTRAL);
+                    unsafe { &mut *value_ptr.get() }.write(value);
+
+                    Ok(None)
+                }
             }
-        } else if state.get() == EMPTY {
-            if let Some(taken_value) = f(None) {
-                state.set(NEUTRAL);
-                unsafe { *value.get() = MaybeUninit::new(taken_value) };
+            None => {
+                if let Some(guard) = guard {
+                    // Drop the guard and make the cell empty.
+                    mem::forget(guard);
+                    state.set(EMPTY);
+
+                    // Take the value out of the cell.
+                    Ok(Some(unsafe { (*value_ptr.get()).assume_init_read() }))
+                } else {
+                    Ok(None)
+                }
             }
-            Ok(None)
-        } else {
-            Err(BorrowMutError(CommonBorrowError::new(state, borrowed_at)))
         }
     }
 
@@ -1065,6 +1077,7 @@ impl<T> MultiOptRefCell<T> {
     where
         F: FnOnce(Option<&mut T>) -> Option<T>,
     {
+        autoken::assert_mutably_borrowable::<T>();
         unwrap_error(self.try_replace_with(i, f))
     }
 
