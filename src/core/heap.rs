@@ -75,7 +75,8 @@ pub struct Heap<T: 'static> {
 impl<T> Heap<T> {
     pub fn new(token: &'static MainThreadToken, len: usize) -> Self {
         // Allocate slot data
-        let cell_count = (len.checked_add(7).unwrap()) / 8;
+        let cell_count = MultiRefCellIndex::cell_count_needed(len);
+
         let values = Box::from_iter((0..cell_count).map(|_| NMultiOptRefCell::new()));
 
         // Allocate free slots

@@ -474,19 +474,19 @@ impl<T> NMultiOptRefCell<T> {
 
     // === Zero-cost conversions === //
 
-    pub fn into_inner(self) -> [Option<T>; 8] {
+    pub fn into_inner(self) -> [Option<T>; MultiRefCellIndex::COUNT] {
         // Safety: this is a method that takes exclusive access to the object. Hence, it is
         // not impacted by our potentially dangerous `Sync` impl.
         self.value.into_inner()
     }
 
-    pub fn get_mut(&mut self) -> [Option<&mut T>; 8] {
+    pub fn get_mut(&mut self) -> [Option<&mut T>; MultiRefCellIndex::COUNT] {
         // Safety: this is a method that takes exclusive access to the object. Hence, it is
         // not impacted by our potentially dangerous `Sync` impl.
         self.value.get_mut()
     }
 
-    pub fn as_ptr(&self) -> *mut [T; 8] {
+    pub fn as_ptr(&self) -> *mut [T; MultiRefCellIndex::COUNT] {
         self.value.as_ptr()
     }
 

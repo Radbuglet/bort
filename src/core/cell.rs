@@ -17,12 +17,12 @@ use crate::util::misc::{unwrap_error, RawFmt};
 
 // === Magic === //
 
-fn cell_u64_to_cell_u8(cell: &Cell<u64>) -> &[Cell<u8>; 8] {
+fn wide_cell_to_byte_cell(cell: &Cell<u128>) -> &[Cell<u8>; 16] {
     unsafe { std::mem::transmute(cell) }
 }
 
-fn repeat_byte(b: u8) -> u64 {
-    u64::from_ne_bytes([b; 8])
+fn repeat_byte(b: u8) -> u128 {
+    u128::from_ne_bytes([b; 16])
 }
 
 // === Borrow state === ///
@@ -718,10 +718,20 @@ pub enum MultiRefCellIndex {
     Slot5 = 5,
     Slot6 = 6,
     Slot7 = 7,
+    Slot8 = 8,
+    Slot9 = 9,
+    Slot10 = 10,
+    Slot11 = 11,
+    Slot12 = 12,
+    Slot13 = 13,
+    Slot14 = 14,
+    Slot15 = 15,
 }
 
 impl MultiRefCellIndex {
-    pub const VALUES: [Self; 8] = [
+    pub const COUNT: usize = 16;
+
+    pub const VALUES: [Self; Self::COUNT] = [
         Self::Slot0,
         Self::Slot1,
         Self::Slot2,
@@ -730,6 +740,14 @@ impl MultiRefCellIndex {
         Self::Slot5,
         Self::Slot6,
         Self::Slot7,
+		Self::Slot8,
+		Self::Slot9,
+		Self::Slot10,
+		Self::Slot11,
+		Self::Slot12,
+		Self::Slot13,
+		Self::Slot14,
+		Self::Slot15,
     ];
 
     pub fn from_index(v: usize) -> Self {
@@ -741,14 +759,18 @@ impl MultiRefCellIndex {
     }
 
     pub fn decompose(v: usize) -> (usize, Self) {
-        (v / 8, Self::from_index(v % 8))
+        (v / Self::COUNT, Self::from_index(v % Self::COUNT))
+    }
+
+    pub fn cell_count_needed(len: usize) -> usize {
+        (len.checked_add(Self::COUNT - 1).unwrap()) / Self::COUNT
     }
 }
 
 pub struct MultiOptRefCell<T> {
-    states: Cell<u64>,
-    borrowed_ats: [BorrowTracker; 8],
-    values: [UnsafeCell<MaybeUninit<T>>; 8],
+    states: Cell<u128>,
+    borrowed_ats: [BorrowTracker; MultiRefCellIndex::COUNT],
+    values: [UnsafeCell<MaybeUninit<T>>; MultiRefCellIndex::COUNT],
 }
 
 impl<T> MultiOptRefCell<T> {
@@ -756,7 +778,7 @@ impl<T> MultiOptRefCell<T> {
 
     pub fn new() -> Self {
         Self {
-            states: Cell::new(u64::from_ne_bytes([EMPTY; 8])),
+            states: Cell::new(repeat_byte(EMPTY)),
             borrowed_ats: std::array::from_fn(|_| BorrowTracker::new()),
             values: std::array::from_fn(|_| UnsafeCell::new(MaybeUninit::uninit())),
         }
@@ -764,8 +786,8 @@ impl<T> MultiOptRefCell<T> {
 
     // === Zero-cost queries === //
 
-    pub fn into_inner(mut self) -> [Option<T>; 8] {
-        let states = cell_u64_to_cell_u8(&self.states);
+    pub fn into_inner(mut self) -> [Option<T>; MultiRefCellIndex::COUNT] {
+        let states = wide_cell_to_byte_cell(&self.states);
 
         let arr = std::array::from_fn(|i| {
             if states[i].get() != EMPTY {
@@ -778,8 +800,8 @@ impl<T> MultiOptRefCell<T> {
         arr
     }
 
-    pub fn get_mut(&mut self) -> [Option<&mut T>; 8] {
-        let states = cell_u64_to_cell_u8(&self.states);
+    pub fn get_mut(&mut self) -> [Option<&mut T>; MultiRefCellIndex::COUNT] {
+        let states = wide_cell_to_byte_cell(&self.states);
 
         let mut values = self.values.iter_mut();
 
@@ -792,15 +814,15 @@ impl<T> MultiOptRefCell<T> {
         })
     }
 
-    pub fn as_ptr(&self) -> *mut [T; 8] {
-        let ptr = &self.values as *const [UnsafeCell<MaybeUninit<T>>; 8];
-        let ptr = ptr as *const UnsafeCell<MaybeUninit<[T; 8]>>;
-        let ptr = ptr as *mut MaybeUninit<[T; 8]>;
-        ptr as *mut [T; 8]
+    pub fn as_ptr(&self) -> *mut [T; MultiRefCellIndex::COUNT] {
+        let ptr = &self.values as *const [UnsafeCell<MaybeUninit<T>>; MultiRefCellIndex::COUNT];
+        let ptr = ptr as *const UnsafeCell<MaybeUninit<[T; MultiRefCellIndex::COUNT]>>;
+        let ptr = ptr as *mut MaybeUninit<[T; MultiRefCellIndex::COUNT]>;
+        ptr as *mut [T; MultiRefCellIndex::COUNT]
     }
 
     pub fn is_empty(&self, i: MultiRefCellIndex) -> bool {
-        cell_u64_to_cell_u8(&self.states)[i as usize].get() == EMPTY
+        wide_cell_to_byte_cell(&self.states)[i as usize].get() == EMPTY
     }
 
     pub fn set(&mut self, i: MultiRefCellIndex, value: Option<T>) -> Option<T> {
@@ -809,7 +831,7 @@ impl<T> MultiOptRefCell<T> {
     }
 
     pub fn undo_leak(&mut self) {
-        for cell in cell_u64_to_cell_u8(&self.states) {
+        for cell in wide_cell_to_byte_cell(&self.states) {
             if cell.get() != EMPTY {
                 cell.set(NEUTRAL);
             }
@@ -824,7 +846,7 @@ impl<T> MultiOptRefCell<T> {
         panic!(
             "{}",
             CommonBorrowError::<MUTABLY>::new(
-                &cell_u64_to_cell_u8(&self.states)[i as usize],
+                &wide_cell_to_byte_cell(&self.states)[i as usize],
                 &self.borrowed_ats[i as usize],
             ),
         );
@@ -837,7 +859,7 @@ impl<T> MultiOptRefCell<T> {
         i: MultiRefCellIndex,
         loaner: &'l PotentialImmutableBorrow<T>,
     ) -> Result<Option<OptRef<T, Nothing<'l>>>, BorrowError> {
-        let state = &cell_u64_to_cell_u8(&self.states)[i as usize];
+        let state = &wide_cell_to_byte_cell(&self.states)[i as usize];
         let borrowed_at = &self.borrowed_ats[i as usize];
         let value = &self.values[i as usize];
 
@@ -861,7 +883,7 @@ impl<T> MultiOptRefCell<T> {
         i: MultiRefCellIndex,
         loaner: &'l ImmutableBorrow<T>,
     ) -> Option<OptRef<T, Nothing<'l>>> {
-        let state = &cell_u64_to_cell_u8(&self.states)[i as usize];
+        let state = &wide_cell_to_byte_cell(&self.states)[i as usize];
         let borrowed_at = &self.borrowed_ats[i as usize];
         let value = &self.values[i as usize];
 
@@ -881,7 +903,7 @@ impl<T> MultiOptRefCell<T> {
     #[track_caller]
     #[inline(always)]
     pub fn borrow(&self, i: MultiRefCellIndex) -> OptRef<T, T> {
-        let state = &cell_u64_to_cell_u8(&self.states)[i as usize];
+        let state = &wide_cell_to_byte_cell(&self.states)[i as usize];
         let borrowed_at = &self.borrowed_ats[i as usize];
         let value = &self.values[i as usize];
 
@@ -914,7 +936,7 @@ impl<T> MultiOptRefCell<T> {
         i: MultiRefCellIndex,
         loaner: &'l mut PotentialMutableBorrow<T>,
     ) -> Result<Option<OptRefMut<T, Nothing<'l>>>, BorrowMutError> {
-        let state = &cell_u64_to_cell_u8(&self.states)[i as usize];
+        let state = &wide_cell_to_byte_cell(&self.states)[i as usize];
         let borrowed_at = &self.borrowed_ats[i as usize];
         let value = &self.values[i as usize];
 
@@ -939,7 +961,7 @@ impl<T> MultiOptRefCell<T> {
         i: MultiRefCellIndex,
         loaner: &'l mut MutableBorrow<T>,
     ) -> Option<OptRefMut<T, Nothing<'l>>> {
-        let state = &cell_u64_to_cell_u8(&self.states)[i as usize];
+        let state = &wide_cell_to_byte_cell(&self.states)[i as usize];
         let borrowed_at = &self.borrowed_ats[i as usize];
         let value = &self.values[i as usize];
 
@@ -960,7 +982,7 @@ impl<T> MultiOptRefCell<T> {
     #[track_caller]
     #[inline(always)]
     pub fn borrow_mut(&self, i: MultiRefCellIndex) -> OptRefMut<T, T> {
-        let state = &cell_u64_to_cell_u8(&self.states)[i as usize];
+        let state = &wide_cell_to_byte_cell(&self.states)[i as usize];
         let borrowed_at = &self.borrowed_ats[i as usize];
         let value = &self.values[i as usize];
 
@@ -993,7 +1015,7 @@ impl<T> MultiOptRefCell<T> {
         &self,
         i: MultiRefCellIndex,
     ) -> Result<Option<&T>, BorrowError> {
-        let state = &cell_u64_to_cell_u8(&self.states)[i as usize];
+        let state = &wide_cell_to_byte_cell(&self.states)[i as usize];
         let borrowed_at = &self.borrowed_ats[i as usize];
         let value = &self.values[i as usize];
 
@@ -1007,7 +1029,7 @@ impl<T> MultiOptRefCell<T> {
     }
 
     pub unsafe fn borrow_unguarded_or_none(&self, i: MultiRefCellIndex) -> Option<&T> {
-        let state = &cell_u64_to_cell_u8(&self.states)[i as usize];
+        let state = &wide_cell_to_byte_cell(&self.states)[i as usize];
         let value = &self.values[i as usize];
 
         if state.get() == NEUTRAL {
@@ -1020,7 +1042,7 @@ impl<T> MultiOptRefCell<T> {
     }
 
     pub unsafe fn borrow_unguarded(&self, i: MultiRefCellIndex) -> &T {
-        let state = &cell_u64_to_cell_u8(&self.states)[i as usize];
+        let state = &wide_cell_to_byte_cell(&self.states)[i as usize];
         let value = &self.values[i as usize];
 
         if state.get() == NEUTRAL {
@@ -1041,7 +1063,7 @@ impl<T> MultiOptRefCell<T> {
     where
         F: FnOnce(Option<&mut T>) -> Option<T>,
     {
-        let state = &cell_u64_to_cell_u8(&self.states)[i as usize];
+        let state = &wide_cell_to_byte_cell(&self.states)[i as usize];
         let value_ptr = &self.values[i as usize];
 
         let mut loaner = PotentialMutableBorrow::new();
@@ -1181,7 +1203,7 @@ unsafe impl<T: Send> Send for MultiOptRefCell<T> {}
 
 impl<T> Drop for MultiOptRefCell<T> {
     fn drop(&mut self) {
-        let states = cell_u64_to_cell_u8(&self.states);
+        let states = wide_cell_to_byte_cell(&self.states);
 
         for (state, value) in states.iter().zip(self.values.iter_mut()) {
             if state.get() == EMPTY {
@@ -1195,12 +1217,12 @@ impl<T> Drop for MultiOptRefCell<T> {
 
 pub struct MultiOptRef<'b, T> {
     _ty: PhantomData<&'b T>,
-    state: &'b Cell<u64>,
-    values: NonNull<[T; 8]>,
+    state: &'b Cell<u128>,
+    values: NonNull<[T; MultiRefCellIndex::COUNT]>,
 }
 
 impl<'b, T> Deref for MultiOptRef<'b, T> {
-    type Target = [T; 8];
+    type Target = [T; MultiRefCellIndex::COUNT];
 
     fn deref(&self) -> &Self::Target {
         unsafe { self.values.as_ref() }
@@ -1217,12 +1239,12 @@ impl<T> Drop for MultiOptRef<'_, T> {
 
 pub struct MultiOptRefMut<'b, T> {
     _ty: PhantomData<&'b mut T>,
-    state: &'b Cell<u64>,
-    values: NonNull<[T; 8]>,
+    state: &'b Cell<u128>,
+    values: NonNull<[T; MultiRefCellIndex::COUNT]>,
 }
 
 impl<'b, T> Deref for MultiOptRefMut<'b, T> {
-    type Target = [T; 8];
+    type Target = [T; MultiRefCellIndex::COUNT];
 
     fn deref(&self) -> &Self::Target {
         unsafe { self.values.as_ref() }

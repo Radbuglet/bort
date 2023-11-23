@@ -260,16 +260,21 @@ fn access_tests() {
         }
 
         c.iter(|| {
-            let mut iter_pos = pos_heap.slots(token);
-            let mut iter_vel = vel_heap.slots(token);
+            let mut iter_pos = pos_heap.values().iter();
+            let mut iter_vel = vel_heap.values().iter();
 
-            while let (Some(pos), Some(vel)) = (iter_pos.next(), iter_vel.next()) {
-                pos.borrow_mut(token).0 += vel.borrow(token).0;
+            while let (Some(pos_group), Some(vel_group)) = (iter_pos.next(), iter_vel.next()) {
+                let mut pos_group = pos_group.borrow_all_mut(token);
+                let vel_group = vel_group.borrow_all(token);
+
+                for (pos, vel) in pos_group.iter_mut().zip(vel_group.iter()) {
+                    pos.0 += vel.0;
+                }
             }
         })
     });
 
-    c.bench_function("query.heap.single", |c| {
+    c.bench_function("query.heap.single.group", |c| {
         let token = MainThreadToken::acquire();
 
         let pos_heap = Heap::new(token, 100_000);
@@ -296,8 +301,10 @@ fn access_tests() {
         }
 
         c.iter(|| {
-            for slot in pos_heap.slots(token) {
-                slot.borrow_mut(token).0 += 1.;
+            for group in pos_heap.values() {
+                for slot in MultiRefCellIndex::iter() {
+                    group.borrow_mut(token, slot).0 += 1.;
+                }
             }
         })
     });
