@@ -449,6 +449,7 @@ impl<T> fmt::Debug for Slot<T> {
             .field("indirector", &(self.indirector as *const Indirector))
             .field("owner", &self.indirector.owner)
             .field("value", &self.indirector.value)
+            .field("index", &self.indirector.index)
             .finish_non_exhaustive()
     }
 }

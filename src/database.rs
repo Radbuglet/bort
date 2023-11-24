@@ -439,6 +439,7 @@ impl DbRoot {
             if Self::can_remove_archetype(&self.arch_map, entity_info.virtual_arch) {
                 Self::rec_remove_stepping_stone_arches(
                     &mut self.arch_map,
+                    &mut self.tag_map,
                     entity_info.virtual_arch,
                 );
             }
@@ -490,6 +491,7 @@ impl DbRoot {
             for tag in target.keys() {
                 let tag_state = self.tag_map.entry(*tag).or_insert_with(Default::default);
 
+				debug_assert!(!tag_state.sorted_containers.contains(target_ptr));
                 tag_state.sorted_containers.push(*target_ptr);
                 tag_state.are_sorted_containers_sorted = false;
             }
@@ -524,7 +526,11 @@ impl DbRoot {
 
         // Try to delete the old archetype
         if Self::can_remove_archetype(&self.arch_map, old_virtual_arch) {
-            Self::rec_remove_stepping_stone_arches(&mut self.arch_map, old_virtual_arch);
+            Self::rec_remove_stepping_stone_arches(
+                &mut self.arch_map,
+                &mut self.tag_map,
+                old_virtual_arch,
+            );
         }
 
         // Determine whether we became dirty
@@ -993,23 +999,8 @@ impl DbRoot {
                 continue;
             }
 
-            // Remove the archetype from the tags
-            let arch = self.arch_map.arena().get(&arch_id).value();
-
-            for tag in arch.tags.iter().copied() {
-                let HmEntry::Occupied(mut entry) = self.tag_map.entry(tag) else {
-                    unreachable!()
-                };
-
-                entry.get_mut().sorted_containers.retain(|v| *v != arch_id);
-
-                if entry.get().sorted_containers.is_empty() {
-                    entry.remove();
-                }
-            }
-
             // Remove the archetype from the map
-            Self::rec_remove_stepping_stone_arches(&mut self.arch_map, arch_id);
+            Self::rec_remove_stepping_stone_arches(&mut self.arch_map, &mut self.tag_map, arch_id);
         }
 
         Ok(())
@@ -1042,14 +1033,30 @@ impl DbRoot {
         true
     }
 
-    fn rec_remove_stepping_stone_arches(arch_map: &mut DbArchetypeMap, arch_id: DbArchetypeRef) {
+    fn rec_remove_stepping_stone_arches(
+        arch_map: &mut DbArchetypeMap,
+        tag_map: &mut NopHashMap<InertTag, DbTag>,
+        arch_id: DbArchetypeRef,
+    ) {
         debug_assert!(Self::can_remove_archetype(arch_map, arch_id));
 
         let arch = arch_map.remove(arch_id);
 
+        for tag in arch.value().tags.iter().copied() {
+            let HmEntry::Occupied(mut entry) = tag_map.entry(tag) else {
+                unreachable!()
+            };
+
+            entry.get_mut().sorted_containers.retain(|v| *v != arch_id);
+
+            if entry.get().sorted_containers.is_empty() {
+                entry.remove();
+            }
+        }
+
         for src in arch.de_extensions().values() {
             if *src != arch_id && Self::can_remove_archetype(arch_map, *src) {
-                Self::rec_remove_stepping_stone_arches(arch_map, *src);
+                Self::rec_remove_stepping_stone_arches(arch_map, tag_map, *src);
             }
         }
     }
