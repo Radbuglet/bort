@@ -691,7 +691,10 @@ impl<T> NMultiOptRefCell<T> {
         self.value.borrow_all()
     }
 
-    pub fn borrow_all_mut<'a>(&'a self, token: &'a impl BorrowToken<T>) -> MultiOptRefMut<'a, T> {
+    pub fn borrow_all_mut<'a>(
+        &'a self,
+        token: &'a impl BorrowMutToken<T>,
+    ) -> MultiOptRefMut<'a, T> {
         self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
 
         // Safety: see `try_borrow`.

@@ -141,7 +141,7 @@ impl<T> Heap<T> {
     }
 
     pub fn len(&self) -> usize {
-        self.values.len()
+        self.slots.len()
     }
 
     pub fn is_empty(&self) -> bool {

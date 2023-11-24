@@ -690,7 +690,7 @@ impl DbRoot {
             .map_err(|_| ConcurrentFlushError)?;
 
         let mut may_need_truncation = FxHashSet::default();
-        let mut may_need_arch_deletion = Vec::new();
+        let mut may_need_arch_deletion = FxHashSet::default();
 
         // Begin by removing dead entities.
         'delete_dead: for info in mem::take(&mut self.dead_dirty_entities) {
@@ -735,7 +735,7 @@ impl DbRoot {
                         may_need_truncation.insert(arch_id);
 
                         let Some(new_last_heap) = arch.entity_heaps.last() else {
-                            may_need_arch_deletion.push(arch_id);
+                            may_need_arch_deletion.insert(arch_id);
 
                             // If we managed to consume all the entities in this archetype, we know
                             // our target entity is already dead
@@ -790,7 +790,7 @@ impl DbRoot {
                 if let Some(new_last) = arch.entity_heaps.last() {
                     arch.last_heap_len = new_last.len();
                 } else {
-                    may_need_arch_deletion.push(arch_id);
+                    may_need_arch_deletion.insert(arch_id);
                 }
             }
 
@@ -962,7 +962,7 @@ impl DbRoot {
                         may_need_truncation.insert(src_arch_id);
 
                         if src_arch.entity_heaps.is_empty() {
-                            may_need_arch_deletion.push(src_arch_id);
+                            may_need_arch_deletion.insert(src_arch_id);
                         }
 
                         if let Some(new_last) = src_arch.entity_heaps.last() {
@@ -1048,7 +1048,7 @@ impl DbRoot {
         let arch = arch_map.remove(arch_id);
 
         for src in arch.de_extensions().values() {
-            if Self::can_remove_archetype(arch_map, *src) && *src != arch_id {
+            if *src != arch_id && Self::can_remove_archetype(arch_map, *src) {
                 Self::rec_remove_stepping_stone_arches(arch_map, *src);
             }
         }

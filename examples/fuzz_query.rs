@@ -37,7 +37,7 @@ fn main() {
 
             if choice == 0 && !alive_list.is_empty() {
                 let entity = alive_list.swap_remove(fastrand::usize(0..alive_list.len()));
-                // println!("Destroyed {entity:?}");
+                println!("Destroyed {entity:?}");
                 assert!(alive_set.remove(&entity));
                 assert_eq!(
                     entity.is_tagged(my_tag_2),
@@ -57,7 +57,7 @@ fn main() {
             } else {
                 let entity = Entity::new_unmanaged().with_tagged(my_tag, 3);
                 assert!(alive_set.insert(entity));
-                // println!("Spawned {entity:?}");
+                println!("Spawned {entity:?}");
                 alive_list.push(entity);
             }
         }
