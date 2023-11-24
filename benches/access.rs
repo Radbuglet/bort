@@ -1,5 +1,6 @@
 use std::hint::black_box;
 
+use autoken::{PotentialImmutableBorrow, PotentialMutableBorrow};
 use bort::{
     core::{
         cell::{MultiOptRefCell, MultiRefCellIndex, OptRefCell},
@@ -264,12 +265,17 @@ fn access_tests() {
             let mut iter_vel = vel_heap.values().iter();
 
             while let (Some(pos_group), Some(vel_group)) = (iter_pos.next(), iter_vel.next()) {
-                let mut pos_group = pos_group.borrow_all_mut(token);
-                let vel_group = vel_group.borrow_all(token);
+                let mut loaner = PotentialMutableBorrow::new();
+                let pos_group = pos_group.try_borrow_all_mut(token, &mut loaner);
 
-                for (pos, vel) in pos_group.iter_mut().zip(vel_group.iter()) {
-                    pos.0 += vel.0;
-                }
+                let loaner = PotentialImmutableBorrow::new();
+                let vel_group = vel_group.try_borrow_all(token, &loaner);
+
+                if let (Some(mut pos_group), Some(vel_group)) = (pos_group, vel_group) {
+                    for (pos, vel) in pos_group.iter_mut().zip(vel_group.iter()) {
+                        pos.0 += vel.0;
+                    }
+                };
             }
         })
     });
@@ -284,7 +290,10 @@ fn access_tests() {
 
         c.iter(|| {
             for group in pos_heap.values() {
-                let mut group = group.borrow_all_mut(token);
+                let mut loaner = PotentialMutableBorrow::new();
+                let Some(mut group) = group.try_borrow_all_mut(token, &mut loaner) else {
+                    continue;
+                };
                 for slot in &mut *group {
                     slot.0 += 1.;
                 }
@@ -355,7 +364,10 @@ fn access_tests() {
             cell.set(slot, Some(slot as u32));
         }
 
-        c.iter(|| cell.borrow_all());
+        c.iter(|| {
+            let loaner = PotentialImmutableBorrow::new();
+            cell.try_borrow_all(&loaner);
+        });
     });
 
     c.bench_function("refcell.multi.multi.mut", |c| {
@@ -364,7 +376,10 @@ fn access_tests() {
             cell.set(slot, Some(slot as u32));
         }
 
-        c.iter(|| cell.borrow_all_mut());
+        c.iter(|| {
+            let mut loaner = PotentialMutableBorrow::new();
+            cell.try_borrow_all_mut(&mut loaner);
+        });
     });
 }
 

@@ -684,21 +684,26 @@ impl<T> NMultiOptRefCell<T> {
 
     // === Multi-borrows === //
 
-    pub fn borrow_all<'a>(&'a self, token: &'a impl BorrowToken<T>) -> MultiOptRef<'a, T> {
+    pub fn try_borrow_all<'a>(
+        &'a self,
+        token: &'a impl BorrowToken<T>,
+        loaner: &'a PotentialImmutableBorrow<T>,
+    ) -> Option<MultiOptRef<'a, T>> {
         self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
 
         // Safety: see `try_borrow`.
-        self.value.borrow_all()
+        self.value.try_borrow_all(loaner)
     }
 
-    pub fn borrow_all_mut<'a>(
+    pub fn try_borrow_all_mut<'a>(
         &'a self,
         token: &'a impl BorrowMutToken<T>,
-    ) -> MultiOptRefMut<'a, T> {
+        loaner: &'a mut PotentialMutableBorrow<T>,
+    ) -> Option<MultiOptRefMut<'a, T>> {
         self.assert_accessible_by(token, Some(ThreadAccess::Exclusive));
 
         // Safety: see `try_borrow`.
-        self.value.borrow_all_mut()
+        self.value.try_borrow_all_mut(loaner)
     }
 
     // === Replace === //

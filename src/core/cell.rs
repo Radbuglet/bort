@@ -1167,31 +1167,39 @@ impl<T> MultiOptRefCell<T> {
 
     // === Multi-Borrows === //
 
-    pub fn borrow_all(&self) -> MultiOptRef<T> {
+    pub fn try_borrow_all<'l>(
+        &'l self,
+        loaner: &'l PotentialImmutableBorrow<T>,
+    ) -> Option<MultiOptRef<T>> {
         let new_states = self.states.get() + repeat_byte(1);
         if new_states & repeat_byte(IMMUTABLE_MASK) != repeat_byte(IMMUTABLE_MASK) {
-            todo!();
+            return None;
         }
         self.states.set(new_states);
 
-        MultiOptRef {
+        let _ = loaner;
+        Some(MultiOptRef {
             _ty: PhantomData,
             state: &self.states,
             values: NonNull::from(&self.values).cast(),
-        }
+        })
     }
 
-    pub fn borrow_all_mut(&self) -> MultiOptRefMut<T> {
+    pub fn try_borrow_all_mut<'l>(
+        &'l self,
+        loaner: &'l mut PotentialMutableBorrow<T>,
+    ) -> Option<MultiOptRefMut<T>> {
         if self.states.get() != repeat_byte(NEUTRAL) {
-            todo!();
+            return None;
         }
         self.states.set(repeat_byte(NEUTRAL + 1));
 
-        MultiOptRefMut {
+        let _ = loaner;
+        Some(MultiOptRefMut {
             _ty: PhantomData,
             state: &self.states,
             values: NonNull::from(&self.values).cast(),
-        }
+        })
     }
 }
 
