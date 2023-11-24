@@ -108,13 +108,14 @@ impl<T> Heap<T> {
         let values = &*Box::leak(values);
         slots.extend(
             free_slots
-                // We avoid the need for a guard here by allocating the necessary capacity ahead of
-                // time.
+                // We avoid the need for a panic guard here by allocating the necessary capacity
+                // ahead of time.
                 .drain((free_slots.len() - len)..)
                 .enumerate()
                 .map(|(i, data)| {
                     let (major, minor) = MultiRefCellIndex::decompose(i);
 
+                    // We don't need to initialize the owner because it's already `None`.
                     data.value.set(
                         token,
                         ThreadedPtrRef(&values[major] as *const NMultiOptRefCell<T> as *const ()),
@@ -194,6 +195,8 @@ impl<T> Heap<T> {
             .indirector
             .index
             .swap(token, &other_slot_container.get(token).indirector.index);
+
+        // We don't want the owners to swap because we're only swapping the underlying values.
 
         // Finally, we swap which slots are in which heaps.
         my_slot_container.swap(token, other_slot_container);

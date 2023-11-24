@@ -1156,7 +1156,7 @@ impl<T> MultiOptRefCell<T> {
         // This check is necessary because, if the cell is the same full cell, `value_from_other`
         // will resolve to `None` as it places the value back in, causing `self.replace` to set the
         // value back to null.
-        if self.as_ptr() == other.as_ptr() {
+        if self.as_ptr() == other.as_ptr() && i_me == i_other {
             return;
         }
 
