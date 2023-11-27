@@ -202,6 +202,20 @@ impl<T> Heap<T> {
         my_slot_container.swap(token, other_slot_container);
     }
 
+    pub fn values_and_slots<'a, N: Token>(
+        &'a self,
+        token: &'a N,
+    ) -> (impl ExactSizeIterator<Item = HeapSlotBlock<'a, T, N>> + Clone + 'a) {
+        self.values()
+            .iter()
+            .zip(array_chunks::<_, { MultiRefCellIndex::COUNT }>(&self.slots))
+            .map(|(values, slots)| HeapSlotBlock {
+                token,
+                values,
+                slots,
+            })
+    }
+
     pub fn slots<'a>(
         &'a self,
         token: &'a impl Token,
@@ -254,6 +268,34 @@ impl<T> Drop for Heap<T> {
         // Drop the boxed slice of heap values.
         drop(unsafe { Box::from_raw(self.values.as_ptr()) });
     }
+}
+
+pub struct HeapSlotBlock<'a, T: 'static, N: Token> {
+    token: &'a N,
+    values: &'a NMultiOptRefCell<T>,
+    slots: &'a [NMainCell<Slot<T>>; MultiRefCellIndex::COUNT],
+}
+
+impl<'a, T: 'static, N: Token> HeapSlotBlock<'a, T, N> {
+    pub fn values(&self) -> &'a NMultiOptRefCell<T> {
+        self.values
+    }
+
+    pub fn slot(&self, i: MultiRefCellIndex) -> DirectSlot<'a, T> {
+        DirectSlot {
+            slot: self.slots[i as usize].get(self.token),
+            heap_value: self.values,
+            heap_index: i,
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = DirectSlot<'a, T>> + '_ {
+        MultiRefCellIndex::iter().map(|i| self.slot(i))
+    }
+}
+
+fn array_chunks<T, const N: usize>(v: &[T]) -> &[[T; N]] {
+    unsafe { std::slice::from_raw_parts(v.as_ptr().cast::<[T; N]>(), v.len() / N) }
 }
 
 // === Slot === //

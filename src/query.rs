@@ -448,7 +448,7 @@ macro_rules! query {
         $( let $name = $crate::query::query_internals::get_tag($tag); )*
 
         // Determine tag list
-        let mut virtual_tags_dyn = Vec::<$crate::query::query_internals::InertTag>::new();
+        let mut virtual_tags_dyn = $crate::query::query_internals::Vec::<$crate::query::query_internals::InertTag>::new();
         let virtual_tags_static = [
             $($crate::query::query_internals::Option::Some($name.1),)*
             $($($crate::query::query_internals::ExtraTagConverter::into_single($vtag, &mut virtual_tags_dyn),)*)?
