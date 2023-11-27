@@ -290,18 +290,19 @@ fn access_tests() {
                     let is_last = i == 0;
 
                     // Determine the actual length of our iterator
+                    #[allow(unused_variables)]
                     let len = pos.len();
                     let len = vel.len();
 
                     // Construct iterators
                     let pos = pos.values_and_slots(token).take(if is_last {
-                        MultiRefCellIndex::decompose(chunk.last_heap_len()).0
+                        MultiRefCellIndex::blocks_needed(chunk.last_heap_len())
                     } else {
                         pos.len()
                     });
 
                     let vel = vel.values_and_slots(token).take(if is_last {
-                        MultiRefCellIndex::decompose(chunk.last_heap_len()).0
+                        MultiRefCellIndex::blocks_needed(chunk.last_heap_len())
                     } else {
                         vel.len()
                     });
@@ -315,9 +316,13 @@ fn access_tests() {
                         let loaner = PotentialImmutableBorrow::new();
                         let vel = (vel.values().try_borrow_all(token, &loaner), vel);
 
-                        if let (Some(mut pos), Some(vel)) = (pos.0, vel.0) {
-                            for (pos, vel) in pos.iter_mut().zip(vel.iter()) {
-                                pos.0 += vel.0;
+                        if let (Some(mut pos), Some(vel)) =
+                            (pos.0.map(|v| (v, pos.1)), vel.0.map(|v| (v, vel.1)))
+                        {
+                            for (pos, vel) in (pos.0.iter_mut().zip(pos.1.slots()))
+                                .zip(vel.0.iter().zip(vel.1.slots()))
+                            {
+                                (pos.0).0 += (vel.0).0;
                             }
                         } else {
                             for i in MultiRefCellIndex::iter() {

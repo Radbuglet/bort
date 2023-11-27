@@ -75,7 +75,7 @@ pub struct Heap<T: 'static> {
 impl<T> Heap<T> {
     pub fn new(token: &'static MainThreadToken, len: usize) -> Self {
         // Allocate slot data
-        let cell_count = MultiRefCellIndex::cell_count_needed(len);
+        let cell_count = MultiRefCellIndex::blocks_needed(len);
 
         let values = Box::from_iter((0..cell_count).map(|_| NMultiOptRefCell::new()));
 
@@ -270,6 +270,8 @@ impl<T> Drop for Heap<T> {
     }
 }
 
+#[derive(Debug)]
+#[derive_where(Copy, Clone)]
 pub struct HeapSlotBlock<'a, T: 'static, N: Token> {
     token: &'a N,
     values: &'a NMultiOptRefCell<T>,
@@ -289,12 +291,12 @@ impl<'a, T: 'static, N: Token> HeapSlotBlock<'a, T, N> {
         }
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = DirectSlot<'a, T>> + '_ {
+    pub fn slots(&self) -> impl Iterator<Item = DirectSlot<'a, T>> + '_ {
         MultiRefCellIndex::iter().map(|i| self.slot(i))
     }
 }
 
-fn array_chunks<T, const N: usize>(v: &[T]) -> &[[T; N]] {
+pub(crate) fn array_chunks<T, const N: usize>(v: &[T]) -> &[[T; N]] {
     unsafe { std::slice::from_raw_parts(v.as_ptr().cast::<[T; N]>(), v.len() / N) }
 }
 

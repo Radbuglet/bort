@@ -764,7 +764,7 @@ impl MultiRefCellIndex {
         (v / Self::COUNT, Self::from_index(v % Self::COUNT))
     }
 
-    pub fn cell_count_needed(len: usize) -> usize {
+    pub fn blocks_needed(len: usize) -> usize {
         (len.checked_add(Self::COUNT - 1).unwrap()) / Self::COUNT
     }
 
