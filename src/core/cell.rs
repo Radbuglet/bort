@@ -754,10 +754,8 @@ impl MultiRefCellIndex {
         Self::VALUES[v]
     }
 
-    pub fn iter() -> MultiRefCellIndexIter {
-        MultiRefCellIndexIter {
-            next: Some(Self::Slot0),
-        }
+    pub fn iter() -> impl Iterator<Item = Self> {
+        Self::VALUES.into_iter()
     }
 
     pub fn decompose(v: usize) -> (usize, Self) {
@@ -770,20 +768,6 @@ impl MultiRefCellIndex {
 
     pub fn subsequent(self) -> Option<Self> {
         Self::VALUES.get(self as usize + 1).copied()
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct MultiRefCellIndexIter {
-    next: Option<MultiRefCellIndex>,
-}
-
-impl Iterator for MultiRefCellIndexIter {
-    type Item = MultiRefCellIndex;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let next = self.next?.subsequent();
-        mem::replace(&mut self.next, next)
     }
 }
 
