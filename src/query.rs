@@ -228,7 +228,7 @@ pub mod query_internals {
             compile_error,
             convert::Into,
             hint::unreachable_unchecked,
-            iter::{empty, Iterator},
+            iter::{empty, IntoIterator, Iterator},
             mem::drop,
             ops::ControlFlow,
             option::Option,
@@ -549,96 +549,89 @@ macro_rules! query {
             }
 
             // For each heap in that chunk...
-            while let (
-                $($crate::query::query_internals::Option::Some($name),)*
-                $($crate::query::query_internals::Option::Some($entity),)?
-            ) = (
-                $($crate::query::query_internals::Iterator::next(&mut $name),)*
-                $($crate::query::query_internals::Iterator::next(&mut $entity),)?
-            )
-            {
-                // Determine whether we're the last heap of the chunk
-                i -= 1;
-                let is_last = i == 0;
+            $crate::query::query! {
+                @__internal_zip_iter for ($($name in $name,)* $($entity in $entity)?) {
+                    // Determine whether we're the last heap of the chunk
+                    i -= 1;
+                    let is_last = i == 0;
 
-                // Determine the actual length of our iterator
-                let len = 0;
-                $(let len = $name.len();)*
+                    // Determine the actual length of our iterator
+                    let len = 0;
+                    $(let len = $name.len();)*
 
-                // Construct iterators
-                $(let mut $name = $crate::query::query_internals::Iterator::take(
-                    $name.values_and_slots(token),
-                    if is_last {
-                        $crate::query::query_internals::MultiRefCellIndex::blocks_needed(chunk.last_heap_len())
-                    } else {
-                        $name.len()
-                    },
-                );)*
-
-                $(
-                    let mut $entity = $crate::query::query_internals::split_entities_into_chunks(
+                    // Construct iterators
+                    $(let mut $name = $crate::query::query_internals::Iterator::take(
+                        $name.values_and_slots(token),
                         if is_last {
-                            &$entity[..chunk.last_heap_len()]
+                            $crate::query::query_internals::MultiRefCellIndex::blocks_needed(chunk.last_heap_len())
                         } else {
-                            &$entity
+                            $name.len()
                         },
-                    )
-                    .iter();
-                )?
+                    );)*
 
-                // For each block in that heap...
-                '__query_block: while let (
-                    $($crate::query::query_internals::Option::Some($name),)*
-                    $($crate::query::query_internals::Option::Some($entity),)?
-                ) = (
-                    $($crate::query::query_internals::Iterator::next(&mut $name),)*
-                    $($crate::query::query_internals::Iterator::next(&mut $entity),)?
-                ) {
-                    // Attempt to run the fast path.
-                    '__fast_path: {
-                        // Create iterators for the entire block.
-                        $(let mut $entity = $entity.iter();)?
-                        $crate::query::query!(@__internal_acquire_group token '__fast_path $($entity)?; $($prefix $name;)*);
+                    $(
+                        let mut $entity = $crate::query::query_internals::split_entities_into_chunks(
+                            if is_last {
+                                &$entity[..chunk.last_heap_len()]
+                            } else {
+                                &$entity
+                            },
+                        )
+                        .iter();
+                    )?
 
-                        // For every element in the block...
-                        '__query_ent: while let (
-                            $($crate::query::query_internals::Option::Some(mut $name),)*
-                            $($crate::query::query_internals::Option::Some($entity),)?
-                        ) = (
-                            $($crate::query::query_internals::Iterator::next(&mut $name),)*
-                            $($crate::query::query_internals::Iterator::next(&mut $entity),)?
-                        ) {
-                            // Convert the entity cell into a regular entity.
-                            $(let $entity = $entity.get(token).into_dangerous_entity();)?
+                    // For each block in that heap...
+                    $crate::query::query! {
+                        @__internal_zip_iter
+                        '__query_block: for ($($name in $name,)* $($entity in $entity)?) {
+                            // Attempt to run the fast path.
+                            '__fast_path: {
+                                // Create iterators for the entire block.
+                                $(let mut $entity = $entity.iter();)?
+                                $crate::query::query!(
+                                    @__internal_acquire_group
+                                    token '__fast_path $($entity)?;
+                                    $($prefix $name;)*
+                                );
 
-                            // Run userland code.
-                            let mut did_run = false;
-                            loop {
-                                if did_run {
-                                    // The user must have used `continue`.
-                                    continue '__query_ent;
+                                // For every element in the block...
+                                $crate::query::query! {
+                                    @__internal_zip_iter
+                                    '__query_ent: for ($($name in $name,)* $($entity in $entity)?) {
+                                        // Convert the entity cell into a regular entity.
+                                        $(let $entity = $entity.get(token).into_dangerous_entity();)?
+
+                                        // Run userland code.
+                                        let mut did_run = false;
+                                        loop {
+                                            if did_run {
+                                                // The user must have used `continue`.
+                                                continue '__query_ent;
+                                            }
+                                            did_run = true;
+                                            let _: () = {
+                                                $($body)*
+                                            };
+                                            // The user completed the loop.
+                                            #[allow(unreachable_code)]
+                                            {
+                                                continue '__query_ent;
+                                            }
+                                        }
+                                        // The user broke out of the loop.
+                                        #[allow(unreachable_code)]
+                                        {
+                                            break '__query;
+                                        }
+                                    }
                                 }
-                                did_run = true;
-                                let _: () = {
-                                    $($body)*
-                                };
-                                // The user completed the loop.
-                                #[allow(unreachable_code)]
-                                {
-                                    continue '__query_ent;
-                                }
-                            }
-                            // The user broke out of the loop.
-                            #[allow(unreachable_code)]
-                            {
-                                break '__query;
-                            }
+                                continue '__query_block;
+                            };
+
+                            // Otherwise, we're running the slow path.
+                            // TODO
                         }
-                        continue '__query_block;
-                    };
-
-                    // Otherwise, we're running the slow path.
-                    // TODO
+                    }
                 }
             }
         }
@@ -714,10 +707,10 @@ macro_rules! query {
         $crate::query::query!(@__internal_xform $entity; $($rest)*);
     };
 
-	(@__internal_acquire_group $token:ident $label:lifetime $($entity:ident)?;) => {};
+    (@__internal_acquire_group $token:ident $label:lifetime $($entity:ident)?;) => {};
     (@__internal_acquire_group $token:ident $label:lifetime $($entity:ident)?; slot $name:ident; $($rest:tt)*) => {
         let mut $name = $name.slots();
-		$crate::query::query!(@__internal_acquire_group $token $label $($entity)?; $($rest)*);
+        $crate::query::query!(@__internal_acquire_group $token $label $($entity)?; $($rest)*);
     };
     (@__internal_acquire_group $token:ident $label:lifetime $($entity:ident)?; ref $name:ident; $($rest:tt)*) => {
         let loaner = $crate::query::query_internals::PotentialImmutableBorrow::new();
@@ -726,7 +719,7 @@ macro_rules! query {
             $crate::query::query_internals::Option::None => break $label (),
         };
         let mut $name = $name.iter();
-		$crate::query::query!(@__internal_acquire_group $token $label $($entity)?; $($rest)*);
+        $crate::query::query!(@__internal_acquire_group $token $label $($entity)?; $($rest)*);
     };
     (@__internal_acquire_group $token:ident $label:lifetime $($entity:ident)?; mut $name:ident; $($rest:tt)*) => {
         let mut loaner = $crate::query::query_internals::PotentialMutableBorrow::new();
@@ -735,50 +728,88 @@ macro_rules! query {
             $crate::query::query_internals::Option::None => break $label (),
         };
         let mut $name = $name.iter_mut();
-		$crate::query::query!(@__internal_acquire_group $token $label $($entity)?; $($rest)*);
+        $crate::query::query!(@__internal_acquire_group $token $label $($entity)?; $($rest)*);
     };
     (@__internal_acquire_group $token:ident $label:lifetime $entity:ident; oref $name:ident; $($rest:tt)*) => {
         let mut $name = $crate::query::query_internals::fake_oref_with_entity(&$name);
         if true {
             break $label ();
         }
-		$crate::query::query!(@__internal_acquire_group $token $label $entity; $($rest)*);
+        $crate::query::query!(@__internal_acquire_group $token $label $entity; $($rest)*);
     };
-	(@__internal_acquire_group $token:ident $label:lifetime; oref $name:ident; $($rest:tt)*) => {
+    (@__internal_acquire_group $token:ident $label:lifetime; oref $name:ident; $($rest:tt)*) => {
         let mut $name = $crate::query::query_internals::fake_oref_without_entity(&$name);
         if true {
             break $label ();
         }
-		$crate::query::query!(@__internal_acquire_group $token $label; $($rest)*);
+        $crate::query::query!(@__internal_acquire_group $token $label; $($rest)*);
     };
     (@__internal_acquire_group $token:ident $label:lifetime $entity:ident; omut $name:ident; $($rest:tt)*) => {
         let mut $name = $crate::query::query_internals::fake_omut_with_entity(&$name);
         if true {
             break $label ();
         }
-		$crate::query::query!(@__internal_acquire_group $token $label $entity; $($rest)*);
+        $crate::query::query!(@__internal_acquire_group $token $label $entity; $($rest)*);
     };
-	(@__internal_acquire_group $token:ident $label:lifetime; omut $name:ident; $($rest:tt)*) => {
+    (@__internal_acquire_group $token:ident $label:lifetime; omut $name:ident; $($rest:tt)*) => {
         let mut $name = $crate::query::query_internals::fake_omut_without_entity(&$name);
         if true {
             break $label ();
         }
-		$crate::query::query!(@__internal_acquire_group $token $label; $($rest)*);
+        $crate::query::query!(@__internal_acquire_group $token $label; $($rest)*);
     };
     (@__internal_acquire_group $token:ident $label:lifetime $entity:ident; obj $name:ident; $($rest:tt)*) => {
         let mut $name = $crate::query::query_internals::Iterator::map(
-			$crate::query::query_internals::Iterator::zip($name.slots(), $entity),
-			|(slot, entity)| $crate::query::query_internals::Obj::from_raw_parts(
-				entity.get($token).into_dangerous_entity(),
-				slot.slot(),
-			),
-		);
-		$crate::query::query!(@__internal_acquire_group $token $label $entity; $($rest)*);
+            $crate::query::query_internals::Iterator::zip($name.slots(), $entity),
+            |(slot, entity)| $crate::query::query_internals::Obj::from_raw_parts(
+                entity.get($token).into_dangerous_entity(),
+                slot.slot(),
+            ),
+        );
+        $crate::query::query!(@__internal_acquire_group $token $label $entity; $($rest)*);
     };
-	(@__internal_acquire_group $token:ident $label:lifetime; obj $name:ident; $($rest:tt)*) => {
+    (@__internal_acquire_group $token:ident $label:lifetime; obj $name:ident; $($rest:tt)*) => {
         $crate::query::query_internals::compile_error!("`obj` qualifier can only be used on queries which also request the entity ID");
-		$crate::query::query!(@__internal_acquire_group $token $label; $($rest)*);
+        $crate::query::query!(@__internal_acquire_group $token $label; $($rest)*);
     };
+    (
+        @__internal_zip_iter
+        for () {
+            $($body:tt)*
+        }
+    ) => {{
+        if false {
+            $($body)*
+        }
+    }};
+    (
+        @__internal_zip_iter
+        $($label:lifetime: )?
+        for ($first_name:ident in $first_iter:expr $(, $name:ident in $iter:expr)*$(,)?) {
+            $($body:tt)*
+        }
+    ) => {{
+        let iter = $crate::query::query_internals::IntoIterator::into_iter($first_iter);
+        $(let iter = $crate::query::query_internals::Iterator::zip(
+            $crate::query::query_internals::IntoIterator::into_iter($iter),
+            iter,
+        );)*
+
+        $($label:)? for decomposed in iter {
+            // Get the `$name`s in reverse order.
+            $(let ($name, decomposed) = decomposed;)*
+
+            // This, however, is fine.
+            let $first_name = decomposed;
+
+            // Construct another cons-list.
+            let recomposed = ();
+            $(let recomposed = ($name, recomposed);)*
+            $(let ($name, recomposed) = recomposed;)*
+
+            $($body)*
+        }
+    }};
 }
 
 pub use query;

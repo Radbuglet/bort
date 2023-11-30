@@ -491,7 +491,7 @@ impl DbRoot {
             for tag in target.keys() {
                 let tag_state = self.tag_map.entry(*tag).or_insert_with(Default::default);
 
-				debug_assert!(!tag_state.sorted_containers.contains(target_ptr));
+                debug_assert!(!tag_state.sorted_containers.contains(target_ptr));
                 tag_state.sorted_containers.push(*target_ptr);
                 tag_state.are_sorted_containers_sorted = false;
             }
@@ -848,12 +848,12 @@ impl DbRoot {
                 if dst_arch_id != *self.arch_map.root() {
                     // Add to the target archetype list
                     let dst_arch = self.arch_map.arena_mut().get_mut(&dst_arch_id).value_mut();
+                    let last_heap_cap = dst_arch.entity_heaps.last().map_or(0, |heap| heap.len());
 
-                    if dst_arch.last_heap_len
-                        == dst_arch.entity_heaps.last().map_or(0, |heap| heap.len())
-                    {
+                    if dst_arch.last_heap_len == last_heap_cap {
+                        let sub_heap_cap = (last_heap_cap * 2).max(128);
                         let sub_heap = Arc::from_iter(
-                            (0..128).map(|_| NMainCell::new(InertEntity::PLACEHOLDER)),
+                            (0..sub_heap_cap).map(|_| NMainCell::new(InertEntity::PLACEHOLDER)),
                         );
                         sub_heap[0].set(token, target);
 
