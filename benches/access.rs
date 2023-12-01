@@ -174,7 +174,7 @@ fn access_tests() {
         c.iter(|| slot.borrow_mut(token));
     });
 
-    c.bench_function("query.normal.only_slots", |c| {
+    c.bench_function("query.normal.only_slots.no_bb", |c| {
         let pos_tag = Tag::new();
         let vel_tag = Tag::new();
         let entities = spawn_tagged_pos_vel_pop(pos_tag, vel_tag);
@@ -182,8 +182,24 @@ fn access_tests() {
 
         c.iter(|| {
             query! {
-                for (slot pos in pos_tag, slot vel in vel_tag) {
-                    black_box((pos, vel));
+                for (slot _pos in pos_tag, slot _vel in vel_tag) {}
+            }
+        });
+
+        drop(entities);
+        flush();
+    });
+
+    c.bench_function("query.normal.only_slots.bb", |c| {
+        let pos_tag = Tag::new();
+        let vel_tag = Tag::new();
+        let entities = spawn_tagged_pos_vel_pop(pos_tag, vel_tag);
+        flush();
+
+        c.iter(|| {
+            query! {
+                for (slot _pos in pos_tag, slot _vel in vel_tag) {
+                    black_box(());
                 }
             }
         });
