@@ -332,10 +332,21 @@ impl Entity {
         self
     }
 
-    pub fn is_tagged(self, tag: impl Into<RawTag>) -> bool {
+    pub fn is_tagged_virtual(self, tag: impl Into<RawTag>) -> bool {
         let tag = tag.into().0;
         let is_tagged = DbRoot::get(MainThreadToken::acquire_fmt("query entity tags"))
-            .is_entity_tagged(self.inert, tag);
+            .is_entity_tagged_virtual(self.inert, tag);
+
+        match is_tagged {
+            Ok(result) => result,
+            Err(EntityDeadError) => panic!("Attempted to query tags of dead entity {self:?}"),
+        }
+    }
+
+    pub fn is_tagged_physical(self, tag: impl Into<RawTag>) -> bool {
+        let tag = tag.into().0;
+        let is_tagged = DbRoot::get(MainThreadToken::acquire_fmt("query entity tags"))
+            .is_entity_tagged_physical(self.inert, tag);
 
         match is_tagged {
             Ok(result) => result,
@@ -530,6 +541,14 @@ impl OwnedEntity {
         self.insert(comp);
         self.tag(tag.into());
         self
+    }
+
+    pub fn is_tagged_virtual(&self, tag: impl Into<RawTag>) -> bool {
+        self.entity.is_tagged_virtual(tag)
+    }
+
+    pub fn is_tagged_physical(self, tag: impl Into<RawTag>) -> bool {
+        self.entity.is_tagged_physical(tag)
     }
 
     pub fn is_alive(&self) -> bool {

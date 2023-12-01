@@ -562,7 +562,7 @@ impl DbRoot {
         self.tag_common(entity, tag, false)
     }
 
-    pub fn is_entity_tagged(
+    pub fn is_entity_tagged_virtual(
         &self,
         entity: InertEntity,
         tag: InertTag,
@@ -575,6 +575,22 @@ impl DbRoot {
             .arch_map
             .arena()
             .get(&entity_info.virtual_arch)
+            .has_key(&tag))
+    }
+
+    pub fn is_entity_tagged_physical(
+        &self,
+        entity: InertEntity,
+        tag: InertTag,
+    ) -> Result<bool, EntityDeadError> {
+        let Some(entity_info) = self.alive_entities.get(&entity) else {
+            return Err(EntityDeadError);
+        };
+
+        Ok(self
+            .arch_map
+            .arena()
+            .get(&entity_info.physical_arch)
             .has_key(&tag))
     }
 

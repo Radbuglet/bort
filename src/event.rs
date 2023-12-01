@@ -188,7 +188,7 @@ impl<E> QueryableEventList for VecEventList<E> {
         );
 
         for (entity, event) in &self.events[version..] {
-            if tags.clone().all(|tag| entity.is_tagged(tag)) {
+            if tags.clone().all(|tag| entity.is_tagged_physical(tag)) {
                 match handler(*entity, event) {
                     ControlFlow::Continue(()) => {}
                     ControlFlow::Break(()) => break,

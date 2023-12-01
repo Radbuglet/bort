@@ -40,7 +40,7 @@ fn main() {
                 // println!("Destroyed {entity:?}");
                 assert!(alive_set.remove(&entity));
                 assert_eq!(
-                    entity.is_tagged(my_tag_2),
+                    entity.is_tagged_virtual(my_tag_2),
                     alive_and_tagged_2_set.remove(&entity)
                 );
 
