@@ -21,9 +21,9 @@ use crate::{
     },
     debug::DebugLabel,
     entity::Entity,
-    query::RawTag,
+    query::{ArchetypeId, RawTag},
     util::{
-        arena::{Arena, FreeListArenaKind, LeakyArenaKind},
+        arena::{Arena, CheckedArena, CheckedPtr, FreeListArenaKind, LeakyArenaKind},
         block::{BlockAllocator, BlockReservation},
         hash_map::{ConstSafeBuildHasherDefault, FxHashMap, FxHashSet, NopHashMap},
         iter::{filter_duplicates, merge_iters},
@@ -347,6 +347,15 @@ impl InertTag {
     }
 }
 
+#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq)]
+pub struct InertArchetypeId(DbArchetypeCheckedPtr);
+
+impl InertArchetypeId {
+    pub fn into_dangerous_archetype_id(self) -> ArchetypeId {
+        ArchetypeId(self)
+    }
+}
+
 // === Methods === //
 
 impl Default for DbRoot {
@@ -451,6 +460,18 @@ impl DbRoot {
 
     pub fn is_entity_alive(&self, entity: InertEntity) -> bool {
         self.alive_entities.contains_key(&entity)
+    }
+
+    pub fn get_entity_physical_and_virtual_arches(
+        &self,
+        entity: InertEntity,
+    ) -> Option<(InertArchetypeId, InertArchetypeId)> {
+        self.alive_entities.get(&entity).map(|info| {
+            (
+                InertArchetypeId(self.arch_map.arena().upgrade_ptr(info.physical_arch)),
+                InertArchetypeId(self.arch_map.arena().upgrade_ptr(info.virtual_arch)),
+            )
+        })
     }
 
     pub fn spawn_tag(&mut self, ty: NamedTypeId) -> InertTag {
@@ -604,10 +625,10 @@ impl DbRoot {
         self.query_guard.borrow(token)
     }
 
-    fn prepare_query_common(
+    pub fn enumerate_tag_intersection(
         &mut self,
         tags: ReifiedTagList,
-        mut f: impl FnMut(&mut DbArchetypeArena, DbArchetypeAbaPtr),
+        mut f: impl FnMut(InertArchetypeQueryInfo<'_>),
     ) {
         if tags.iter().next().is_none() {
             return;
@@ -665,41 +686,26 @@ impl DbRoot {
             }
 
             // Otherwise, this archetype is in the intersection and we can add a chunk for it.
-            f(self.arch_map.arena_mut(), *primary_arch);
+            let arena = self.arch_map.arena_mut();
+            let arch_id_safe = arena.upgrade_ptr(*primary_arch);
+            let arch = arena.get_aba(primary_arch).value();
+
+            f(InertArchetypeQueryInfo {
+                archetype: InertArchetypeId(arch_id_safe),
+                last_heap_len: arch.last_heap_len,
+                entities: &arch.entity_heaps,
+            });
         }
     }
 
-    pub fn prepare_named_entity_query(
-        &mut self,
-        tags: ReifiedTagList,
-    ) -> Vec<QueryChunkWithEntities> {
-        let mut chunks = Vec::new();
-
-        self.prepare_query_common(tags, |arena, arch_id| {
-            let arch = arena.get_aba(&arch_id).value();
-            chunks.push(QueryChunkWithEntities {
-                archetype: arch_id,
-                entity_subs: arch.entity_heaps.clone(),
-                last_heap_len: arch.last_heap_len,
-            })
-        });
-
-        chunks
-    }
-
-    pub fn prepare_anonymous_entity_query(&mut self, tags: ReifiedTagList) -> Vec<QueryChunk> {
-        let mut chunks = Vec::new();
-
-        self.prepare_query_common(tags, |arena, arch_id| {
-            let arch = arena.get_aba(&arch_id).value();
-            chunks.push(QueryChunk {
-                archetype: arch_id,
-                heap_count: arch.entity_heaps.len(),
-                last_heap_len: arch.last_heap_len,
-            })
-        });
-
-        chunks
+    pub fn heaps_from_archetype_aba<T: 'static>(
+        id: InertArchetypeId,
+        storage: &DbStorageInner<T>,
+    ) -> Vec<Arc<Heap<T>>> {
+        storage
+            .heaps
+            .get(&id.0.as_aba())
+            .map_or(Vec::new(), |v| v.clone())
     }
 
     pub fn flush_archetypes(
@@ -1487,56 +1493,10 @@ pub struct EntityDeadError;
 pub struct ConcurrentFlushError;
 
 #[derive(Debug, Clone)]
-pub struct QueryChunkWithEntities {
-    archetype: DbArchetypeAbaPtr,
-    entity_subs: Vec<Arc<[NMainCell<InertEntity>]>>,
-    last_heap_len: usize,
-}
-
-impl QueryChunkWithEntities {
-    pub fn split(self) -> (QueryChunk, Vec<Arc<[NMainCell<InertEntity>]>>) {
-        (self.query_chunk(), self.into_entities())
-    }
-
-    pub fn query_chunk(&self) -> QueryChunk {
-        QueryChunk {
-            archetype: self.archetype,
-            heap_count: self.entity_subs.len(),
-            last_heap_len: self.last_heap_len,
-        }
-    }
-
-    pub fn into_entities(self) -> Vec<Arc<[NMainCell<InertEntity>]>> {
-        self.entity_subs
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct QueryChunk {
-    archetype: DbArchetypeAbaPtr,
-    heap_count: usize,
-    last_heap_len: usize,
-}
-
-impl QueryChunk {
-    pub fn is_empty(&self) -> bool {
-        self.heap_count == 0
-    }
-
-    pub fn last_heap_len(&self) -> usize {
-        self.last_heap_len
-    }
-
-    pub fn heap_count(&self) -> usize {
-        self.heap_count
-    }
-
-    pub fn heaps<T: 'static>(&self, storage: &DbStorageInner<T>) -> Vec<Arc<Heap<T>>> {
-        storage
-            .heaps
-            .get(&self.archetype)
-            .map_or(Vec::new(), |v| v.clone())
-    }
+pub struct InertArchetypeQueryInfo<'a> {
+    pub archetype: InertArchetypeId,
+    pub last_heap_len: usize,
+    pub entities: &'a Vec<Arc<[NMainCell<InertEntity>]>>,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -1546,7 +1506,7 @@ pub struct ReifiedTagList<'a> {
 }
 
 impl<'a> ReifiedTagList<'a> {
-    pub fn iter(self) -> impl Iterator<Item = &'a InertTag> + Clone + 'a {
+    fn iter(self) -> impl Iterator<Item = &'a InertTag> + Clone + 'a {
         self.static_tags
             .iter()
             .filter_map(|v| v.as_ref())

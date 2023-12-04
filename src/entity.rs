@@ -17,7 +17,7 @@ use crate::{
     database::{DbRoot, DbStorage, EntityDeadError, InertEntity},
     debug::AsDebugLabel,
     obj::{Obj, OwnedObj},
-    query::{RawTag, Tag},
+    query::{ArchetypeId, RawTag, Tag},
     util::misc::RawFmt,
 };
 
@@ -26,26 +26,19 @@ use crate::{
 pub fn storage<T: 'static>() -> Storage<T> {
     let token = MainThreadToken::acquire_fmt("fetch entity component data");
 
-    Storage::from_database(token, DbRoot::get(token).get_storage::<T>(token))
+    Storage {
+        token: *token,
+        inner: DbRoot::get(token).get_storage::<T>(token),
+    }
 }
 
 #[derive_where(Debug, Copy, Clone)]
 pub struct Storage<T: 'static> {
-    token: MainThreadToken,
-    inner: &'static DbStorage<T>,
+    pub(crate) token: MainThreadToken,
+    pub(crate) inner: &'static DbStorage<T>,
 }
 
 impl<T: 'static> Storage<T> {
-    pub(crate) fn from_database(
-        token: &'static MainThreadToken,
-        inner: &'static DbStorage<T>,
-    ) -> Self {
-        Self {
-            token: *token,
-            inner,
-        }
-    }
-
     pub fn acquire() -> Storage<T> {
         storage::<T>()
     }
@@ -354,6 +347,16 @@ impl Entity {
         }
     }
 
+    pub fn archetypes(self) -> Option<EntityArchetypes> {
+        let token = MainThreadToken::acquire_fmt("fetch the archetypes");
+        DbRoot::get(token)
+            .get_entity_physical_and_virtual_arches(self.inert)
+            .map(|(physical, virtual_)| EntityArchetypes {
+                physical: physical.into_dangerous_archetype_id(),
+                virtual_: virtual_.into_dangerous_archetype_id(),
+            })
+    }
+
     pub fn is_alive(self) -> bool {
         DbRoot::get(MainThreadToken::acquire_fmt(
             "check the liveness state of an entity",
@@ -385,6 +388,12 @@ impl fmt::Debug for Entity {
                 .finish()
         }
     }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct EntityArchetypes {
+    pub physical: ArchetypeId,
+    pub virtual_: ArchetypeId,
 }
 
 // === OwnedEntity === //
@@ -549,6 +558,10 @@ impl OwnedEntity {
 
     pub fn is_tagged_physical(self, tag: impl Into<RawTag>) -> bool {
         self.entity.is_tagged_physical(tag)
+    }
+
+    pub fn archetypes(&self) -> Option<EntityArchetypes> {
+        self.entity.archetypes()
     }
 
     pub fn is_alive(&self) -> bool {

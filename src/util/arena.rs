@@ -56,6 +56,12 @@ pub trait CheckedArena: FreeingArena {
 
     fn is_alive(&self, ptr: &Self::CheckedPtr) -> bool;
 
+    fn upgrade_ptr(&self, ptr: Self::AbaPtr) -> Self::CheckedPtr {
+        self.upgrade_ptr_ref(&ptr)
+    }
+
+    fn upgrade_ptr_ref(&self, ptr: &Self::AbaPtr) -> Self::CheckedPtr;
+
     fn alloc(&mut self, value: Self::Value) -> Self::CheckedPtr;
 
     fn get(&self, ptr: &Self::CheckedPtr) -> Self::Ref<'_> {
@@ -330,6 +336,14 @@ impl<T> CheckedArena for FreeListArena<T> {
     fn is_alive(&self, ptr: &Self::CheckedPtr) -> bool {
         self.values[ptr.index as usize].0 == ptr.gen
     }
+
+    fn upgrade_ptr_ref(&self, ptr: &Self::AbaPtr) -> Self::CheckedPtr {
+        FreeListCheckedPtr {
+            _ty: PhantomData,
+            index: ptr.index,
+            gen: self.values[ptr.index as usize].0,
+        }
+    }
 }
 
 // Pointers
@@ -341,7 +355,7 @@ pub struct FreeListAbaPtr<T> {
 
 impl<T> AbaPtr for FreeListAbaPtr<T> {}
 
-#[derive_where(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
+#[derive_where(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct FreeListCheckedPtr<T> {
     _ty: PhantomData<fn() -> T>,
     index: u32,
