@@ -1,99 +1,94 @@
 use std::{
     cell::{Ref, RefCell, RefMut},
     marker::PhantomData,
+    num::NonZeroU32,
     ops::{Deref, DerefMut},
-    ptr,
 };
 
 use derive_where::derive_where;
 
 use super::misc::leak;
 
-// === Facade === //
+// === Core === //
 
+// Aliases
+pub type ArenaFor<A, T> = <A as ArenaSupporting<T>>::Arena;
+pub type AbaPtrFor<A, T> = <ArenaFor<A, T> as Arena>::AbaPtr;
+pub type CheckedPtrFor<A, T> = <ArenaFor<A, T> as CheckedArena>::CheckedPtr;
+pub type RefFor<'a, A, T> = <ArenaFor<A, T> as Arena>::Ref<'a>;
+pub type RefMutFor<'a, A, T> = <ArenaFor<A, T> as Arena>::RefMut<'a>;
+
+// Kind
 pub trait ArenaKind: Sized {}
 
-pub trait FreeableArenaKind: Sized + ArenaKind {}
-
-pub trait CheckedArenaKind: Sized + FreeableArenaKind {}
-
-pub trait StorableIn<A: ArenaKind> {
-    type Spec: SpecArena<Kind = A, Value = Self>;
+pub trait ArenaSupporting<T>: ArenaKind {
+    type Arena: Arena<Value = T>;
 }
 
-pub type Arena<T, A> = <T as StorableIn<A>>::Spec;
-
-pub type ArenaPtr<T, A> = <Arena<T, A> as SpecArena>::Ptr;
-
-pub type ArenaRef<'a, T, A> = <Arena<T, A> as SpecArena>::Ref<'a>;
-
-pub type ArenaRefMapped<'a, T, U, A> = <ArenaRef<'a, T, A> as SpecArenaRef<'a>>::Mapped<U>;
-
-pub type ArenaRefMut<'a, T, A> = <Arena<T, A> as SpecArena>::RefMut<'a>;
-
-pub type ArenaRefMutMapped<'a, T, U, A> = <ArenaRefMut<'a, T, A> as SpecArenaRefMut<'a>>::Mapped<U>;
-
-// === Spec === //
-
-pub trait SpecArena: Default {
-    type Kind: ArenaKind;
+// Arena
+pub trait Arena: Default {
     type Value;
-    type Ptr: SpecArenaPtr<Value = Self::Value>;
-    type Ref<'a>: SpecArenaRef<'a, Value = Self::Value>
-    where
-        Self: 'a;
+    type AbaPtr: AbaPtr;
 
-    type RefMut<'a>: SpecArenaRefMut<'a, Value = Self::Value>
-    where
-        Self: 'a;
+    #[rustfmt::skip]
+    type Ref<'a>: ArenaRef<'a, Value = Self::Value> where Self: 'a;
+
+    #[rustfmt::skip]
+    type RefMut<'a>: ArenaRefMut<'a, Value = Self::Value> where Self: 'a;
 
     fn new() -> Self {
-        Self::default()
+        Default::default()
     }
 
-    fn alloc(&mut self, value: Self::Value) -> Self::Ptr;
+    fn alloc_aba(&mut self, value: Self::Value) -> Self::AbaPtr;
 
-    fn dealloc(&mut self, ptr: Self::Ptr) -> Self::Value
-    where
-        Self::Kind: FreeableArenaKind;
+    fn get_aba(&self, ptr: &Self::AbaPtr) -> Self::Ref<'_>;
 
-    fn is_alive(&self, ptr: &Self::Ptr) -> bool
-    where
-        Self::Kind: CheckedArenaKind;
+    fn get_aba_mut(&mut self, ptr: &Self::AbaPtr) -> Self::RefMut<'_>;
+}
 
-    fn try_dealloc(&mut self, ptr: Self::Ptr) -> Option<Self::Value>
-    where
-        Self::Kind: CheckedArenaKind,
-    {
-        self.is_alive(&ptr).then(|| self.dealloc(ptr))
+pub trait FreeingArena: Arena {
+    fn dealloc_aba(&mut self, ptr: &Self::AbaPtr) -> Self::Value;
+}
+
+pub trait CheckedArena: FreeingArena {
+    type CheckedPtr: CheckedPtr<Aba = Self::AbaPtr>;
+
+    fn is_alive(&self, ptr: &Self::CheckedPtr) -> bool;
+
+    fn alloc(&mut self, value: Self::Value) -> Self::CheckedPtr;
+
+    fn get(&self, ptr: &Self::CheckedPtr) -> Self::Ref<'_> {
+        assert!(self.is_alive(ptr));
+        self.get_aba(&ptr.as_aba())
     }
 
-    fn get<'a>(&'a self, ptr: &'a Self::Ptr) -> Self::Ref<'a>;
-
-    fn try_get<'a>(&'a self, ptr: &'a Self::Ptr) -> Option<Self::Ref<'a>>
-    where
-        Self::Kind: CheckedArenaKind,
-    {
-        self.is_alive(ptr).then(|| self.get(ptr))
+    fn get_mut(&mut self, ptr: &Self::CheckedPtr) -> Self::RefMut<'_> {
+        assert!(self.is_alive(ptr));
+        self.get_aba_mut(&ptr.as_aba())
     }
 
-    fn get_mut<'a>(&'a mut self, ptr: &'a Self::Ptr) -> Self::RefMut<'a>;
-
-    fn try_get_mut<'a>(&'a mut self, ptr: &'a Self::Ptr) -> Option<Self::RefMut<'a>>
-    where
-        Self::Kind: CheckedArenaKind,
-    {
-        self.is_alive(ptr).then(|| self.get_mut(ptr))
+    fn dealloc(&mut self, ptr: &Self::CheckedPtr) -> Option<Self::Value> {
+        self.is_alive(ptr).then(|| self.dealloc_aba(&ptr.as_aba()))
     }
 }
 
-pub trait SpecArenaPtr: Clone + Eq {
-    type Value: ?Sized;
+// Objects
+pub trait AbaPtr: Clone + Eq {}
+
+pub trait CheckedPtr: Clone + Eq {
+    type Aba: AbaPtr;
+
+    fn as_aba(&self) -> Self::Aba;
+
+    fn to_aba(self) -> Self::Aba {
+        self.as_aba()
+    }
 }
 
-pub trait SpecArenaRef<'a>: Sized + Deref<Target = Self::Value> {
+pub trait ArenaRef<'a>: Sized + Deref<Target = Self::Value> {
     type Value: ?Sized + 'a;
-    type Mapped<U: ?Sized + 'a>: SpecArenaRef<'a, Value = U>;
+    type Mapped<U: ?Sized + 'a>: ArenaRef<'a, Value = U>;
 
     fn filter_map<U: ?Sized>(
         orig: Self,
@@ -115,9 +110,9 @@ pub trait SpecArenaRef<'a>: Sized + Deref<Target = Self::Value> {
     fn clone(orig: &Self) -> Self;
 }
 
-pub trait SpecArenaRefMut<'a>: Sized + DerefMut<Target = Self::Value> {
+pub trait ArenaRefMut<'a>: Sized + DerefMut<Target = Self::Value> {
     type Value: ?Sized + 'a;
-    type Mapped<U: ?Sized + 'a>: SpecArenaRefMut<'a, Value = U>;
+    type Mapped<U: ?Sized + 'a>: ArenaRefMut<'a, Value = U>;
 
     fn filter_map<O: ?Sized>(
         orig: Self,
@@ -137,9 +132,8 @@ pub trait SpecArenaRefMut<'a>: Sized + DerefMut<Target = Self::Value> {
     ) -> (Self::Mapped<U>, Self::Mapped<V>);
 }
 
-// === Reference types === //
-
-impl<'a, T: ?Sized> SpecArenaRef<'a> for &'a T {
+// Standard impls
+impl<'a, T: ?Sized> ArenaRef<'a> for &'a T {
     type Value = T;
     type Mapped<U: ?Sized + 'a> = &'a U;
 
@@ -166,7 +160,7 @@ impl<'a, T: ?Sized> SpecArenaRef<'a> for &'a T {
     }
 }
 
-impl<'a, T: ?Sized> SpecArenaRefMut<'a> for &'a mut T {
+impl<'a, T: ?Sized> ArenaRefMut<'a> for &'a mut T {
     type Value = T;
     type Mapped<U: ?Sized + 'a> = &'a mut U;
 
@@ -189,7 +183,7 @@ impl<'a, T: ?Sized> SpecArenaRefMut<'a> for &'a mut T {
     }
 }
 
-impl<'a, T: ?Sized> SpecArenaRef<'a> for Ref<'a, T> {
+impl<'a, T: ?Sized> ArenaRef<'a> for Ref<'a, T> {
     type Value = T;
     type Mapped<U: ?Sized + 'a> = Ref<'a, U>;
 
@@ -216,7 +210,7 @@ impl<'a, T: ?Sized> SpecArenaRef<'a> for Ref<'a, T> {
     }
 }
 
-impl<'a, T: ?Sized> SpecArenaRefMut<'a> for RefMut<'a, T> {
+impl<'a, T: ?Sized> ArenaRefMut<'a> for RefMut<'a, T> {
     type Value = T;
     type Mapped<U: ?Sized + 'a> = RefMut<'a, U>;
 
@@ -241,167 +235,198 @@ impl<'a, T: ?Sized> SpecArenaRefMut<'a> for RefMut<'a, T> {
 
 // === FreeListArena === //
 
-pub struct FreeListArena {
-    _never: (),
+// Kind
+#[non_exhaustive]
+pub struct FreeListArenaKind;
+
+impl ArenaKind for FreeListArenaKind {}
+
+impl<T> ArenaSupporting<T> for FreeListArenaKind {
+    type Arena = FreeListArena<T>;
 }
 
-impl ArenaKind for FreeListArena {}
-
-impl FreeableArenaKind for FreeListArena {}
-
-impl<T> StorableIn<FreeListArena> for T {
-    type Spec = SpecFreeListArena<T>;
-}
-
+// Arena
 #[derive(Debug, Clone)]
 #[derive_where(Default)]
-pub struct SpecFreeListArena<T> {
-    free: Vec<SpecFreeListPtr<T>>,
-    values: Vec<Option<T>>,
+pub struct FreeListArena<T> {
+    free: Vec<FreeListAbaPtr<T>>,
+    values: Vec<(NonZeroU32, Option<T>)>,
 }
 
-impl<T> SpecArena for SpecFreeListArena<T> {
-    type Kind = FreeListArena;
+impl<T> Arena for FreeListArena<T> {
     type Value = T;
-    type Ptr = SpecFreeListPtr<T>;
-    type Ref<'a> = &'a T
-    where
-        Self: 'a;
+    type AbaPtr = FreeListAbaPtr<T>;
 
-    type RefMut<'a> = &'a mut T
-    where
-        Self: 'a;
+	#[rustfmt::skip]
+    type Ref<'a> = &'a T where Self: 'a;
 
-    fn alloc(&mut self, value: Self::Value) -> Self::Ptr {
-        if let Some(free) = self.free.pop() {
-            self.values[free.loc] = Some(value);
-            free
-        } else {
-            let ptr = SpecFreeListPtr {
-                _ty: PhantomData,
-                loc: self.values.len(),
-            };
-            self.values.push(Some(value));
-            ptr
+	#[rustfmt::skip]
+    type RefMut<'a> = &'a mut T where Self: 'a;
+
+    fn alloc_aba(&mut self, value: Self::Value) -> Self::AbaPtr {
+        self.alloc(value).as_aba()
+    }
+
+    fn get_aba(&self, ptr: &Self::AbaPtr) -> Self::Ref<'_> {
+        self.values[ptr.index as usize]
+            .1
+            .as_ref()
+            .expect("slot is empty")
+    }
+
+    fn get_aba_mut(&mut self, ptr: &Self::AbaPtr) -> Self::RefMut<'_> {
+        self.values[ptr.index as usize]
+            .1
+            .as_mut()
+            .expect("slot is empty")
+    }
+}
+
+impl<T> FreeingArena for FreeListArena<T> {
+    fn dealloc_aba(&mut self, ptr: &Self::AbaPtr) -> Self::Value {
+        let taken = self.values[ptr.index as usize]
+            .1
+            .take()
+            .expect("slot is empty");
+
+        self.free.push(*ptr);
+        taken
+    }
+}
+
+impl<T> CheckedArena for FreeListArena<T> {
+    type CheckedPtr = FreeListCheckedPtr<T>;
+
+    fn alloc(&mut self, value: Self::Value) -> Self::CheckedPtr {
+        loop {
+            if let Some(free) = self.free.pop() {
+                let (slot_gen, slot_value) = &mut self.values[free.index as usize];
+                let Some(new_gen) = slot_gen.checked_add(1) else {
+                    // Forget about this slot—it's been used up.
+                    continue;
+                };
+                *slot_gen = new_gen;
+                *slot_value = Some(value);
+
+                return FreeListCheckedPtr {
+                    _ty: PhantomData,
+                    index: free.index,
+                    gen: new_gen,
+                };
+            } else {
+                let slot = self.values.len() as u32;
+                let gen = NonZeroU32::new(1).unwrap();
+                self.values.push((gen, Some(value)));
+
+                return FreeListCheckedPtr {
+                    _ty: PhantomData,
+                    index: slot,
+                    gen,
+                };
+            }
         }
     }
 
-    fn dealloc(&mut self, ptr: Self::Ptr) -> Self::Value
-    where
-        Self::Kind: FreeableArenaKind,
-    {
-        let taken = self.values[ptr.loc].take().unwrap();
-        self.free.push(ptr);
-        taken
-    }
-
-    fn is_alive(&self, _ptr: &Self::Ptr) -> bool
-    where
-        Self::Kind: CheckedArenaKind,
-    {
-        unimplemented!();
-    }
-
-    fn get<'a>(&'a self, ptr: &'a Self::Ptr) -> Self::Ref<'a> {
-        self.values[ptr.loc].as_ref().unwrap()
-    }
-
-    fn get_mut<'a>(&'a mut self, ptr: &'a Self::Ptr) -> Self::RefMut<'a> {
-        self.values[ptr.loc].as_mut().unwrap()
+    fn is_alive(&self, ptr: &Self::CheckedPtr) -> bool {
+        self.values[ptr.index as usize].0 == ptr.gen
     }
 }
 
+// Pointers
 #[derive_where(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
-pub struct SpecFreeListPtr<T> {
+pub struct FreeListAbaPtr<T> {
     _ty: PhantomData<fn() -> T>,
-    loc: usize,
+    index: u32,
 }
 
-impl<T> SpecArenaPtr for SpecFreeListPtr<T> {
-    type Value = T;
+impl<T> AbaPtr for FreeListAbaPtr<T> {}
+
+#[derive_where(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub struct FreeListCheckedPtr<T> {
+    _ty: PhantomData<fn() -> T>,
+    index: u32,
+    gen: NonZeroU32,
+}
+
+impl<T> CheckedPtr for FreeListCheckedPtr<T> {
+    type Aba = FreeListAbaPtr<T>;
+
+    fn as_aba(&self) -> Self::Aba {
+        FreeListAbaPtr {
+            _ty: PhantomData,
+            index: self.index,
+        }
+    }
 }
 
 // === LeakyArena === //
 
-pub struct LeakyArena;
+// Kind
+#[non_exhaustive]
+pub struct LeakyArenaKind;
 
-impl ArenaKind for LeakyArena {}
+impl ArenaKind for LeakyArenaKind {}
 
-impl<T: 'static> StorableIn<LeakyArena> for T {
-    type Spec = SpecLeakyArena<T>;
+impl<T: 'static> ArenaSupporting<T> for LeakyArenaKind {
+    type Arena = LeakyArena<T>;
 }
 
-#[derive_where(Debug, Clone, Default)]
-pub struct SpecLeakyArena<T: 'static> {
+// Arena
+#[derive_where(Default)]
+pub struct LeakyArena<T: 'static> {
     _ty: PhantomData<fn() -> T>,
 }
 
-impl<T> SpecArena for SpecLeakyArena<T> {
-    type Kind = LeakyArena;
+impl<T: 'static> Arena for LeakyArena<T> {
     type Value = T;
-    type Ptr = SpecLeakyPtr<T>;
+    type AbaPtr = LeakyPtr<T>;
 
-    type Ref<'a> = Ref<'a, T>
-    where
-        Self: 'a;
+	#[rustfmt::skip]
+    type Ref<'a> = Ref<'a, T> where Self: 'a;
 
-    type RefMut<'a> = RefMut<'a, T>
-    where
-        Self: 'a;
+	#[rustfmt::skip]
+    type RefMut<'a> = RefMut<'a, T> where Self: 'a;
 
-    fn alloc(&mut self, value: Self::Value) -> Self::Ptr {
-        SpecLeakyPtr {
-            value: leak(RefCell::new(value)),
+    fn alloc_aba(&mut self, value: Self::Value) -> Self::AbaPtr {
+        LeakyPtr {
+            _ty: PhantomData,
+            val: leak(RefCell::new(value)),
         }
     }
 
-    fn dealloc(&mut self, _ptr: Self::Ptr) -> Self::Value
-    where
-        Self::Kind: FreeableArenaKind,
-    {
-        unimplemented!()
+    fn get_aba(&self, ptr: &Self::AbaPtr) -> Self::Ref<'_> {
+        ptr.val.borrow()
     }
 
-    fn is_alive(&self, _ptr: &Self::Ptr) -> bool
-    where
-        Self::Kind: CheckedArenaKind,
-    {
-        unimplemented!()
-    }
-
-    fn get<'a>(&'a self, ptr: &'a Self::Ptr) -> Self::Ref<'a> {
-        ptr.value.borrow()
-    }
-
-    fn get_mut<'a>(&'a mut self, ptr: &'a Self::Ptr) -> Self::RefMut<'a> {
-        ptr.value.borrow_mut()
+    fn get_aba_mut(&mut self, ptr: &Self::AbaPtr) -> Self::RefMut<'_> {
+        ptr.val.borrow_mut()
     }
 }
 
+// Pointers
 #[derive(Debug)]
 #[derive_where(Copy, Clone)]
-pub struct SpecLeakyPtr<T: 'static> {
-    value: &'static RefCell<T>,
+pub struct LeakyPtr<T: 'static> {
+    _ty: PhantomData<fn() -> T>,
+    val: &'static RefCell<T>,
 }
 
-impl<T> Eq for SpecLeakyPtr<T> {}
+impl<T: 'static> Eq for LeakyPtr<T> {}
 
-impl<T> PartialEq for SpecLeakyPtr<T> {
+impl<T: 'static> PartialEq for LeakyPtr<T> {
     fn eq(&self, other: &Self) -> bool {
-        ptr::eq(self.value, other.value)
+        std::ptr::eq(self.val, other.val)
     }
 }
 
-impl<T> SpecArenaPtr for SpecLeakyPtr<T> {
-    type Value = T;
-}
+impl<T: 'static> AbaPtr for LeakyPtr<T> {}
 
-impl<T> SpecLeakyPtr<T> {
+impl<T: 'static> LeakyPtr<T> {
     pub fn direct_borrow(&self) -> Ref<'static, T> {
-        self.value.borrow()
+        self.val.borrow()
     }
 
     pub fn direct_borrow_mut(&self) -> RefMut<'static, T> {
-        self.value.borrow_mut()
+        self.val.borrow_mut()
     }
 }

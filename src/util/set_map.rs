@@ -3,28 +3,29 @@ use std::{fmt, hash, iter, slice};
 use crate::util::iter::{merge_iters, IterFilter, IterMerger};
 
 use super::{
-    arena::{Arena, ArenaKind, ArenaPtr, FreeableArenaKind, SpecArena, StorableIn},
+    arena::{AbaPtrFor, Arena, ArenaFor, ArenaSupporting, FreeingArena, CheckedPtrFor},
     hash_map::FxHashMap,
     iter::{eq_iter, hash_iter},
 };
 
 // === SetMap === //
 
-pub type SetMapArena<K, V, A> = Arena<SetMapEntry<K, V, A>, A>;
-pub type SetMapPtr<K, V, A> = ArenaPtr<SetMapEntry<K, V, A>, A>;
+pub type SetMapArena<K, V, A> = ArenaFor<A, SetMapEntry<K, V, A>>;
+pub type SetMapAbaPtr<K, V, A> = AbaPtrFor<A, SetMapEntry<K, V, A>>;
+pub type SetMapCheckedPtr<K, V, A> = CheckedPtrFor<A, SetMapEntry<K, V, A>>;
 
-pub struct SetMap<K, V, A: ArenaKind>
+pub struct SetMap<K, V, A>
 where
-    SetMapEntry<K, V, A>: StorableIn<A>,
+    A: ArenaSupporting<SetMapEntry<K, V, A>>,
 {
-    root: SetMapPtr<K, V, A>,
-    map: FxHashMap<(u64, SetMapPtr<K, V, A>), ()>,
-    arena: Arena<SetMapEntry<K, V, A>, A>,
+    root: SetMapAbaPtr<K, V, A>,
+    map: FxHashMap<(u64, SetMapAbaPtr<K, V, A>), ()>,
+    arena: A::Arena,
 }
 
-impl<K, V, A: ArenaKind> fmt::Debug for SetMap<K, V, A>
+impl<K, V, A> fmt::Debug for SetMap<K, V, A>
 where
-    SetMapEntry<K, V, A>: StorableIn<A>,
+    A: ArenaSupporting<SetMapEntry<K, V, A>>,
     K: fmt::Debug,
     V: fmt::Debug,
 {
@@ -32,7 +33,7 @@ where
         let mut builder = f.debug_map();
 
         for (_, ptr) in self.map.keys() {
-            let entry = self.arena.get(ptr);
+            let entry = self.arena.get_aba(ptr);
             builder.entry(&entry.keys, &entry.value);
         }
 
@@ -40,9 +41,9 @@ where
     }
 }
 
-impl<K, V, A: ArenaKind> Default for SetMap<K, V, A>
+impl<K, V, A> Default for SetMap<K, V, A>
 where
-    SetMapEntry<K, V, A>: StorableIn<A>,
+    A: ArenaSupporting<SetMapEntry<K, V, A>>,
     K: 'static + Ord + hash::Hash + Copy,
     V: Default,
 {
@@ -51,21 +52,21 @@ where
     }
 }
 
-impl<K, V, A: ArenaKind> SetMap<K, V, A>
+impl<K, V, A> SetMap<K, V, A>
 where
-    SetMapEntry<K, V, A>: StorableIn<A>,
+    A: ArenaSupporting<SetMapEntry<K, V, A>>,
     K: 'static + Ord + hash::Hash + Copy,
 {
     pub fn new(root: V) -> Self {
-        let mut arena: Arena<SetMapEntry<K, V, A>, A> = Default::default();
-        let root = arena.alloc(SetMapEntry {
+        let mut arena = <A::Arena>::default();
+        let root = arena.alloc_aba(SetMapEntry {
             self_ptr: None,
             keys: Box::from_iter([]),
             extensions: FxHashMap::default(),
             de_extensions: FxHashMap::default(),
             value: root,
         });
-        arena.get_mut(&root).self_ptr = Some(root.clone());
+        arena.get_aba_mut(&root).self_ptr = Some(root.clone());
 
         let mut map = FxHashMap::default();
         let root_hash = hash_iter(map.hasher(), None::<K>);
@@ -78,24 +79,28 @@ where
         Self { root, map, arena }
     }
 
-    pub fn root(&self) -> &SetMapPtr<K, V, A> {
+    pub fn root(&self) -> &SetMapAbaPtr<K, V, A> {
         &self.root
     }
 
     #[allow(clippy::too_many_arguments)]
     fn lookup_extension_common(
         &mut self,
-        base_ptr: Option<&SetMapPtr<K, V, A>>,
+        base_ptr: Option<&SetMapAbaPtr<K, V, A>>,
         key: K,
-        positive_getter_ref: impl Fn(&SetMapEntry<K, V, A>) -> &FxHashMap<K, SetMapPtr<K, V, A>>,
-        positive_getter_mut: impl Fn(&mut SetMapEntry<K, V, A>) -> &mut FxHashMap<K, SetMapPtr<K, V, A>>,
-        negative_getter_mut: impl Fn(&mut SetMapEntry<K, V, A>) -> &mut FxHashMap<K, SetMapPtr<K, V, A>>,
+        positive_getter_ref: impl Fn(&SetMapEntry<K, V, A>) -> &FxHashMap<K, SetMapAbaPtr<K, V, A>>,
+        positive_getter_mut: impl Fn(
+            &mut SetMapEntry<K, V, A>,
+        ) -> &mut FxHashMap<K, SetMapAbaPtr<K, V, A>>,
+        negative_getter_mut: impl Fn(
+            &mut SetMapEntry<K, V, A>,
+        ) -> &mut FxHashMap<K, SetMapAbaPtr<K, V, A>>,
         iter_ctor: impl for<'a> GoofyIterCtorHack<'a, K>,
         set_ctor: impl FnOnce(&[K]) -> V,
-        set_post_ctor: impl FnOnce(&mut SetMapArena<K, V, A>, &SetMapPtr<K, V, A>),
-    ) -> SetMapPtr<K, V, A> {
+        set_post_ctor: impl FnOnce(&mut SetMapArena<K, V, A>, &SetMapAbaPtr<K, V, A>),
+    ) -> SetMapAbaPtr<K, V, A> {
         let base_ptr = base_ptr.unwrap_or(&self.root);
-        let base_data = self.arena.get(base_ptr);
+        let base_data = self.arena.get_aba(base_ptr);
 
         // Attempt to get the extension from the base element's extension edges.
         //
@@ -124,7 +129,7 @@ where
 
                     eq_iter(
                         keys.clone(),
-                        self.arena.get(candidate_ptr).keys.iter(),
+                        self.arena.get_aba(candidate_ptr).keys.iter(),
                         |a, b| a == *b,
                     )
                 })
@@ -133,7 +138,7 @@ where
             drop(base_data);
 
             // Cache the positive-sense lookup going from base to target.
-            (positive_getter_mut)(&mut self.arena.get_mut(base_ptr))
+            (positive_getter_mut)(&mut self.arena.get_aba_mut(base_ptr))
                 .insert(key, target_ptr.clone());
 
             // Cache the negative-sense lookup going from target to base.
@@ -142,7 +147,7 @@ where
             // `target_ptr` is equal to the `base_ptr`, we can't actually say that the negative sense
             // will also be a no-op (and, indeed, it certainly won't be).
             if base_ptr != target_ptr {
-                (negative_getter_mut)(&mut self.arena.get_mut(target_ptr))
+                (negative_getter_mut)(&mut self.arena.get_aba_mut(target_ptr))
                     .insert(key, base_ptr.clone());
             }
 
@@ -166,15 +171,16 @@ where
             // target -> base
             (negative_getter_mut)(&mut target_entry).insert(key, base_ptr.clone());
 
-            self.arena.alloc(target_entry)
+            self.arena.alloc_aba(target_entry)
         };
 
         // base -> target
-        (positive_getter_mut)(&mut self.arena.get_mut(base_ptr)).insert(key, target_ptr.clone());
+        (positive_getter_mut)(&mut self.arena.get_aba_mut(base_ptr))
+            .insert(key, target_ptr.clone());
 
         // self referential & self_id
         {
-            let target = &mut *self.arena.get_mut(&target_ptr);
+            let target = &mut *self.arena.get_aba_mut(&target_ptr);
 
             for key in &*target.keys {
                 target.extensions.insert(*key, target_ptr.clone());
@@ -197,11 +203,11 @@ where
 
     pub fn lookup_extension(
         &mut self,
-        base: Option<&SetMapPtr<K, V, A>>,
+        base: Option<&SetMapAbaPtr<K, V, A>>,
         key: K,
         set_ctor: impl FnOnce(&[K]) -> V,
-        set_post_ctor: impl FnOnce(&mut SetMapArena<K, V, A>, &SetMapPtr<K, V, A>),
-    ) -> SetMapPtr<K, V, A> {
+        set_post_ctor: impl FnOnce(&mut SetMapArena<K, V, A>, &SetMapAbaPtr<K, V, A>),
+    ) -> SetMapAbaPtr<K, V, A> {
         fn iter_ctor<K: Copy>(
             a: &[K],
             b: K,
@@ -223,11 +229,11 @@ where
 
     pub fn lookup_de_extension(
         &mut self,
-        base: &SetMapPtr<K, V, A>,
+        base: &SetMapAbaPtr<K, V, A>,
         key: K,
         set_ctor: impl FnOnce(&[K]) -> V,
-        set_post_ctor: impl FnOnce(&mut SetMapArena<K, V, A>, &SetMapPtr<K, V, A>),
-    ) -> SetMapPtr<K, V, A> {
+        set_post_ctor: impl FnOnce(&mut SetMapArena<K, V, A>, &SetMapAbaPtr<K, V, A>),
+    ) -> SetMapAbaPtr<K, V, A> {
         fn iter_ctor<K: Copy>(a: &[K], b: K) -> IterFilter<iter::Copied<slice::Iter<'_, K>>> {
             IterFilter(a.iter().copied(), b)
         }
@@ -244,11 +250,11 @@ where
         )
     }
 
-    pub fn remove(&mut self, removed_ptr: SetMapPtr<K, V, A>) -> SetMapEntry<K, V, A>
+    pub fn remove(&mut self, removed_ptr: SetMapAbaPtr<K, V, A>) -> SetMapEntry<K, V, A>
     where
-        A: FreeableArenaKind,
+        A::Arena: FreeingArena,
     {
-        let removed_data = self.arena.dealloc(removed_ptr.clone());
+        let removed_data = self.arena.dealloc_aba(&removed_ptr);
 
         // Because every (de)extension link (besides self referential ones) is doubly linked, we can
         // iterate through each sense of the link and unlink the back-reference to fully strip the
@@ -259,7 +265,7 @@ where
                 continue;
             }
 
-            self.arena.get_mut(referencer).extensions.remove(key);
+            self.arena.get_aba_mut(referencer).extensions.remove(key);
         }
 
         for (key, referencer) in &removed_data.extensions {
@@ -268,7 +274,7 @@ where
                 continue;
             }
 
-            self.arena.get_mut(referencer).de_extensions.remove(key);
+            self.arena.get_aba_mut(referencer).de_extensions.remove(key);
         }
 
         // We still have to remove the entry from the primary map.
@@ -282,11 +288,11 @@ where
         removed_data
     }
 
-    pub fn arena(&self) -> &Arena<SetMapEntry<K, V, A>, A> {
+    pub fn arena(&self) -> &A::Arena {
         &self.arena
     }
 
-    pub fn arena_mut(&mut self) -> &mut Arena<SetMapEntry<K, V, A>, A> {
+    pub fn arena_mut(&mut self) -> &mut A::Arena {
         &mut self.arena
     }
 
@@ -313,20 +319,20 @@ where
     }
 }
 
-pub struct SetMapEntry<K, V, A: ArenaKind>
+pub struct SetMapEntry<K, V, A>
 where
-    SetMapEntry<K, V, A>: StorableIn<A>,
+    A: ArenaSupporting<SetMapEntry<K, V, A>>,
 {
-    self_ptr: Option<SetMapPtr<K, V, A>>,
+    self_ptr: Option<SetMapAbaPtr<K, V, A>>,
     keys: Box<[K]>,
-    extensions: FxHashMap<K, SetMapPtr<K, V, A>>,
-    de_extensions: FxHashMap<K, SetMapPtr<K, V, A>>,
+    extensions: FxHashMap<K, SetMapAbaPtr<K, V, A>>,
+    de_extensions: FxHashMap<K, SetMapAbaPtr<K, V, A>>,
     value: V,
 }
 
-impl<K, V, A: ArenaKind> fmt::Debug for SetMapEntry<K, V, A>
+impl<K, V, A> fmt::Debug for SetMapEntry<K, V, A>
 where
-    SetMapEntry<K, V, A>: StorableIn<A>,
+    A: ArenaSupporting<SetMapEntry<K, V, A>>,
     K: fmt::Debug,
     V: fmt::Debug,
 {
@@ -338,9 +344,9 @@ where
     }
 }
 
-impl<K, V, A: ArenaKind> SetMapEntry<K, V, A>
+impl<K, V, A> SetMapEntry<K, V, A>
 where
-    SetMapEntry<K, V, A>: StorableIn<A>,
+    A: ArenaSupporting<SetMapEntry<K, V, A>>,
     K: 'static + Ord + hash::Hash + Copy,
 {
     pub fn keys(&self) -> &[K] {
@@ -375,11 +381,11 @@ where
         (&self.keys, &mut self.value)
     }
 
-    pub fn extensions(&self) -> &FxHashMap<K, SetMapPtr<K, V, A>> {
+    pub fn extensions(&self) -> &FxHashMap<K, SetMapAbaPtr<K, V, A>> {
         &self.extensions
     }
 
-    pub fn de_extensions(&self) -> &FxHashMap<K, SetMapPtr<K, V, A>> {
+    pub fn de_extensions(&self) -> &FxHashMap<K, SetMapAbaPtr<K, V, A>> {
         &self.de_extensions
     }
 }

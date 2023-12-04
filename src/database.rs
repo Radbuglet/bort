@@ -23,12 +23,12 @@ use crate::{
     entity::Entity,
     query::RawTag,
     util::{
-        arena::{FreeListArena, LeakyArena, SpecArena},
+        arena::{Arena, FreeListArenaKind, LeakyArenaKind},
         block::{BlockAllocator, BlockReservation},
         hash_map::{ConstSafeBuildHasherDefault, FxHashMap, FxHashSet, NopHashMap},
         iter::{filter_duplicates, merge_iters},
         misc::{const_new_nz_u64, leak, unpoison, xorshift64, AnyDowncastExt, NamedTypeId, RawFmt},
-        set_map::{SetMap, SetMapArena, SetMapPtr},
+        set_map::{SetMap, SetMapAbaPtr, SetMapArena, SetMapCheckedPtr},
     },
 };
 
@@ -85,13 +85,13 @@ struct DbEntity {
     comp_list: DbComponentListRef,
 
     // The complete list of tags the user wants attached to this entity.
-    virtual_arch: DbArchetypeRef,
+    virtual_arch: DbArchetypeAbaPtr,
 
     // The archetype which is currently being used to lay components out.
     //
     // All components managed by this layout must either adhere to it or be missing from the entity
     // entirely.
-    physical_arch: DbArchetypeRef,
+    physical_arch: DbArchetypeAbaPtr,
 
     // The heap containing the entity given its current tag layout.
     heap_index: usize,
@@ -103,14 +103,14 @@ struct DbEntity {
 #[derive(Debug, Copy, Clone)]
 struct DbDirtyDeadEntity {
     entity: InertEntity,
-    physical_arch: DbArchetypeRef,
+    physical_arch: DbArchetypeAbaPtr,
     heap_index: usize,
     slot_index: usize,
 }
 
 #[derive(Debug, Default)]
 struct DbTag {
-    sorted_containers: Vec<DbArchetypeRef>,
+    sorted_containers: Vec<DbArchetypeAbaPtr>,
     are_sorted_containers_sorted: bool,
 }
 
@@ -124,14 +124,14 @@ trait DbAnyStorage: fmt::Debug + Sync {
         token: &'static MainThreadToken,
         target: InertEntity,
         completed_target_info: &DbEntity,
-        src_arch: DbArchetypeRef,
+        src_arch: DbArchetypeAbaPtr,
         dst_arch_info: &DbArchetype,
     );
 
     fn truncate_archetype_heap_len(
         &self,
         token: &'static MainThreadToken,
-        arch: DbArchetypeRef,
+        arch: DbArchetypeAbaPtr,
         heap_count: usize,
     );
 
@@ -144,7 +144,7 @@ pub type DbStorage<T> = NOptRefCell<DbStorageInner<T>>;
 pub struct DbStorageInner<T: 'static> {
     anon_block_alloc: BlockAllocator<Heap<T>>,
     mappings: NopHashMap<InertEntity, DbEntityMapping<T>>,
-    heaps: FxHashMap<DbArchetypeRef, Vec<Arc<Heap<T>>>>,
+    heaps: FxHashMap<DbArchetypeAbaPtr, Vec<Arc<Heap<T>>>>,
 }
 
 struct DbEntityMapping<T: 'static> {
@@ -244,8 +244,8 @@ impl PartialEq for DbComponentType {
     }
 }
 
-type DbComponentListMap = SetMap<DbComponentType, (), LeakyArena>;
-type DbComponentListRef = SetMapPtr<DbComponentType, (), LeakyArena>;
+type DbComponentListMap = SetMap<DbComponentType, (), LeakyArenaKind>;
+type DbComponentListRef = SetMapAbaPtr<DbComponentType, (), LeakyArenaKind>;
 
 // === TagList === //
 
@@ -279,9 +279,10 @@ impl DbArchetype {
     }
 }
 
-type DbArchetypeMap = SetMap<InertTag, DbArchetype, FreeListArena>;
-type DbArchetypeArena = SetMapArena<InertTag, DbArchetype, FreeListArena>;
-type DbArchetypeRef = SetMapPtr<InertTag, DbArchetype, FreeListArena>;
+type DbArchetypeMap = SetMap<InertTag, DbArchetype, FreeListArenaKind>;
+type DbArchetypeArena = SetMapArena<InertTag, DbArchetype, FreeListArenaKind>;
+type DbArchetypeAbaPtr = SetMapAbaPtr<InertTag, DbArchetype, FreeListArenaKind>;
+type DbArchetypeCheckedPtr = SetMapCheckedPtr<InertTag, DbArchetype, FreeListArenaKind>;
 
 // === Inert Handles === //
 
@@ -432,7 +433,7 @@ impl DbRoot {
         if &entity_info.virtual_arch != self.arch_map.root() {
             self.arch_map
                 .arena_mut()
-                .get_mut(&entity_info.virtual_arch)
+                .get_aba_mut(&entity_info.virtual_arch)
                 .value_mut()
                 .virtual_count -= 1;
 
@@ -479,14 +480,14 @@ impl DbRoot {
         if &entity_info.virtual_arch != self.arch_map.root() {
             self.arch_map
                 .arena_mut()
-                .get_mut(&entity_info.virtual_arch)
+                .get_aba_mut(&entity_info.virtual_arch)
                 .value_mut()
                 .virtual_count -= 1;
         }
 
         // Update the list
-        let post_ctor = |arena: &mut DbArchetypeArena, target_ptr: &DbArchetypeRef| {
-            let target = arena.get(target_ptr);
+        let post_ctor = |arena: &mut DbArchetypeArena, target_ptr: &DbArchetypeAbaPtr| {
+            let target = arena.get_aba(target_ptr);
 
             for tag in target.keys() {
                 let tag_state = self.tag_map.entry(*tag).or_insert_with(Default::default);
@@ -519,7 +520,7 @@ impl DbRoot {
         if &entity_info.virtual_arch != self.arch_map.root() {
             self.arch_map
                 .arena_mut()
-                .get_mut(&entity_info.virtual_arch)
+                .get_aba_mut(&entity_info.virtual_arch)
                 .value_mut()
                 .virtual_count += 1;
         }
@@ -574,7 +575,7 @@ impl DbRoot {
         Ok(self
             .arch_map
             .arena()
-            .get(&entity_info.virtual_arch)
+            .get_aba(&entity_info.virtual_arch)
             .has_key(&tag))
     }
 
@@ -590,7 +591,7 @@ impl DbRoot {
         Ok(self
             .arch_map
             .arena()
-            .get(&entity_info.physical_arch)
+            .get_aba(&entity_info.physical_arch)
             .has_key(&tag))
     }
 
@@ -606,7 +607,7 @@ impl DbRoot {
     fn prepare_query_common(
         &mut self,
         tags: ReifiedTagList,
-        mut f: impl FnMut(&mut DbArchetypeArena, DbArchetypeRef),
+        mut f: impl FnMut(&mut DbArchetypeArena, DbArchetypeAbaPtr),
     ) {
         if tags.iter().next().is_none() {
             return;
@@ -675,7 +676,7 @@ impl DbRoot {
         let mut chunks = Vec::new();
 
         self.prepare_query_common(tags, |arena, arch_id| {
-            let arch = arena.get(&arch_id).value();
+            let arch = arena.get_aba(&arch_id).value();
             chunks.push(QueryChunkWithEntities {
                 archetype: arch_id,
                 entity_subs: arch.entity_heaps.clone(),
@@ -690,7 +691,7 @@ impl DbRoot {
         let mut chunks = Vec::new();
 
         self.prepare_query_common(tags, |arena, arch_id| {
-            let arch = arena.get(&arch_id).value();
+            let arch = arena.get_aba(&arch_id).value();
             chunks.push(QueryChunk {
                 archetype: arch_id,
                 heap_count: arch.entity_heaps.len(),
@@ -722,7 +723,7 @@ impl DbRoot {
 
             // Determine the archetype we'll be working on.
             let arch_id = info.physical_arch;
-            let arch = self.arch_map.arena_mut().get_mut(&arch_id).value_mut();
+            let arch = self.arch_map.arena_mut().get_aba_mut(&arch_id).value_mut();
 
             // Determine the right candidate for the swap-remove.
             let (last_entity, last_entity_info) = {
@@ -863,7 +864,11 @@ impl DbRoot {
                 // The root archetype doesn't manage any heaps so we don't allocate any space in it.
                 if dst_arch_id != *self.arch_map.root() {
                     // Add to the target archetype list
-                    let dst_arch = self.arch_map.arena_mut().get_mut(&dst_arch_id).value_mut();
+                    let dst_arch = self
+                        .arch_map
+                        .arena_mut()
+                        .get_aba_mut(&dst_arch_id)
+                        .value_mut();
                     let last_heap_cap = dst_arch.entity_heaps.last().map_or(0, |heap| heap.len());
 
                     if dst_arch.last_heap_len == last_heap_cap {
@@ -899,8 +904,8 @@ impl DbRoot {
                 // components since an anonymous-to-anonymous move is a no-op.
                 target_info.physical_arch = dst_arch_id;
 
-                let src_arch = self.arch_map.arena().get(&src_arch_id).value();
-                let dst_arch = self.arch_map.arena().get(&dst_arch_id).value();
+                let src_arch = self.arch_map.arena().get_aba(&src_arch_id).value();
+                let dst_arch = self.arch_map.arena().get_aba(&dst_arch_id).value();
 
                 for &managed_ty in filter_duplicates(merge_iters(
                     &*src_arch.managed_sorted,
@@ -928,7 +933,11 @@ impl DbRoot {
 
                 // The root archetype doesn't manage any heaps so don't have to manage anything in it.
                 if src_arch_id != root_arch_id {
-                    let src_arch = self.arch_map.arena_mut().get_mut(&src_arch_id).value_mut();
+                    let src_arch = self
+                        .arch_map
+                        .arena_mut()
+                        .get_aba_mut(&src_arch_id)
+                        .value_mut();
 
                     // We also ignore now-empty archetypes (where `last_heap_len == 1`) and source
                     // heap slots which are already in the last position in the list.
@@ -997,7 +1006,7 @@ impl DbRoot {
 
         // Truncate storages which need it
         for arch_id in may_need_truncation {
-            let arch = self.arch_map.arena().get(&arch_id).value();
+            let arch = self.arch_map.arena().get_aba(&arch_id).value();
             for &managed in &arch.managed {
                 let Some(storage) = self.storages.get(&managed) else {
                     continue;
@@ -1022,13 +1031,13 @@ impl DbRoot {
         Ok(())
     }
 
-    fn can_remove_archetype(arch_map: &DbArchetypeMap, arch_id: DbArchetypeRef) -> bool {
+    fn can_remove_archetype(arch_map: &DbArchetypeMap, arch_id: DbArchetypeAbaPtr) -> bool {
         // We can't remove the root.
         if &arch_id == arch_map.root() {
             return false;
         }
 
-        let arch_entry = arch_map.arena().get(&arch_id);
+        let arch_entry = arch_map.arena().get_aba(&arch_id);
         let arch = arch_entry.value();
 
         // We can't remove archetypes with virtual or physical entities in them.
@@ -1052,7 +1061,7 @@ impl DbRoot {
     fn rec_remove_stepping_stone_arches(
         arch_map: &mut DbArchetypeMap,
         tag_map: &mut NopHashMap<InertTag, DbTag>,
-        arch_id: DbArchetypeRef,
+        arch_id: DbArchetypeAbaPtr,
     ) {
         debug_assert!(Self::can_remove_archetype(arch_map, arch_id));
 
@@ -1136,7 +1145,7 @@ impl DbRoot {
                     hashbrown::hash_map::Entry::Vacant(entry) => self
                         .arch_map
                         .arena()
-                        .get(&entity_info.physical_arch)
+                        .get_aba(&entity_info.physical_arch)
                         .value()
                         .managed
                         .contains(&NamedTypeId::of::<T>())
@@ -1150,7 +1159,7 @@ impl DbRoot {
                         let arch = self
                             .arch_map
                             .arena()
-                            .get(&entity_info.physical_arch)
+                            .get_aba(&entity_info.physical_arch)
                             .value();
 
                         external_heaps.extend(
@@ -1320,7 +1329,7 @@ impl<T: 'static> DbAnyStorage for DbStorage<T> {
         token: &'static MainThreadToken,
         target: InertEntity,
         completed_target_info: &DbEntity,
-        src_arch: DbArchetypeRef,
+        src_arch: DbArchetypeAbaPtr,
         dst_arch_info: &DbArchetype,
     ) {
         let storage = &mut *self.borrow_mut(token);
@@ -1429,7 +1438,7 @@ impl<T: 'static> DbAnyStorage for DbStorage<T> {
     fn truncate_archetype_heap_len(
         &self,
         token: &'static MainThreadToken,
-        arch: DbArchetypeRef,
+        arch: DbArchetypeAbaPtr,
         heap_count: usize,
     ) {
         let storage = &mut *self.borrow_mut(token);
@@ -1479,7 +1488,7 @@ pub struct ConcurrentFlushError;
 
 #[derive(Debug, Clone)]
 pub struct QueryChunkWithEntities {
-    archetype: DbArchetypeRef,
+    archetype: DbArchetypeAbaPtr,
     entity_subs: Vec<Arc<[NMainCell<InertEntity>]>>,
     last_heap_len: usize,
 }
@@ -1504,7 +1513,7 @@ impl QueryChunkWithEntities {
 
 #[derive(Debug, Clone)]
 pub struct QueryChunk {
-    archetype: DbArchetypeRef,
+    archetype: DbArchetypeAbaPtr,
     heap_count: usize,
     last_heap_len: usize,
 }

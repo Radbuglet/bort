@@ -1,19 +1,21 @@
 use derive_where::derive_where;
 
-use super::arena::{Arena, ArenaPtr, FreeListArena, SpecArena};
+use crate::util::arena::FreeingArena;
 
-type BlockArena = FreeListArena;
+use super::arena::{AbaPtrFor, Arena, ArenaFor, FreeListArenaKind};
 
-pub type BlockRef<T> = ArenaPtr<Block<T>, BlockArena>;
+type BlockArena = FreeListArenaKind;
+
+pub type BlockPtr<T> = AbaPtrFor<BlockArena, Block<T>>;
 
 const HAMMERED_OR_FULL_BLOCK_SLOT: usize = usize::MAX;
 
 #[derive(Debug)]
 #[derive_where(Default)]
 pub struct BlockAllocator<T> {
-    blocks: Arena<Block<T>, BlockArena>,
-    hammered: Option<BlockRef<T>>,
-    non_full: Vec<BlockRef<T>>,
+    blocks: ArenaFor<BlockArena, Block<T>>,
+    hammered: Option<BlockPtr<T>>,
+    non_full: Vec<BlockPtr<T>>,
 }
 
 #[derive(Debug)]
@@ -29,17 +31,17 @@ impl<T> BlockAllocator<T> {
             .hammered
             .get_or_insert_with(|| match self.non_full.pop() {
                 Some(block) => {
-                    self.blocks.get_mut(&block).non_full_index = HAMMERED_OR_FULL_BLOCK_SLOT;
+                    self.blocks.get_aba_mut(&block).non_full_index = HAMMERED_OR_FULL_BLOCK_SLOT;
                     block
                 }
-                None => self.blocks.alloc(Block {
+                None => self.blocks.alloc_aba(Block {
                     value: block_ctor(128),
                     non_full_index: HAMMERED_OR_FULL_BLOCK_SLOT,
                     occupied_mask: 0,
                 }),
             });
 
-        let block_inner = self.blocks.get_mut(block);
+        let block_inner = self.blocks.get_aba_mut(block);
 
         // Find the first open slot
         let slot_idx = block_inner.occupied_mask.trailing_ones();
@@ -64,7 +66,7 @@ impl<T> BlockAllocator<T> {
     }
 
     pub fn dealloc(&mut self, reservation: BlockReservation<T>, block_dtor: impl FnOnce(T)) {
-        let block_data = self.blocks.get_mut(&reservation.block);
+        let block_data = self.blocks.get_aba_mut(&reservation.block);
 
         // Remove the slot from the occupied bitset
         debug_assert_ne!(block_data.occupied_mask & (1 << reservation.slot), 0);
@@ -87,13 +89,13 @@ impl<T> BlockAllocator<T> {
         // If nothing is occupied and the block is not our "hammered" block, delete it!
         if block_data.occupied_mask == 0 && block_data.non_full_index != HAMMERED_OR_FULL_BLOCK_SLOT
         {
-            let block_data = self.blocks.dealloc(reservation.block);
+            let block_data = self.blocks.dealloc_aba(&reservation.block);
 
             // Remove from the `non_full` list
             self.non_full.swap_remove(block_data.non_full_index);
 
             if let Some(perturbed) = self.non_full.get_mut(block_data.non_full_index) {
-                self.blocks.get_mut(perturbed).non_full_index = block_data.non_full_index;
+                self.blocks.get_aba_mut(perturbed).non_full_index = block_data.non_full_index;
             }
 
             // Allow users to clean up their heap reservations
@@ -101,17 +103,17 @@ impl<T> BlockAllocator<T> {
         }
     }
 
-    pub fn block<'a>(&'a self, block: &'a BlockRef<T>) -> &'a T {
-        &self.blocks.get(block).value
+    pub fn block<'a>(&'a self, block: &'a BlockPtr<T>) -> &'a T {
+        &self.blocks.get_aba(block).value
     }
 
-    pub fn block_mut<'a>(&'a mut self, block: &'a BlockRef<T>) -> &'a mut T {
-        &mut self.blocks.get_mut(block).value
+    pub fn block_mut<'a>(&'a mut self, block: &'a BlockPtr<T>) -> &'a mut T {
+        &mut self.blocks.get_aba_mut(block).value
     }
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct BlockReservation<T> {
-    pub block: BlockRef<T>,
+    pub block: BlockPtr<T>,
     pub slot: usize,
 }
