@@ -344,7 +344,10 @@ pub mod query_internals {
 
     use super::{HasGlobalManagedTag, RawTag, Tag};
 
-    pub use {cbit::cbit, std::iter::Iterator};
+    pub use {
+        cbit::cbit,
+        std::{compile_error, concat, iter::Iterator, stringify},
+    };
 
     pub trait QueryPart: Sized {
         type Input<'a>;
@@ -478,6 +481,23 @@ macro_rules! query {
 			}
 		}
 	};
+	(
+		@internal {
+			remaining_input = {entity $($anything:tt)*};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query_internals::compile_error!(
+			$crate::query::query_internals::concat!(
+				"expected a pattern after `entity`; got `",
+				$crate::query::query_internals::stringify!($($anything)*),
+				"`"
+			),
+		);
+	};
 
 	// `slot`
 	(
@@ -521,6 +541,46 @@ macro_rules! query {
 				body = {$($body)*};
 			}
 		}
+	};
+
+	// `slot` error handling
+	(
+		@internal {
+			remaining_input = {slot $name:ident $($anything:tt)*};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query_internals::compile_error!(
+			$crate::query::query_internals::concat!(
+				"expected a global type tag in the form `slot ",
+				$crate::query::query_internals::stringify!($name),
+				": <type>` or a tag expression in the form `slot ",
+				$crate::query::query_internals::stringify!($name),
+				" in <expr>` but instead got `",
+				$crate::query::query_internals::stringify!($($anything)*),
+				"`"
+			),
+		);
+	};
+	(
+		@internal {
+			remaining_input = {slot $($anything:tt)*};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query_internals::compile_error!(
+			$crate::query::query_internals::concat!(
+				"expected an identifier after `slot`; got `",
+				$crate::query::query_internals::stringify!($($anything)*),
+				"`"
+			),
+		);
 	};
 
 	// `obj`
@@ -567,6 +627,46 @@ macro_rules! query {
 		}
 	};
 
+	// `obj` error handling
+	(
+		@internal {
+			remaining_input = {obj $name:ident $($anything:tt)*};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query_internals::compile_error!(
+			$crate::query::query_internals::concat!(
+				"expected a global type tag in the form `obj ",
+				$crate::query::query_internals::stringify!($name),
+				": <type>` or a tag expression in the form `obj ",
+				$crate::query::query_internals::stringify!($name),
+				" in <expr>` but instead got `",
+				$crate::query::query_internals::stringify!($($anything)*),
+				"`"
+			),
+		);
+	};
+	(
+		@internal {
+			remaining_input = {obj $($anything:tt)*};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query_internals::compile_error!(
+			$crate::query::query_internals::concat!(
+				"expected an identifier after `obj`; got `",
+				$crate::query::query_internals::stringify!($($anything)*),
+				"`"
+			),
+		);
+	};
+
 	// `ref`
 	(
 		@internal {
@@ -609,6 +709,46 @@ macro_rules! query {
 				body = {$($body)*};
 			}
 		}
+	};
+
+	// `ref` error handling
+	(
+		@internal {
+			remaining_input = {ref $name:ident $($anything:tt)*};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query_internals::compile_error!(
+			$crate::query::query_internals::concat!(
+				"expected a global type tag in the form `ref ",
+				$crate::query::query_internals::stringify!($name),
+				": <type>` or a tag expression in the form `ref ",
+				$crate::query::query_internals::stringify!($name),
+				" in <expr>` but instead got `",
+				$crate::query::query_internals::stringify!($($anything)*),
+				"`"
+			),
+		);
+	};
+	(
+		@internal {
+			remaining_input = {ref $($anything:tt)*};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query_internals::compile_error!(
+			$crate::query::query_internals::concat!(
+				"expected an identifier after `ref`; got `",
+				$crate::query::query_internals::stringify!($($anything)*),
+				"`"
+			),
+		);
 	};
 
 	// `mut`
@@ -655,6 +795,46 @@ macro_rules! query {
 		}
 	};
 
+	// `mut` error handling
+	(
+		@internal {
+			remaining_input = {mut $name:ident $($anything:tt)*};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query_internals::compile_error!(
+			$crate::query::query_internals::concat!(
+				"expected a global type tag in the form `mut ",
+				$crate::query::query_internals::stringify!($name),
+				": <type>` or a tag expression in the form `mut ",
+				$crate::query::query_internals::stringify!($name),
+				" in <expr>` but instead got `",
+				$crate::query::query_internals::stringify!($($anything)*),
+				"`"
+			),
+		);
+	};
+	(
+		@internal {
+			remaining_input = {mut $($anything:tt)*};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query_internals::compile_error!(
+			$crate::query::query_internals::concat!(
+				"expected an identifier after `mut`; got `",
+				$crate::query::query_internals::stringify!($($anything)*),
+				"`"
+			),
+		);
+	};
+
 	// `oref`
 	(
 		@internal {
@@ -697,6 +877,46 @@ macro_rules! query {
 				body = {$($body)*};
 			}
 		}
+	};
+
+	// `oref` error handling
+	(
+		@internal {
+			remaining_input = {oref $name:ident $($anything:tt)*};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query_internals::compile_error!(
+			$crate::query::query_internals::concat!(
+				"expected a global type tag in the form `oref ",
+				$crate::query::query_internals::stringify!($name),
+				": <type>` or a tag expression in the form `oref ",
+				$crate::query::query_internals::stringify!($name),
+				" in <expr>` but instead got `",
+				$crate::query::query_internals::stringify!($($anything)*),
+				"`"
+			),
+		);
+	};
+	(
+		@internal {
+			remaining_input = {oref $($anything:tt)*};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query_internals::compile_error!(
+			$crate::query::query_internals::concat!(
+				"expected an identifier after `oref`; got `",
+				$crate::query::query_internals::stringify!($($anything)*),
+				"`"
+			),
+		);
 	};
 
 	// `omut`
@@ -743,6 +963,46 @@ macro_rules! query {
 		}
 	};
 
+	// `omut` error handling
+	(
+		@internal {
+			remaining_input = {omut $name:ident $($anything:tt)*};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query_internals::compile_error!(
+			$crate::query::query_internals::concat!(
+				"expected a global type tag in the form `omut ",
+				$crate::query::query_internals::stringify!($name),
+				": <type>` or a tag expression in the form `omut ",
+				$crate::query::query_internals::stringify!($name),
+				" in <expr>` but instead got `",
+				$crate::query::query_internals::stringify!($($anything)*),
+				"`"
+			),
+		);
+	};
+	(
+		@internal {
+			remaining_input = {omut $($anything:tt)*};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query_internals::compile_error!(
+			$crate::query::query_internals::concat!(
+				"expected an identifier after `omut`; got `",
+				$crate::query::query_internals::stringify!($($anything)*),
+				"`"
+			),
+		);
+	};
+
 	// Tags
 	(
 		@internal {
@@ -787,6 +1047,61 @@ macro_rules! query {
 				body = {$($body)*};
 			}
 		}
+	};
+
+	// Tags error handling
+	(
+		@internal {
+			remaining_input = {tags $($anything:tt)*};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query_internals::compile_error!(
+			$crate::query::query_internals::concat!(
+				"expected an expression after `tags`; got `",
+				$crate::query::query_internals::stringify!($($anything)*),
+				"`"
+			),
+		);
+	};
+	(
+		@internal {
+			remaining_input = {tag $($anything:tt)*};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query_internals::compile_error!(
+			$crate::query::query_internals::concat!(
+				"expected an expression after `tag`; got `",
+				$crate::query::query_internals::stringify!($($anything)*),
+				"`"
+			),
+		);
+	};
+
+	// General error handling
+	(
+		@internal {
+			remaining_input = {$($anything:tt)*};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query_internals::compile_error!(
+			$crate::query::query_internals::concat!(
+				"expected `entity`, `slot`, `obj`, `ref`, `mut`, `oref`, `omut`, `tag`, or `tags`; got `",
+				$crate::query::query_internals::stringify!($($anything)*),
+				"`"
+			),
+		);
 	};
 }
 
