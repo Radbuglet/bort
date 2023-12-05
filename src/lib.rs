@@ -1,4 +1,5 @@
 #![deny(unsafe_code)] // Unsafe code is only permitted in `core`.
+#![allow(clippy::missing_safety_doc)] // TODO: Remove this
 
 pub mod behavior;
 pub mod core;
@@ -26,8 +27,8 @@ pub mod prelude {
         },
         obj::{Obj, OwnedObj},
         query::{
-            flush, GlobalTag, GlobalVirtualTag, HasGlobalManagedTag, HasGlobalVirtualTag, RawTag,
-            Tag, VirtualTag,
+            flush, query, GlobalTag, GlobalVirtualTag, HasGlobalManagedTag, HasGlobalVirtualTag,
+            RawTag, Tag, VirtualTag,
         },
     };
 }

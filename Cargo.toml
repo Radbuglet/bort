@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 autoken = "0.1.0"
+cbit = "0.1.0"
 cfgenius = "0.1.0"
 derive-where = "1.2.1"
 hashbrown = { version = "0.14.0", default-features = false, features = ["raw"] }

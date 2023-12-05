@@ -73,7 +73,7 @@ fn main() {
         {
             let mut queried = FxHashSet::default();
             query! {
-                for (@me, slot value in my_tag) {
+                for (entity me, slot value in my_tag) {
                     let owner = value.owner(token);
                     assert_eq!(owner, Some(me), "index: {}", queried.len());
                     assert_eq!(*me.get::<i32>(), 3);
@@ -94,7 +94,7 @@ fn main() {
         {
             let mut queried = FxHashSet::default();
             query! {
-                for (@me) + [my_tag_2] {
+                for (entity me, tag my_tag_2) {
                     assert!(queried.insert(me));
                 }
             }

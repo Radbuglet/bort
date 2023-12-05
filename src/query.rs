@@ -329,3 +329,465 @@ pub fn borrow_flush_guard() -> FlushGuard {
 
     FlushGuard(DbRoot::get(token).borrow_query_guard(token))
 }
+
+// === Query Traits === //
+
+#[doc(hidden)]
+pub mod query_internals {
+    use std::ops::ControlFlow;
+
+    use crate::{
+        core::heap::Slot,
+        entity::{CompMut, CompRef, Entity},
+        obj::Obj,
+    };
+
+    use super::{HasGlobalManagedTag, RawTag, Tag};
+
+    pub use {cbit::cbit, std::iter::Iterator};
+
+    pub trait QueryPart: Sized {
+        type Input<'a>;
+
+        fn query<B>(
+            self,
+            extra_tags: impl IntoIterator<Item = RawTag>,
+            f: impl FnMut(Self::Input<'_>) -> ControlFlow<B>,
+        ) -> ControlFlow<B> {
+            ControlFlow::Continue(())
+        }
+    }
+
+    pub struct EntityQueryPart;
+
+    impl QueryPart for EntityQueryPart {
+        type Input<'a> = Entity;
+    }
+
+    pub struct SlotQueryPart<T: 'static>(pub Tag<T>);
+
+    impl<T: 'static> QueryPart for SlotQueryPart<T> {
+        type Input<'a> = Slot<T>;
+    }
+
+    pub struct ObjQueryPart<T: 'static>(pub Tag<T>);
+
+    impl<T: 'static> QueryPart for ObjQueryPart<T> {
+        type Input<'a> = Obj<T>;
+    }
+
+    pub struct ORefQueryPart<T: 'static>(pub Tag<T>);
+
+    impl<T: 'static> QueryPart for ORefQueryPart<T> {
+        type Input<'a> = CompRef<'a, T>;
+    }
+
+    pub struct OMutQueryPart<T: 'static>(pub Tag<T>);
+
+    impl<T: 'static> QueryPart for OMutQueryPart<T> {
+        type Input<'a> = CompMut<'a, T>;
+    }
+
+    pub struct RefQueryPart<T: 'static>(pub Tag<T>);
+
+    impl<T: 'static> QueryPart for RefQueryPart<T> {
+        type Input<'a> = &'a T;
+    }
+
+    pub struct MutQueryPart<T: 'static>(pub Tag<T>);
+
+    impl<T: 'static> QueryPart for MutQueryPart<T> {
+        type Input<'a> = &'a mut T;
+    }
+
+    impl<A: QueryPart, B: QueryPart> QueryPart for (A, B) {
+        type Input<'a> = (A::Input<'a>, B::Input<'a>);
+    }
+
+    impl QueryPart for () {
+        type Input<'a> = ();
+    }
+
+    pub fn get_tag<T: 'static + HasGlobalManagedTag>() -> Tag<T::Component> {
+        Tag::global::<T>()
+    }
+
+    pub fn from_tag<T: 'static>(tag: impl Into<Tag<T>>) -> Tag<T> {
+        tag.into()
+    }
+
+    pub fn from_tag_virtual(tag: impl Into<RawTag>) -> RawTag {
+        tag.into()
+    }
+
+    pub fn empty_tag_iter() -> impl Iterator<Item = RawTag> {
+        [].into_iter()
+    }
+}
+
+#[macro_export]
+macro_rules! query {
+    (
+		for ($($input:tt)*) {
+			$($body:tt)*
+		}
+	) => {
+		$crate::query::query! {
+			@internal {
+				remaining_input = {$($input)*};
+				built_parts = {()};
+				built_extractor = {()};
+				extra_tags = {$crate::query::query_internals::empty_tag_iter()};
+				body = {$($body)*};
+			}
+		}
+	};
+    (
+		@internal {
+			remaining_input = {};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query_internals::cbit!(
+			for $extractor in $crate::query::query_internals::QueryPart::query($parts, $extra_tags) {
+				$($body)*
+			}
+		)
+	};
+
+	// entity
+	(
+		@internal {
+			remaining_input = {entity $name:pat $(, $($rest:tt)*)?};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query! {
+			@internal {
+				remaining_input = {$($($rest)*)?};
+				built_parts = {($parts, $crate::query::query_internals::EntityQueryPart)};
+				built_extractor = {($extractor, $name)};
+				extra_tags = {$extra_tags};
+				body = {$($body)*};
+			}
+		}
+	};
+
+	// `slot`
+	(
+		@internal {
+			remaining_input = {slot $name:ident : $ty:ty $(, $($rest:tt)*)?};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query! {
+			@internal {
+				remaining_input = {$($($rest)*)?};
+				built_parts = {($parts, $crate::query::query_internals::SlotQueryPart(
+					$crate::query::query_internals::get_tag::<$ty>(),
+				))};
+				built_extractor = {($extractor, $name)};
+				extra_tags = {$extra_tags};
+				body = {$($body)*};
+			}
+		}
+	};
+	(
+		@internal {
+			remaining_input = {slot $name:ident in $tag:expr $(, $($rest:tt)*)?};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query! {
+			@internal {
+				remaining_input = {$($($rest)*)?};
+				built_parts = {($parts, $crate::query::query_internals::SlotQueryPart(
+					$crate::query::query_internals::from_tag($tag),
+				))};
+				built_extractor = {($extractor, $name)};
+				extra_tags = {$extra_tags};
+				body = {$($body)*};
+			}
+		}
+	};
+
+	// `obj`
+	(
+		@internal {
+			remaining_input = {obj $name:ident : $ty:ty $(, $($rest:tt)*)?};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query! {
+			@internal {
+				remaining_input = {$($($rest)*)?};
+				built_parts = {($parts, $crate::query::query_internals::ObjQueryPart(
+					$crate::query::query_internals::get_tag::<$ty>(),
+				))};
+				built_extractor = {($extractor, $name)};
+				extra_tags = {$extra_tags};
+				body = {$($body)*};
+			}
+		}
+	};
+	(
+		@internal {
+			remaining_input = {obj $name:ident in $tag:expr $(, $($rest:tt)*)?};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query! {
+			@internal {
+				remaining_input = {$($($rest)*)?};
+				built_parts = {($parts, $crate::query::query_internals::ObjQueryPart(
+					$crate::query::query_internals::from_tag($tag),
+				))};
+				built_extractor = {($extractor, $name)};
+				extra_tags = {$extra_tags};
+				body = {$($body)*};
+			}
+		}
+	};
+
+	// `ref`
+	(
+		@internal {
+			remaining_input = {ref $name:ident : $ty:ty $(, $($rest:tt)*)?};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query! {
+			@internal {
+				remaining_input = {$($($rest)*)?};
+				built_parts = {($parts, $crate::query::query_internals::RefQueryPart(
+					$crate::query::query_internals::get_tag::<$ty>(),
+				))};
+				built_extractor = {($extractor, $name)};
+				extra_tags = {$extra_tags};
+				body = {$($body)*};
+			}
+		}
+	};
+	(
+		@internal {
+			remaining_input = {ref $name:ident in $tag:expr $(, $($rest:tt)*)?};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query! {
+			@internal {
+				remaining_input = {$($($rest)*)?};
+				built_parts = {($parts, $crate::query::query_internals::RefQueryPart(
+					$crate::query::query_internals::from_tag($tag),
+				))};
+				built_extractor = {($extractor, $name)};
+				extra_tags = {$extra_tags};
+				body = {$($body)*};
+			}
+		}
+	};
+
+	// `mut`
+	(
+		@internal {
+			remaining_input = {mut $name:ident : $ty:ty $(, $($rest:tt)*)?};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query! {
+			@internal {
+				remaining_input = {$($($rest)*)?};
+				built_parts = {($parts, $crate::query::query_internals::MutQueryPart(
+					$crate::query::query_internals::get_tag::<$ty>(),
+				))};
+				built_extractor = {($extractor, $name)};
+				extra_tags = {$extra_tags};
+				body = {$($body)*};
+			}
+		}
+	};
+	(
+		@internal {
+			remaining_input = {mut $name:ident in $tag:expr $(, $($rest:tt)*)?};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query! {
+			@internal {
+				remaining_input = {$($($rest)*)?};
+				built_parts = {($parts, $crate::query::query_internals::MutQueryPart(
+					$crate::query::query_internals::from_tag($tag),
+				))};
+				built_extractor = {($extractor, $name)};
+				extra_tags = {$extra_tags};
+				body = {$($body)*};
+			}
+		}
+	};
+
+	// `oref`
+	(
+		@internal {
+			remaining_input = {oref $name:ident : $ty:ty $(, $($rest:tt)*)?};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query! {
+			@internal {
+				remaining_input = {$($($rest)*)?};
+				built_parts = {($parts, $crate::query::query_internals::ORefQueryPart(
+					$crate::query::query_internals::get_tag::<$ty>(),
+				))};
+				built_extractor = {($extractor, $name)};
+				extra_tags = {$extra_tags};
+				body = {$($body)*};
+			}
+		}
+	};
+	(
+		@internal {
+			remaining_input = {oref $name:ident in $tag:expr $(, $($rest:tt)*)?};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query! {
+			@internal {
+				remaining_input = {$($($rest)*)?};
+				built_parts = {($parts, $crate::query::query_internals::ORefQueryPart(
+					$crate::query::query_internals::from_tag($tag),
+				))};
+				built_extractor = {($extractor, $name)};
+				extra_tags = {$extra_tags};
+				body = {$($body)*};
+			}
+		}
+	};
+
+	// `omut`
+	(
+		@internal {
+			remaining_input = {omut $name:ident : $ty:ty $(, $($rest:tt)*)?};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query! {
+			@internal {
+				remaining_input = {$($($rest)*)?};
+				built_parts = {($parts, $crate::query::query_internals::OMutQueryPart(
+					$crate::query::query_internals::get_tag::<$ty>(),
+				))};
+				built_extractor = {($extractor, mut $name)};
+				extra_tags = {$extra_tags};
+				body = {$($body)*};
+			}
+		}
+	};
+	(
+		@internal {
+			remaining_input = {omut $name:ident in $tag:expr $(, $($rest:tt)*)?};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query! {
+			@internal {
+				remaining_input = {$($($rest)*)?};
+				built_parts = {($parts, $crate::query::query_internals::OMutQueryPart(
+					$crate::query::query_internals::from_tag($tag),
+				))};
+				built_extractor = {($extractor, mut $name)};
+				extra_tags = {$extra_tags};
+				body = {$($body)*};
+			}
+		}
+	};
+
+	// Tags
+	(
+		@internal {
+			remaining_input = {tags $tag:expr $(, $($rest:tt)*)?};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query! {
+			@internal {
+				remaining_input = {$($($rest)*)?};
+				built_parts = {$parts};
+				built_extractor = {$extractor};
+				extra_tags = {$crate::query::query_internals::Iterator::join(
+					$extra_tags,
+					$tag,
+				)};
+				body = {$($body)*};
+			}
+		}
+	};
+	(
+		@internal {
+			remaining_input = {tag $tag:expr $(, $($rest:tt)*)?};
+			built_parts = {$parts:expr};
+			built_extractor = {$extractor:pat};
+			extra_tags = {$extra_tags:expr};
+			body = {$($body:tt)*};
+		}
+	) => {
+		$crate::query::query! {
+			@internal {
+				remaining_input = {$($($rest)*)?};
+				built_parts = {$parts};
+				built_extractor = {$extractor};
+				extra_tags = {$crate::query::query_internals::Iterator::chain(
+					$extra_tags,
+					[$crate::query::query_internals::from_tag_virtual($tag)],
+				)};
+				body = {$($body)*};
+			}
+		}
+	};
+}
+
+pub use query;

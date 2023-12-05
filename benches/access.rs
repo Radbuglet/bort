@@ -270,7 +270,7 @@ fn access_tests() {
 
         c.iter(|| {
             query! {
-                for (@_me, mut pos in pos_tag, ref vel in vel_tag) {
+                for (entity _me, mut pos in pos_tag, ref vel in vel_tag) {
                     pos.0 += vel.0;
                 }
             }
