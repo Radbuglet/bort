@@ -19,6 +19,10 @@ use crate::{
 
 use super::{
     cell::{MultiRefCellIndex, OptRef, OptRefMut},
+    random_iter::{
+        RandomAccessIter, RandomAccessMap, RandomAccessMapper, RandomAccessSliceRef,
+        RandomAccessZip,
+    },
     token::{
         BorrowMutToken, BorrowToken, GetToken, MainThreadToken, Token, TokenFor, TrivialUnjailToken,
     },
@@ -202,20 +206,6 @@ impl<T> Heap<T> {
         my_slot_container.swap(token, other_slot_container);
     }
 
-    pub fn values_and_slots<'a, N: Token>(
-        &'a self,
-        token: &'a N,
-    ) -> (impl ExactSizeIterator<Item = HeapSlotBlock<'a, T, N>> + Clone + 'a) {
-        self.values()
-            .iter()
-            .zip(array_chunks::<_, { MultiRefCellIndex::COUNT }>(&self.slots))
-            .map(|(values, slots)| HeapSlotBlock {
-                token,
-                values,
-                slots,
-            })
-    }
-
     pub fn slots<'a>(
         &'a self,
         token: &'a impl Token,
@@ -234,6 +224,28 @@ impl<T> Heap<T> {
         for slot in self.slots(token) {
             slot.set_value_owner_pair(token, None);
         }
+    }
+
+    pub(crate) fn blocks_expose_random_access<'a, N: Token>(
+        &'a self,
+        token: &'a N,
+    ) -> RandomAccessHeapBlockIter<'a, T, N> {
+        RandomAccessHeapBlockIter::new(
+            RandomAccessZip::new(
+                RandomAccessSliceRef::new(self.values()),
+                RandomAccessSliceRef::new(array_chunks::<_, { MultiRefCellIndex::COUNT }>(
+                    &self.slots,
+                )),
+            ),
+            RandomAccessHeapBlockIterMapper(token),
+        )
+    }
+
+    pub fn blocks<'a, N: Token>(
+        &'a self,
+        token: &'a N,
+    ) -> (impl Iterator<Item = HeapSlotBlock<'a, T, N>> + Clone + 'a) {
+        self.blocks_expose_random_access(token).into_iter()
     }
 }
 
@@ -267,6 +279,40 @@ impl<T> Drop for Heap<T> {
 
         // Drop the boxed slice of heap values.
         drop(unsafe { Box::from_raw(self.values.as_ptr()) });
+    }
+}
+
+pub(crate) type RandomAccessHeapBlockIter<'a, T, N> = RandomAccessMap<
+    RandomAccessZip<
+        RandomAccessSliceRef<'a, NMultiOptRefCell<T>>,
+        RandomAccessSliceRef<'a, [NMainCell<Slot<T>>; MultiRefCellIndex::COUNT]>,
+    >,
+    RandomAccessHeapBlockIterMapper<'a, N>,
+>;
+
+#[derive_where(Clone)]
+pub(crate) struct RandomAccessHeapBlockIterMapper<'a, N: Token>(&'a N);
+
+impl<'a, T: 'static, N: Token>
+    RandomAccessMapper<(
+        &'a NMultiOptRefCell<T>,
+        &'a [NMainCell<Slot<T>>; MultiRefCellIndex::COUNT],
+    )> for RandomAccessHeapBlockIterMapper<'a, N>
+{
+    type Output = HeapSlotBlock<'a, T, N>;
+
+    fn map(
+        &self,
+        (values, slots): (
+            &'a NMultiOptRefCell<T>,
+            &'a [NMainCell<Slot<T>>; MultiRefCellIndex::COUNT],
+        ),
+    ) -> Self::Output {
+        HeapSlotBlock {
+            token: self.0,
+            values,
+            slots,
+        }
     }
 }
 
