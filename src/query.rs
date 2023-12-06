@@ -291,13 +291,16 @@ pub mod query_internals {
 
     use crate::{
         core::{
-            cell::{MultiOptRef, MultiOptRefMut},
-            heap::{heap_iter::RandomAccessHeapBlockIter, Heap, HeapSlotBlock, Slot},
+            cell::{MultiOptRef, MultiOptRefMut, MultiRefCellIndex},
+            heap::{array_chunks, heap_iter::RandomAccessHeapBlockIter, Heap, HeapSlotBlock, Slot},
             random_iter::{
-                RandomAccessEnumerate, RandomAccessIter, RandomAccessRepeat, RandomAccessZip,
+                RandomAccessEnumerate, RandomAccessIter, RandomAccessRepeat, RandomAccessSliceRef,
+                RandomAccessZip,
             },
             token::{MainThreadToken, Token},
+            token_cell::NMainCell,
         },
+        database::InertEntity,
         entity::{CompMut, CompRef, Entity},
         obj::Obj,
         storage, Storage,
@@ -323,12 +326,12 @@ pub mod query_internals {
         type HeapIter: Iterator<Item = Self>;
 
         /// An iterator over blocks in this heap, parameterized by the lifetime of the heap borrow
-		/// and the token used.
+        /// and the token used.
         #[rustfmt::skip]
         type BlockIter<'a, N>: RandomAccessIter<Item = Self::Block<'a, N>> where N: 'a + Token;
 
         /// An iterator over blocks in this heap, parameterized by the lifetime of the heap borrow
-		/// and the token used.
+        /// and the token used.
         #[rustfmt::skip]
         type Block<'a, N> where N: 'a + Token;
 
@@ -349,7 +352,7 @@ pub mod query_internals {
         type Storages = ();
         type HeapIter = iter::Repeat<()>;
 
-		#[rustfmt::skip]
+        #[rustfmt::skip]
         type BlockIter<'a, N> = RandomAccessRepeat<()> where N: 'a + Token;
 
         #[rustfmt::skip]
@@ -373,7 +376,7 @@ pub mod query_internals {
         type Storages = Storage<T>;
         type HeapIter = std::vec::IntoIter<Self>;
 
-		#[rustfmt::skip]
+        #[rustfmt::skip]
         type BlockIter<'a, N> = RandomAccessHeapBlockIter<'a, T, N> where N: 'a + Token;
 
         #[rustfmt::skip]
@@ -395,13 +398,37 @@ pub mod query_internals {
         }
     }
 
+    impl QueryHeap for Arc<[NMainCell<InertEntity>]> {
+        type Storages = ();
+        type HeapIter = std::vec::IntoIter<Arc<[NMainCell<InertEntity>]>>;
+
+        type BlockIter<'a, N> = RandomAccessSliceRef<'a, [NMainCell<InertEntity>; MultiRefCellIndex::COUNT]>
+        where N: 'a + Token;
+
+        type Block<'a, N> = &'a [NMainCell<InertEntity>; MultiRefCellIndex::COUNT]
+        where N: 'a + Token;
+
+        fn storages() -> Self::Storages {}
+
+        fn heaps_for_archetype(
+            _storages: &Self::Storages,
+            archetype: &ArchetypeQueryInfo,
+        ) -> Self::HeapIter {
+            archetype.entities.clone().unwrap().into_iter()
+        }
+
+        fn blocks<'a, N: Token>(&'a self, _token: &'a N) -> Self::BlockIter<'a, N> {
+            RandomAccessSliceRef::new(array_chunks(self))
+        }
+    }
+
     impl<A: QueryHeap, B: QueryHeap> QueryHeap for (A, B) {
         type Storages = (A::Storages, B::Storages);
         type HeapIter = iter::Zip<A::HeapIter, B::HeapIter>;
 
         type BlockIter<'a, N> = RandomAccessZip<A::BlockIter<'a, N>, B::BlockIter<'a, N>>
-		where
-			N: 'a + Token;
+        where
+            N: 'a + Token;
 
         #[rustfmt::skip]
         type Block<'a, N> = (A::Block<'a, N>, B::Block<'a, N>) where N: 'a + Token;
@@ -432,7 +459,7 @@ pub mod query_internals {
         type Iter<'iter>: Iterator<Item = Self::IterItem<'iter>> where Self: 'iter;
 
         #[rustfmt::skip]
-		type IterItem<'iter> where Self: 'iter;
+        type IterItem<'iter> where Self: 'iter;
 
         fn try_borrow_group(
             block: &'guard B,
@@ -488,7 +515,7 @@ pub mod query_internals {
         #[rustfmt::skip]
         type Iter<'iter> = std::slice::Iter<'iter, T> where Self: 'iter;
 
-		#[rustfmt::skip]
+        #[rustfmt::skip]
         type IterItem<'iter> = &'iter T where Self: 'iter;
 
         fn try_borrow_group(
@@ -511,7 +538,7 @@ pub mod query_internals {
         #[rustfmt::skip]
         type Iter<'iter> = std::slice::IterMut<'iter, T> where Self: 'iter;
 
-		#[rustfmt::skip]
+        #[rustfmt::skip]
         type IterItem<'iter> = &'iter mut T where Self: 'iter;
 
         fn try_borrow_group(
@@ -529,6 +556,29 @@ pub mod query_internals {
         }
     }
 
+    impl<'guard, 'slice>
+        QueryGroupBorrow<'guard, &'slice [NMainCell<InertEntity>; MultiRefCellIndex::COUNT], ()>
+        for &'guard [NMainCell<InertEntity>; MultiRefCellIndex::COUNT]
+    {
+        #[rustfmt::skip]
+        type Iter<'iter> = std::slice::Iter<'iter, NMainCell<InertEntity>> where Self: 'iter;
+
+        #[rustfmt::skip]
+        type IterItem<'iter> = &'iter NMainCell<InertEntity> where Self: 'iter;
+
+        fn try_borrow_group(
+            block: &'guard &'guard [NMainCell<InertEntity>; MultiRefCellIndex::COUNT],
+            _token: &'static MainThreadToken,
+            _loaner: &'guard mut (),
+        ) -> Option<Self> {
+            Some(block)
+        }
+
+        fn iter(&mut self) -> Self::Iter<'_> {
+            (**self).iter()
+        }
+    }
+
     impl<'guard, ItemA, ItemB, B1, L1, B2, L2> QueryGroupBorrow<'guard, (B1, B2), (L1, L2)>
         for (ItemA, ItemB)
     where
@@ -538,7 +588,7 @@ pub mod query_internals {
         #[rustfmt::skip]
         type Iter<'iter> = iter::Zip<ItemA::Iter<'iter>, ItemB::Iter<'iter>> where Self: 'iter;
 
-		#[rustfmt::skip]
+        #[rustfmt::skip]
         type IterItem<'iter> = (ItemA::IterItem<'iter>, ItemB::IterItem<'iter>) where Self: 'iter;
 
         fn try_borrow_group(
@@ -561,9 +611,9 @@ pub mod query_internals {
 
     pub trait QueryPart: Sized {
         type Input<'a>;
-        type Heap: QueryHeap;
         type TagIter: Iterator<Item = RawTag>;
         type AutokenLoan: Default;
+        type Heap: QueryHeap;
         type GroupBorrow<'guard>: for<'block_iter> QueryGroupBorrow<
             'guard,
             <Self::Heap as QueryHeap>::Block<'block_iter, MainThreadToken>,
@@ -575,12 +625,23 @@ pub mod query_internals {
         fn tags(self) -> Self::TagIter;
 
         fn elem_from_block_item<'elem, 'guard>(
+            token: &'static MainThreadToken,
             elem: &'elem mut <Self::GroupBorrow<'guard> as QueryGroupBorrow<
                 'guard,
                 <Self::Heap as QueryHeap>::Block<'_, MainThreadToken>,
                 Self::AutokenLoan,
             >>::IterItem<'_>,
         ) -> Self::Input<'elem>;
+
+        fn call_slow_borrow<B>(
+            token: &'static MainThreadToken,
+            block: &<Self::Heap as QueryHeap>::Block<'_, MainThreadToken>,
+            index: MultiRefCellIndex,
+            loaner: &mut Self::AutokenLoan,
+            f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
+        ) -> ControlFlow<B>;
+
+        fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to>;
 
         fn query<B>(
             self,
@@ -610,17 +671,24 @@ pub mod query_internals {
 
                 // For each of those heaps...
                 for (heap_i, heap) in heaps.enumerate() {
+                    // Determine the length of this heap
+                    let heap_len_if_truncated = if heap_i == archetype.heap_count() - 1 {
+                        archetype.last_heap_len()
+                    } else {
+                        usize::MAX
+                    };
+
                     // Fetch the blocks comprising it.
                     let blocks = RandomAccessZip::new(RandomAccessEnumerate, heap.blocks(token));
 
                     // For each block...
-                    for (block_i, block) in blocks.into_iter() {
+                    'block_iter: for (block_i, block) in blocks.into_iter() {
                         // Attempt to run the fast-path...
                         if let Some(mut block) =
                             <Self::GroupBorrow<'_>>::try_borrow_group(&block, token, &mut loaner)
                         {
                             for mut elem in block.iter() {
-                                f(Self::elem_from_block_item(&mut elem))?;
+                                f(Self::elem_from_block_item(token, &mut elem))?;
                             }
 
                             // N.B. we `continue` here rather than putting the slow path in an `else`
@@ -630,7 +698,15 @@ pub mod query_internals {
                         }
 
                         // Otherwise, run the slow-path.
-                        // todo!();
+                        for index in MultiRefCellIndex::iter() {
+                            if block_i * MultiRefCellIndex::COUNT + index as usize
+                                >= heap_len_if_truncated
+                            {
+                                break 'block_iter;
+                            }
+
+                            Self::call_slow_borrow(token, &block, index, &mut loaner, &mut f);
+                        }
                     }
                 }
             }
@@ -643,10 +719,10 @@ pub mod query_internals {
 
     impl QueryPart for EntityQueryPart {
         type Input<'a> = Entity;
-        type Heap = ();
         type TagIter = iter::Empty<RawTag>;
         type AutokenLoan = ();
-        type GroupBorrow<'a> = GroupBorrowSupported;
+        type Heap = Arc<[NMainCell<InertEntity>]>;
+        type GroupBorrow<'a> = &'a [NMainCell<InertEntity>; MultiRefCellIndex::COUNT];
 
         const NEEDS_ENTITIES: bool = true;
 
@@ -654,8 +730,25 @@ pub mod query_internals {
             iter::empty()
         }
 
-        fn elem_from_block_item(elem: &mut ()) -> Self::Input<'_> {
-            todo!()
+        fn elem_from_block_item<'elem>(
+            token: &'static MainThreadToken,
+            elem: &'elem mut &NMainCell<InertEntity>,
+        ) -> Self::Input<'elem> {
+            elem.get(token).into_dangerous_entity()
+        }
+
+        fn call_slow_borrow<B>(
+            token: &'static MainThreadToken,
+            block: &<Self::Heap as QueryHeap>::Block<'_, MainThreadToken>,
+            index: MultiRefCellIndex,
+            loaner: &mut Self::AutokenLoan,
+            f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
+        ) -> ControlFlow<B> {
+            f(block[index as usize].get(token).into_dangerous_entity())
+        }
+
+        fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
+            src
         }
     }
 
@@ -663,9 +756,9 @@ pub mod query_internals {
 
     impl<T: 'static> QueryPart for SlotQueryPart<T> {
         type Input<'a> = Slot<T>;
-        type Heap = Arc<Heap<T>>;
         type TagIter = iter::Once<RawTag>;
         type AutokenLoan = ();
+        type Heap = Arc<Heap<T>>;
         type GroupBorrow<'a> = GroupBorrowSupported;
 
         const NEEDS_ENTITIES: bool = false;
@@ -674,8 +767,25 @@ pub mod query_internals {
             iter::once(self.0.raw())
         }
 
-        fn elem_from_block_item(elem: &mut ()) -> Self::Input<'_> {
+        fn elem_from_block_item<'elem>(
+            token: &'static MainThreadToken,
+            elem: &'elem mut (),
+        ) -> Self::Input<'elem> {
             todo!()
+        }
+
+        fn call_slow_borrow<B>(
+            token: &'static MainThreadToken,
+            block: &<Self::Heap as QueryHeap>::Block<'_, MainThreadToken>,
+            index: MultiRefCellIndex,
+            loaner: &mut Self::AutokenLoan,
+            f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
+        ) -> ControlFlow<B> {
+            todo!();
+        }
+
+        fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
+            src
         }
     }
 
@@ -683,9 +793,9 @@ pub mod query_internals {
 
     impl<T: 'static> QueryPart for ObjQueryPart<T> {
         type Input<'a> = Obj<T>;
-        type Heap = Arc<Heap<T>>;
         type TagIter = iter::Once<RawTag>;
         type AutokenLoan = ();
+        type Heap = Arc<Heap<T>>;
         type GroupBorrow<'a> = GroupBorrowSupported;
 
         const NEEDS_ENTITIES: bool = true;
@@ -694,8 +804,25 @@ pub mod query_internals {
             iter::once(self.0.raw())
         }
 
-        fn elem_from_block_item(elem: &mut ()) -> Self::Input<'_> {
+        fn elem_from_block_item<'elem>(
+            token: &'static MainThreadToken,
+            elem: &'elem mut (),
+        ) -> Self::Input<'elem> {
             todo!()
+        }
+
+        fn call_slow_borrow<B>(
+            token: &'static MainThreadToken,
+            block: &<Self::Heap as QueryHeap>::Block<'_, MainThreadToken>,
+            index: MultiRefCellIndex,
+            loaner: &mut Self::AutokenLoan,
+            f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
+        ) -> ControlFlow<B> {
+            todo!();
+        }
+
+        fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
+            src
         }
     }
 
@@ -703,9 +830,9 @@ pub mod query_internals {
 
     impl<T: 'static> QueryPart for ORefQueryPart<T> {
         type Input<'a> = CompRef<'a, T>;
-        type Heap = Arc<Heap<T>>;
         type TagIter = iter::Once<RawTag>;
         type AutokenLoan = ImmutableBorrow<T>;
+        type Heap = Arc<Heap<T>>;
         type GroupBorrow<'a> = GroupBorrowUnsupported;
 
         const NEEDS_ENTITIES: bool = true;
@@ -714,8 +841,25 @@ pub mod query_internals {
             iter::once(self.0.raw())
         }
 
-        fn elem_from_block_item(_elem: &mut ()) -> Self::Input<'_> {
+        fn elem_from_block_item<'elem>(
+            _token: &'static MainThreadToken,
+            _elem: &'elem mut (),
+        ) -> Self::Input<'elem> {
             unreachable!()
+        }
+
+        fn call_slow_borrow<B>(
+            token: &'static MainThreadToken,
+            block: &<Self::Heap as QueryHeap>::Block<'_, MainThreadToken>,
+            index: MultiRefCellIndex,
+            loaner: &mut Self::AutokenLoan,
+            f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
+        ) -> ControlFlow<B> {
+            todo!();
+        }
+
+        fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
+            src
         }
     }
 
@@ -723,9 +867,9 @@ pub mod query_internals {
 
     impl<T: 'static> QueryPart for OMutQueryPart<T> {
         type Input<'a> = CompMut<'a, T>;
-        type Heap = Arc<Heap<T>>;
         type TagIter = iter::Once<RawTag>;
         type AutokenLoan = MutableBorrow<T>;
+        type Heap = Arc<Heap<T>>;
         type GroupBorrow<'a> = GroupBorrowUnsupported;
 
         const NEEDS_ENTITIES: bool = true;
@@ -734,8 +878,25 @@ pub mod query_internals {
             iter::once(self.0.raw())
         }
 
-        fn elem_from_block_item(_elem: &mut ()) -> Self::Input<'_> {
+        fn elem_from_block_item<'elem>(
+            _token: &'static MainThreadToken,
+            _elem: &'elem mut (),
+        ) -> Self::Input<'elem> {
             unreachable!()
+        }
+
+        fn call_slow_borrow<B>(
+            token: &'static MainThreadToken,
+            block: &<Self::Heap as QueryHeap>::Block<'_, MainThreadToken>,
+            index: MultiRefCellIndex,
+            loaner: &mut Self::AutokenLoan,
+            f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
+        ) -> ControlFlow<B> {
+            todo!();
+        }
+
+        fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
+            src
         }
     }
 
@@ -743,9 +904,9 @@ pub mod query_internals {
 
     impl<T: 'static> QueryPart for RefQueryPart<T> {
         type Input<'a> = &'a T;
-        type Heap = Arc<Heap<T>>;
         type TagIter = iter::Once<RawTag>;
         type AutokenLoan = ImmutableBorrow<T>;
+        type Heap = Arc<Heap<T>>;
         type GroupBorrow<'a> = MultiOptRef<'a, T>;
 
         const NEEDS_ENTITIES: bool = false;
@@ -754,8 +915,25 @@ pub mod query_internals {
             iter::once(self.0.raw())
         }
 
-        fn elem_from_block_item<'elem>(elem: &'elem mut &T) -> Self::Input<'elem> {
+        fn elem_from_block_item<'elem>(
+            _token: &'static MainThreadToken,
+            elem: &'elem mut &T,
+        ) -> Self::Input<'elem> {
             elem
+        }
+
+        fn call_slow_borrow<B>(
+            token: &'static MainThreadToken,
+            block: &<Self::Heap as QueryHeap>::Block<'_, MainThreadToken>,
+            index: MultiRefCellIndex,
+            loaner: &mut Self::AutokenLoan,
+            f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
+        ) -> ControlFlow<B> {
+            f(&block.values().borrow_on_loan(token, index, &loaner))
+        }
+
+        fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
+            src
         }
     }
 
@@ -763,9 +941,9 @@ pub mod query_internals {
 
     impl<T: 'static> QueryPart for MutQueryPart<T> {
         type Input<'a> = &'a mut T;
-        type Heap = Arc<Heap<T>>;
         type TagIter = iter::Once<RawTag>;
         type AutokenLoan = MutableBorrow<T>;
+        type Heap = Arc<Heap<T>>;
         type GroupBorrow<'a> = MultiOptRefMut<'a, T>;
 
         const NEEDS_ENTITIES: bool = false;
@@ -774,25 +952,43 @@ pub mod query_internals {
             iter::once(self.0.raw())
         }
 
-        fn elem_from_block_item<'elem>(elem: &'elem mut &mut T) -> Self::Input<'elem> {
+        fn elem_from_block_item<'elem>(
+            _token: &'static MainThreadToken,
+            elem: &'elem mut &mut T,
+        ) -> Self::Input<'elem> {
             elem
+        }
+
+        fn call_slow_borrow<B>(
+            token: &'static MainThreadToken,
+            block: &<Self::Heap as QueryHeap>::Block<'_, MainThreadToken>,
+            index: MultiRefCellIndex,
+            loaner: &mut Self::AutokenLoan,
+            f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
+        ) -> ControlFlow<B> {
+            f(&mut block.values().borrow_mut_on_loan(token, index, loaner))
+        }
+
+        fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
+            src
         }
     }
 
-    impl<A: QueryPart, B: QueryPart> QueryPart for (A, B) {
-        type Input<'a> = (A::Input<'a>, B::Input<'a>);
-        type Heap = (A::Heap, B::Heap);
-        type TagIter = iter::Chain<A::TagIter, B::TagIter>;
-        type AutokenLoan = (A::AutokenLoan, B::AutokenLoan);
-        type GroupBorrow<'a> = (A::GroupBorrow<'a>, B::GroupBorrow<'a>);
+    impl<Left: QueryPart, Right: QueryPart> QueryPart for (Left, Right) {
+        type Input<'a> = (Left::Input<'a>, Right::Input<'a>);
+        type Heap = (Left::Heap, Right::Heap);
+        type TagIter = iter::Chain<Left::TagIter, Right::TagIter>;
+        type AutokenLoan = (Left::AutokenLoan, Right::AutokenLoan);
+        type GroupBorrow<'a> = (Left::GroupBorrow<'a>, Right::GroupBorrow<'a>);
 
-        const NEEDS_ENTITIES: bool = A::NEEDS_ENTITIES || B::NEEDS_ENTITIES;
+        const NEEDS_ENTITIES: bool = Left::NEEDS_ENTITIES || Right::NEEDS_ENTITIES;
 
         fn tags(self) -> Self::TagIter {
             self.0.tags().chain(self.1.tags())
         }
 
         fn elem_from_block_item<'elem, 'guard>(
+            token: &'static MainThreadToken,
             elem: &'elem mut <Self::GroupBorrow<'guard> as QueryGroupBorrow<
                 'guard,
                 <Self::Heap as QueryHeap>::Block<'_, MainThreadToken>,
@@ -800,17 +996,41 @@ pub mod query_internals {
             >>::IterItem<'_>,
         ) -> Self::Input<'elem> {
             (
-                A::elem_from_block_item(&mut elem.0),
-                B::elem_from_block_item(&mut elem.1),
+                Left::elem_from_block_item(token, &mut elem.0),
+                Right::elem_from_block_item(token, &mut elem.1),
+            )
+        }
+
+        fn call_slow_borrow<B>(
+            token: &'static MainThreadToken,
+            block: &<Self::Heap as QueryHeap>::Block<'_, MainThreadToken>,
+            index: MultiRefCellIndex,
+            loaner: &mut Self::AutokenLoan,
+            f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
+        ) -> ControlFlow<B> {
+            Left::call_slow_borrow(token, &block.0, index, &mut loaner.0, |a| {
+                Right::call_slow_borrow(token, &block.1, index, &mut loaner.1, |b| {
+                    f((
+                        Left::covariant_cast_input(a),
+                        Right::covariant_cast_input(b),
+                    ))
+                })
+            })
+        }
+
+        fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
+            (
+                Left::covariant_cast_input(src.0),
+                Right::covariant_cast_input(src.1),
             )
         }
     }
 
     impl QueryPart for () {
         type Input<'a> = ();
-        type Heap = ();
         type TagIter = iter::Empty<RawTag>;
         type AutokenLoan = ();
+        type Heap = ();
         type GroupBorrow<'a> = GroupBorrowSupported;
 
         const NEEDS_ENTITIES: bool = false;
@@ -819,7 +1039,25 @@ pub mod query_internals {
             iter::empty()
         }
 
-        fn elem_from_block_item(_elem: &mut ()) -> Self::Input<'_> {}
+        fn elem_from_block_item<'elem>(
+            _token: &'static MainThreadToken,
+            _elem: &'elem mut (),
+        ) -> Self::Input<'elem> {
+        }
+
+        fn call_slow_borrow<B>(
+            _token: &'static MainThreadToken,
+            _block: &<Self::Heap as QueryHeap>::Block<'_, MainThreadToken>,
+            _index: MultiRefCellIndex,
+            _loaner: &mut Self::AutokenLoan,
+            f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
+        ) -> ControlFlow<B> {
+            f(())
+        }
+
+        fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
+            src
+        }
     }
 
     pub fn get_tag<T: 'static + HasGlobalManagedTag>() -> Tag<T::Component> {
@@ -842,678 +1080,678 @@ pub mod query_internals {
 #[macro_export]
 macro_rules! query {
     (
-		for ($($input:tt)*) {
-			$($body:tt)*
-		}
-	) => {
-		$crate::query::query! {
-			@internal {
-				remaining_input = {$($input)*};
-				built_parts = {()};
-				built_extractor = {()};
-				extra_tags = {$crate::query::query_internals::empty_tag_iter()};
-				body = {$($body)*};
-			}
-		}
-	};
+        for ($($input:tt)*) {
+            $($body:tt)*
+        }
+    ) => {
+        $crate::query::query! {
+            @internal {
+                remaining_input = {$($input)*};
+                built_parts = {()};
+                built_extractor = {()};
+                extra_tags = {$crate::query::query_internals::empty_tag_iter()};
+                body = {$($body)*};
+            }
+        }
+    };
     (
-		@internal {
-			remaining_input = {};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query_internals::cbit!(
-			for $extractor in $crate::query::query_internals::QueryPart::query($parts, $extra_tags) {
-				$($body)*
-			}
-		)
-	};
+        @internal {
+            remaining_input = {};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query_internals::cbit!(
+            for $extractor in $crate::query::query_internals::QueryPart::query($parts, $extra_tags) {
+                $($body)*
+            }
+        )
+    };
 
-	// entity
-	(
-		@internal {
-			remaining_input = {entity $name:pat $(, $($rest:tt)*)?};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query! {
-			@internal {
-				remaining_input = {$($($rest)*)?};
-				built_parts = {($parts, $crate::query::query_internals::EntityQueryPart)};
-				built_extractor = {($extractor, $name)};
-				extra_tags = {$extra_tags};
-				body = {$($body)*};
-			}
-		}
-	};
-	(
-		@internal {
-			remaining_input = {entity $($anything:tt)*};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query_internals::compile_error!(
-			$crate::query::query_internals::concat!(
-				"expected a pattern after `entity`; got `",
-				$crate::query::query_internals::stringify!($($anything)*),
-				"`"
-			),
-		);
-	};
+    // entity
+    (
+        @internal {
+            remaining_input = {entity $name:pat $(, $($rest:tt)*)?};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query! {
+            @internal {
+                remaining_input = {$($($rest)*)?};
+                built_parts = {($parts, $crate::query::query_internals::EntityQueryPart)};
+                built_extractor = {($extractor, $name)};
+                extra_tags = {$extra_tags};
+                body = {$($body)*};
+            }
+        }
+    };
+    (
+        @internal {
+            remaining_input = {entity $($anything:tt)*};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query_internals::compile_error!(
+            $crate::query::query_internals::concat!(
+                "expected a pattern after `entity`; got `",
+                $crate::query::query_internals::stringify!($($anything)*),
+                "`"
+            ),
+        );
+    };
 
-	// `slot`
-	(
-		@internal {
-			remaining_input = {slot $name:ident : $ty:ty $(, $($rest:tt)*)?};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query! {
-			@internal {
-				remaining_input = {$($($rest)*)?};
-				built_parts = {($parts, $crate::query::query_internals::SlotQueryPart(
-					$crate::query::query_internals::get_tag::<$ty>(),
-				))};
-				built_extractor = {($extractor, $name)};
-				extra_tags = {$extra_tags};
-				body = {$($body)*};
-			}
-		}
-	};
-	(
-		@internal {
-			remaining_input = {slot $name:ident in $tag:expr $(, $($rest:tt)*)?};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query! {
-			@internal {
-				remaining_input = {$($($rest)*)?};
-				built_parts = {($parts, $crate::query::query_internals::SlotQueryPart(
-					$crate::query::query_internals::from_tag($tag),
-				))};
-				built_extractor = {($extractor, $name)};
-				extra_tags = {$extra_tags};
-				body = {$($body)*};
-			}
-		}
-	};
+    // `slot`
+    (
+        @internal {
+            remaining_input = {slot $name:ident : $ty:ty $(, $($rest:tt)*)?};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query! {
+            @internal {
+                remaining_input = {$($($rest)*)?};
+                built_parts = {($parts, $crate::query::query_internals::SlotQueryPart(
+                    $crate::query::query_internals::get_tag::<$ty>(),
+                ))};
+                built_extractor = {($extractor, $name)};
+                extra_tags = {$extra_tags};
+                body = {$($body)*};
+            }
+        }
+    };
+    (
+        @internal {
+            remaining_input = {slot $name:ident in $tag:expr $(, $($rest:tt)*)?};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query! {
+            @internal {
+                remaining_input = {$($($rest)*)?};
+                built_parts = {($parts, $crate::query::query_internals::SlotQueryPart(
+                    $crate::query::query_internals::from_tag($tag),
+                ))};
+                built_extractor = {($extractor, $name)};
+                extra_tags = {$extra_tags};
+                body = {$($body)*};
+            }
+        }
+    };
 
-	// `slot` error handling
-	(
-		@internal {
-			remaining_input = {slot $name:ident $($anything:tt)*};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query_internals::compile_error!(
-			$crate::query::query_internals::concat!(
-				"expected a global type tag in the form `slot ",
-				$crate::query::query_internals::stringify!($name),
-				": <type>` or a tag expression in the form `slot ",
-				$crate::query::query_internals::stringify!($name),
-				" in <expr>` but instead got `",
-				$crate::query::query_internals::stringify!($($anything)*),
-				"`"
-			),
-		);
-	};
-	(
-		@internal {
-			remaining_input = {slot $($anything:tt)*};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query_internals::compile_error!(
-			$crate::query::query_internals::concat!(
-				"expected an identifier after `slot`; got `",
-				$crate::query::query_internals::stringify!($($anything)*),
-				"`"
-			),
-		);
-	};
+    // `slot` error handling
+    (
+        @internal {
+            remaining_input = {slot $name:ident $($anything:tt)*};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query_internals::compile_error!(
+            $crate::query::query_internals::concat!(
+                "expected a global type tag in the form `slot ",
+                $crate::query::query_internals::stringify!($name),
+                ": <type>` or a tag expression in the form `slot ",
+                $crate::query::query_internals::stringify!($name),
+                " in <expr>` but instead got `",
+                $crate::query::query_internals::stringify!($($anything)*),
+                "`"
+            ),
+        );
+    };
+    (
+        @internal {
+            remaining_input = {slot $($anything:tt)*};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query_internals::compile_error!(
+            $crate::query::query_internals::concat!(
+                "expected an identifier after `slot`; got `",
+                $crate::query::query_internals::stringify!($($anything)*),
+                "`"
+            ),
+        );
+    };
 
-	// `obj`
-	(
-		@internal {
-			remaining_input = {obj $name:ident : $ty:ty $(, $($rest:tt)*)?};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query! {
-			@internal {
-				remaining_input = {$($($rest)*)?};
-				built_parts = {($parts, $crate::query::query_internals::ObjQueryPart(
-					$crate::query::query_internals::get_tag::<$ty>(),
-				))};
-				built_extractor = {($extractor, $name)};
-				extra_tags = {$extra_tags};
-				body = {$($body)*};
-			}
-		}
-	};
-	(
-		@internal {
-			remaining_input = {obj $name:ident in $tag:expr $(, $($rest:tt)*)?};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query! {
-			@internal {
-				remaining_input = {$($($rest)*)?};
-				built_parts = {($parts, $crate::query::query_internals::ObjQueryPart(
-					$crate::query::query_internals::from_tag($tag),
-				))};
-				built_extractor = {($extractor, $name)};
-				extra_tags = {$extra_tags};
-				body = {$($body)*};
-			}
-		}
-	};
+    // `obj`
+    (
+        @internal {
+            remaining_input = {obj $name:ident : $ty:ty $(, $($rest:tt)*)?};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query! {
+            @internal {
+                remaining_input = {$($($rest)*)?};
+                built_parts = {($parts, $crate::query::query_internals::ObjQueryPart(
+                    $crate::query::query_internals::get_tag::<$ty>(),
+                ))};
+                built_extractor = {($extractor, $name)};
+                extra_tags = {$extra_tags};
+                body = {$($body)*};
+            }
+        }
+    };
+    (
+        @internal {
+            remaining_input = {obj $name:ident in $tag:expr $(, $($rest:tt)*)?};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query! {
+            @internal {
+                remaining_input = {$($($rest)*)?};
+                built_parts = {($parts, $crate::query::query_internals::ObjQueryPart(
+                    $crate::query::query_internals::from_tag($tag),
+                ))};
+                built_extractor = {($extractor, $name)};
+                extra_tags = {$extra_tags};
+                body = {$($body)*};
+            }
+        }
+    };
 
-	// `obj` error handling
-	(
-		@internal {
-			remaining_input = {obj $name:ident $($anything:tt)*};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query_internals::compile_error!(
-			$crate::query::query_internals::concat!(
-				"expected a global type tag in the form `obj ",
-				$crate::query::query_internals::stringify!($name),
-				": <type>` or a tag expression in the form `obj ",
-				$crate::query::query_internals::stringify!($name),
-				" in <expr>` but instead got `",
-				$crate::query::query_internals::stringify!($($anything)*),
-				"`"
-			),
-		);
-	};
-	(
-		@internal {
-			remaining_input = {obj $($anything:tt)*};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query_internals::compile_error!(
-			$crate::query::query_internals::concat!(
-				"expected an identifier after `obj`; got `",
-				$crate::query::query_internals::stringify!($($anything)*),
-				"`"
-			),
-		);
-	};
+    // `obj` error handling
+    (
+        @internal {
+            remaining_input = {obj $name:ident $($anything:tt)*};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query_internals::compile_error!(
+            $crate::query::query_internals::concat!(
+                "expected a global type tag in the form `obj ",
+                $crate::query::query_internals::stringify!($name),
+                ": <type>` or a tag expression in the form `obj ",
+                $crate::query::query_internals::stringify!($name),
+                " in <expr>` but instead got `",
+                $crate::query::query_internals::stringify!($($anything)*),
+                "`"
+            ),
+        );
+    };
+    (
+        @internal {
+            remaining_input = {obj $($anything:tt)*};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query_internals::compile_error!(
+            $crate::query::query_internals::concat!(
+                "expected an identifier after `obj`; got `",
+                $crate::query::query_internals::stringify!($($anything)*),
+                "`"
+            ),
+        );
+    };
 
-	// `ref`
-	(
-		@internal {
-			remaining_input = {ref $name:ident : $ty:ty $(, $($rest:tt)*)?};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query! {
-			@internal {
-				remaining_input = {$($($rest)*)?};
-				built_parts = {($parts, $crate::query::query_internals::RefQueryPart(
-					$crate::query::query_internals::get_tag::<$ty>(),
-				))};
-				built_extractor = {($extractor, $name)};
-				extra_tags = {$extra_tags};
-				body = {$($body)*};
-			}
-		}
-	};
-	(
-		@internal {
-			remaining_input = {ref $name:ident in $tag:expr $(, $($rest:tt)*)?};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query! {
-			@internal {
-				remaining_input = {$($($rest)*)?};
-				built_parts = {($parts, $crate::query::query_internals::RefQueryPart(
-					$crate::query::query_internals::from_tag($tag),
-				))};
-				built_extractor = {($extractor, $name)};
-				extra_tags = {$extra_tags};
-				body = {$($body)*};
-			}
-		}
-	};
+    // `ref`
+    (
+        @internal {
+            remaining_input = {ref $name:ident : $ty:ty $(, $($rest:tt)*)?};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query! {
+            @internal {
+                remaining_input = {$($($rest)*)?};
+                built_parts = {($parts, $crate::query::query_internals::RefQueryPart(
+                    $crate::query::query_internals::get_tag::<$ty>(),
+                ))};
+                built_extractor = {($extractor, $name)};
+                extra_tags = {$extra_tags};
+                body = {$($body)*};
+            }
+        }
+    };
+    (
+        @internal {
+            remaining_input = {ref $name:ident in $tag:expr $(, $($rest:tt)*)?};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query! {
+            @internal {
+                remaining_input = {$($($rest)*)?};
+                built_parts = {($parts, $crate::query::query_internals::RefQueryPart(
+                    $crate::query::query_internals::from_tag($tag),
+                ))};
+                built_extractor = {($extractor, $name)};
+                extra_tags = {$extra_tags};
+                body = {$($body)*};
+            }
+        }
+    };
 
-	// `ref` error handling
-	(
-		@internal {
-			remaining_input = {ref $name:ident $($anything:tt)*};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query_internals::compile_error!(
-			$crate::query::query_internals::concat!(
-				"expected a global type tag in the form `ref ",
-				$crate::query::query_internals::stringify!($name),
-				": <type>` or a tag expression in the form `ref ",
-				$crate::query::query_internals::stringify!($name),
-				" in <expr>` but instead got `",
-				$crate::query::query_internals::stringify!($($anything)*),
-				"`"
-			),
-		);
-	};
-	(
-		@internal {
-			remaining_input = {ref $($anything:tt)*};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query_internals::compile_error!(
-			$crate::query::query_internals::concat!(
-				"expected an identifier after `ref`; got `",
-				$crate::query::query_internals::stringify!($($anything)*),
-				"`"
-			),
-		);
-	};
+    // `ref` error handling
+    (
+        @internal {
+            remaining_input = {ref $name:ident $($anything:tt)*};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query_internals::compile_error!(
+            $crate::query::query_internals::concat!(
+                "expected a global type tag in the form `ref ",
+                $crate::query::query_internals::stringify!($name),
+                ": <type>` or a tag expression in the form `ref ",
+                $crate::query::query_internals::stringify!($name),
+                " in <expr>` but instead got `",
+                $crate::query::query_internals::stringify!($($anything)*),
+                "`"
+            ),
+        );
+    };
+    (
+        @internal {
+            remaining_input = {ref $($anything:tt)*};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query_internals::compile_error!(
+            $crate::query::query_internals::concat!(
+                "expected an identifier after `ref`; got `",
+                $crate::query::query_internals::stringify!($($anything)*),
+                "`"
+            ),
+        );
+    };
 
-	// `mut`
-	(
-		@internal {
-			remaining_input = {mut $name:ident : $ty:ty $(, $($rest:tt)*)?};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query! {
-			@internal {
-				remaining_input = {$($($rest)*)?};
-				built_parts = {($parts, $crate::query::query_internals::MutQueryPart(
-					$crate::query::query_internals::get_tag::<$ty>(),
-				))};
-				built_extractor = {($extractor, $name)};
-				extra_tags = {$extra_tags};
-				body = {$($body)*};
-			}
-		}
-	};
-	(
-		@internal {
-			remaining_input = {mut $name:ident in $tag:expr $(, $($rest:tt)*)?};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query! {
-			@internal {
-				remaining_input = {$($($rest)*)?};
-				built_parts = {($parts, $crate::query::query_internals::MutQueryPart(
-					$crate::query::query_internals::from_tag($tag),
-				))};
-				built_extractor = {($extractor, $name)};
-				extra_tags = {$extra_tags};
-				body = {$($body)*};
-			}
-		}
-	};
+    // `mut`
+    (
+        @internal {
+            remaining_input = {mut $name:ident : $ty:ty $(, $($rest:tt)*)?};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query! {
+            @internal {
+                remaining_input = {$($($rest)*)?};
+                built_parts = {($parts, $crate::query::query_internals::MutQueryPart(
+                    $crate::query::query_internals::get_tag::<$ty>(),
+                ))};
+                built_extractor = {($extractor, $name)};
+                extra_tags = {$extra_tags};
+                body = {$($body)*};
+            }
+        }
+    };
+    (
+        @internal {
+            remaining_input = {mut $name:ident in $tag:expr $(, $($rest:tt)*)?};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query! {
+            @internal {
+                remaining_input = {$($($rest)*)?};
+                built_parts = {($parts, $crate::query::query_internals::MutQueryPart(
+                    $crate::query::query_internals::from_tag($tag),
+                ))};
+                built_extractor = {($extractor, $name)};
+                extra_tags = {$extra_tags};
+                body = {$($body)*};
+            }
+        }
+    };
 
-	// `mut` error handling
-	(
-		@internal {
-			remaining_input = {mut $name:ident $($anything:tt)*};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query_internals::compile_error!(
-			$crate::query::query_internals::concat!(
-				"expected a global type tag in the form `mut ",
-				$crate::query::query_internals::stringify!($name),
-				": <type>` or a tag expression in the form `mut ",
-				$crate::query::query_internals::stringify!($name),
-				" in <expr>` but instead got `",
-				$crate::query::query_internals::stringify!($($anything)*),
-				"`"
-			),
-		);
-	};
-	(
-		@internal {
-			remaining_input = {mut $($anything:tt)*};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query_internals::compile_error!(
-			$crate::query::query_internals::concat!(
-				"expected an identifier after `mut`; got `",
-				$crate::query::query_internals::stringify!($($anything)*),
-				"`"
-			),
-		);
-	};
+    // `mut` error handling
+    (
+        @internal {
+            remaining_input = {mut $name:ident $($anything:tt)*};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query_internals::compile_error!(
+            $crate::query::query_internals::concat!(
+                "expected a global type tag in the form `mut ",
+                $crate::query::query_internals::stringify!($name),
+                ": <type>` or a tag expression in the form `mut ",
+                $crate::query::query_internals::stringify!($name),
+                " in <expr>` but instead got `",
+                $crate::query::query_internals::stringify!($($anything)*),
+                "`"
+            ),
+        );
+    };
+    (
+        @internal {
+            remaining_input = {mut $($anything:tt)*};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query_internals::compile_error!(
+            $crate::query::query_internals::concat!(
+                "expected an identifier after `mut`; got `",
+                $crate::query::query_internals::stringify!($($anything)*),
+                "`"
+            ),
+        );
+    };
 
-	// `oref`
-	(
-		@internal {
-			remaining_input = {oref $name:ident : $ty:ty $(, $($rest:tt)*)?};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query! {
-			@internal {
-				remaining_input = {$($($rest)*)?};
-				built_parts = {($parts, $crate::query::query_internals::ORefQueryPart(
-					$crate::query::query_internals::get_tag::<$ty>(),
-				))};
-				built_extractor = {($extractor, $name)};
-				extra_tags = {$extra_tags};
-				body = {$($body)*};
-			}
-		}
-	};
-	(
-		@internal {
-			remaining_input = {oref $name:ident in $tag:expr $(, $($rest:tt)*)?};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query! {
-			@internal {
-				remaining_input = {$($($rest)*)?};
-				built_parts = {($parts, $crate::query::query_internals::ORefQueryPart(
-					$crate::query::query_internals::from_tag($tag),
-				))};
-				built_extractor = {($extractor, $name)};
-				extra_tags = {$extra_tags};
-				body = {$($body)*};
-			}
-		}
-	};
+    // `oref`
+    (
+        @internal {
+            remaining_input = {oref $name:ident : $ty:ty $(, $($rest:tt)*)?};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query! {
+            @internal {
+                remaining_input = {$($($rest)*)?};
+                built_parts = {($parts, $crate::query::query_internals::ORefQueryPart(
+                    $crate::query::query_internals::get_tag::<$ty>(),
+                ))};
+                built_extractor = {($extractor, $name)};
+                extra_tags = {$extra_tags};
+                body = {$($body)*};
+            }
+        }
+    };
+    (
+        @internal {
+            remaining_input = {oref $name:ident in $tag:expr $(, $($rest:tt)*)?};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query! {
+            @internal {
+                remaining_input = {$($($rest)*)?};
+                built_parts = {($parts, $crate::query::query_internals::ORefQueryPart(
+                    $crate::query::query_internals::from_tag($tag),
+                ))};
+                built_extractor = {($extractor, $name)};
+                extra_tags = {$extra_tags};
+                body = {$($body)*};
+            }
+        }
+    };
 
-	// `oref` error handling
-	(
-		@internal {
-			remaining_input = {oref $name:ident $($anything:tt)*};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query_internals::compile_error!(
-			$crate::query::query_internals::concat!(
-				"expected a global type tag in the form `oref ",
-				$crate::query::query_internals::stringify!($name),
-				": <type>` or a tag expression in the form `oref ",
-				$crate::query::query_internals::stringify!($name),
-				" in <expr>` but instead got `",
-				$crate::query::query_internals::stringify!($($anything)*),
-				"`"
-			),
-		);
-	};
-	(
-		@internal {
-			remaining_input = {oref $($anything:tt)*};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query_internals::compile_error!(
-			$crate::query::query_internals::concat!(
-				"expected an identifier after `oref`; got `",
-				$crate::query::query_internals::stringify!($($anything)*),
-				"`"
-			),
-		);
-	};
+    // `oref` error handling
+    (
+        @internal {
+            remaining_input = {oref $name:ident $($anything:tt)*};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query_internals::compile_error!(
+            $crate::query::query_internals::concat!(
+                "expected a global type tag in the form `oref ",
+                $crate::query::query_internals::stringify!($name),
+                ": <type>` or a tag expression in the form `oref ",
+                $crate::query::query_internals::stringify!($name),
+                " in <expr>` but instead got `",
+                $crate::query::query_internals::stringify!($($anything)*),
+                "`"
+            ),
+        );
+    };
+    (
+        @internal {
+            remaining_input = {oref $($anything:tt)*};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query_internals::compile_error!(
+            $crate::query::query_internals::concat!(
+                "expected an identifier after `oref`; got `",
+                $crate::query::query_internals::stringify!($($anything)*),
+                "`"
+            ),
+        );
+    };
 
-	// `omut`
-	(
-		@internal {
-			remaining_input = {omut $name:ident : $ty:ty $(, $($rest:tt)*)?};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query! {
-			@internal {
-				remaining_input = {$($($rest)*)?};
-				built_parts = {($parts, $crate::query::query_internals::OMutQueryPart(
-					$crate::query::query_internals::get_tag::<$ty>(),
-				))};
-				built_extractor = {($extractor, mut $name)};
-				extra_tags = {$extra_tags};
-				body = {$($body)*};
-			}
-		}
-	};
-	(
-		@internal {
-			remaining_input = {omut $name:ident in $tag:expr $(, $($rest:tt)*)?};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query! {
-			@internal {
-				remaining_input = {$($($rest)*)?};
-				built_parts = {($parts, $crate::query::query_internals::OMutQueryPart(
-					$crate::query::query_internals::from_tag($tag),
-				))};
-				built_extractor = {($extractor, mut $name)};
-				extra_tags = {$extra_tags};
-				body = {$($body)*};
-			}
-		}
-	};
+    // `omut`
+    (
+        @internal {
+            remaining_input = {omut $name:ident : $ty:ty $(, $($rest:tt)*)?};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query! {
+            @internal {
+                remaining_input = {$($($rest)*)?};
+                built_parts = {($parts, $crate::query::query_internals::OMutQueryPart(
+                    $crate::query::query_internals::get_tag::<$ty>(),
+                ))};
+                built_extractor = {($extractor, mut $name)};
+                extra_tags = {$extra_tags};
+                body = {$($body)*};
+            }
+        }
+    };
+    (
+        @internal {
+            remaining_input = {omut $name:ident in $tag:expr $(, $($rest:tt)*)?};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query! {
+            @internal {
+                remaining_input = {$($($rest)*)?};
+                built_parts = {($parts, $crate::query::query_internals::OMutQueryPart(
+                    $crate::query::query_internals::from_tag($tag),
+                ))};
+                built_extractor = {($extractor, mut $name)};
+                extra_tags = {$extra_tags};
+                body = {$($body)*};
+            }
+        }
+    };
 
-	// `omut` error handling
-	(
-		@internal {
-			remaining_input = {omut $name:ident $($anything:tt)*};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query_internals::compile_error!(
-			$crate::query::query_internals::concat!(
-				"expected a global type tag in the form `omut ",
-				$crate::query::query_internals::stringify!($name),
-				": <type>` or a tag expression in the form `omut ",
-				$crate::query::query_internals::stringify!($name),
-				" in <expr>` but instead got `",
-				$crate::query::query_internals::stringify!($($anything)*),
-				"`"
-			),
-		);
-	};
-	(
-		@internal {
-			remaining_input = {omut $($anything:tt)*};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query_internals::compile_error!(
-			$crate::query::query_internals::concat!(
-				"expected an identifier after `omut`; got `",
-				$crate::query::query_internals::stringify!($($anything)*),
-				"`"
-			),
-		);
-	};
+    // `omut` error handling
+    (
+        @internal {
+            remaining_input = {omut $name:ident $($anything:tt)*};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query_internals::compile_error!(
+            $crate::query::query_internals::concat!(
+                "expected a global type tag in the form `omut ",
+                $crate::query::query_internals::stringify!($name),
+                ": <type>` or a tag expression in the form `omut ",
+                $crate::query::query_internals::stringify!($name),
+                " in <expr>` but instead got `",
+                $crate::query::query_internals::stringify!($($anything)*),
+                "`"
+            ),
+        );
+    };
+    (
+        @internal {
+            remaining_input = {omut $($anything:tt)*};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query_internals::compile_error!(
+            $crate::query::query_internals::concat!(
+                "expected an identifier after `omut`; got `",
+                $crate::query::query_internals::stringify!($($anything)*),
+                "`"
+            ),
+        );
+    };
 
-	// Tags
-	(
-		@internal {
-			remaining_input = {tags $tag:expr $(, $($rest:tt)*)?};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query! {
-			@internal {
-				remaining_input = {$($($rest)*)?};
-				built_parts = {$parts};
-				built_extractor = {$extractor};
-				extra_tags = {$crate::query::query_internals::Iterator::join(
-					$extra_tags,
-					$tag,
-				)};
-				body = {$($body)*};
-			}
-		}
-	};
-	(
-		@internal {
-			remaining_input = {tag $tag:expr $(, $($rest:tt)*)?};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query! {
-			@internal {
-				remaining_input = {$($($rest)*)?};
-				built_parts = {$parts};
-				built_extractor = {$extractor};
-				extra_tags = {$crate::query::query_internals::Iterator::chain(
-					$extra_tags,
-					[$crate::query::query_internals::from_tag_virtual($tag)],
-				)};
-				body = {$($body)*};
-			}
-		}
-	};
+    // Tags
+    (
+        @internal {
+            remaining_input = {tags $tag:expr $(, $($rest:tt)*)?};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query! {
+            @internal {
+                remaining_input = {$($($rest)*)?};
+                built_parts = {$parts};
+                built_extractor = {$extractor};
+                extra_tags = {$crate::query::query_internals::Iterator::join(
+                    $extra_tags,
+                    $tag,
+                )};
+                body = {$($body)*};
+            }
+        }
+    };
+    (
+        @internal {
+            remaining_input = {tag $tag:expr $(, $($rest:tt)*)?};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query! {
+            @internal {
+                remaining_input = {$($($rest)*)?};
+                built_parts = {$parts};
+                built_extractor = {$extractor};
+                extra_tags = {$crate::query::query_internals::Iterator::chain(
+                    $extra_tags,
+                    [$crate::query::query_internals::from_tag_virtual($tag)],
+                )};
+                body = {$($body)*};
+            }
+        }
+    };
 
-	// Tags error handling
-	(
-		@internal {
-			remaining_input = {tags $($anything:tt)*};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query_internals::compile_error!(
-			$crate::query::query_internals::concat!(
-				"expected an expression after `tags`; got `",
-				$crate::query::query_internals::stringify!($($anything)*),
-				"`"
-			),
-		);
-	};
-	(
-		@internal {
-			remaining_input = {tag $($anything:tt)*};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query_internals::compile_error!(
-			$crate::query::query_internals::concat!(
-				"expected an expression after `tag`; got `",
-				$crate::query::query_internals::stringify!($($anything)*),
-				"`"
-			),
-		);
-	};
+    // Tags error handling
+    (
+        @internal {
+            remaining_input = {tags $($anything:tt)*};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query_internals::compile_error!(
+            $crate::query::query_internals::concat!(
+                "expected an expression after `tags`; got `",
+                $crate::query::query_internals::stringify!($($anything)*),
+                "`"
+            ),
+        );
+    };
+    (
+        @internal {
+            remaining_input = {tag $($anything:tt)*};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query_internals::compile_error!(
+            $crate::query::query_internals::concat!(
+                "expected an expression after `tag`; got `",
+                $crate::query::query_internals::stringify!($($anything)*),
+                "`"
+            ),
+        );
+    };
 
-	// General error handling
-	(
-		@internal {
-			remaining_input = {$($anything:tt)*};
-			built_parts = {$parts:expr};
-			built_extractor = {$extractor:pat};
-			extra_tags = {$extra_tags:expr};
-			body = {$($body:tt)*};
-		}
-	) => {
-		$crate::query::query_internals::compile_error!(
-			$crate::query::query_internals::concat!(
-				"expected `entity`, `slot`, `obj`, `ref`, `mut`, `oref`, `omut`, `tag`, or `tags`; got `",
-				$crate::query::query_internals::stringify!($($anything)*),
-				"`"
-			),
-		);
-	};
+    // General error handling
+    (
+        @internal {
+            remaining_input = {$($anything:tt)*};
+            built_parts = {$parts:expr};
+            built_extractor = {$extractor:pat};
+            extra_tags = {$extra_tags:expr};
+            body = {$($body:tt)*};
+        }
+    ) => {
+        $crate::query::query_internals::compile_error!(
+            $crate::query::query_internals::concat!(
+                "expected `entity`, `slot`, `obj`, `ref`, `mut`, `oref`, `omut`, `tag`, or `tags`; got `",
+                $crate::query::query_internals::stringify!($($anything)*),
+                "`"
+            ),
+        );
+    };
 }
 
 pub use query;
