@@ -1,8 +1,6 @@
 //! A re-implementation of the standard library's `TrustedRandomAccess` trait such that non-nightly
 //! users like us can implement it.
 
-use std::{marker::PhantomData, ptr::NonNull};
-
 use derive_where::derive_where;
 
 // === Core === //
@@ -109,34 +107,6 @@ impl<'a, T> RandomAccessIter for RandomAccessSliceRef<'a, T> {
 
     unsafe fn get_unchecked(&self, i: usize) -> Self::Item {
         self.0.get_unchecked(i)
-    }
-}
-
-pub struct RandomAccessSliceMut<'a, T> {
-    _ty: PhantomData<&'a mut [T]>,
-    ptr: NonNull<[T]>,
-}
-
-impl<'a, T> RandomAccessSliceMut<'a, T> {
-    pub fn new(slice: &'a mut [T]) -> Self {
-        Self {
-            _ty: PhantomData,
-            ptr: NonNull::from(slice),
-        }
-    }
-}
-
-impl<'a, T> RandomAccessIter for RandomAccessSliceMut<'a, T> {
-    type Item = &'a mut T;
-
-    const IS_FINITE: bool = true;
-
-    fn len(&self) -> usize {
-        self.ptr.len()
-    }
-
-    unsafe fn get_unchecked(&self, i: usize) -> Self::Item {
-        &mut *self.ptr.as_ptr().cast::<T>().add(i)
     }
 }
 

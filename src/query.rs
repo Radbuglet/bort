@@ -201,35 +201,18 @@ impl ArchetypeId {
 
     pub fn in_intersection(
         tags: impl IntoIterator<Item = RawTag>,
-    ) -> Vec<AnonymousArchetypeQueryInfo> {
+        include_entities: bool,
+    ) -> Vec<ArchetypeQueryInfo> {
         let token = MainThreadToken::acquire_fmt("enumerate archetypes in a tag intersection");
 
         let mut archetypes = Vec::new();
         Self::reify_tag_list(tags, |tags| {
             DbRoot::get(token).enumerate_tag_intersection(tags, |info| {
-                archetypes.push(AnonymousArchetypeQueryInfo {
+                archetypes.push(ArchetypeQueryInfo {
                     archetype: info.archetype.into_dangerous_archetype_id(),
                     heap_count: info.entities.len(),
                     last_heap_len: info.last_heap_len,
-                });
-            })
-        });
-
-        archetypes
-    }
-
-    pub fn in_intersection_with_entities(
-        tags: impl IntoIterator<Item = RawTag>,
-    ) -> Vec<NamedArchetypeQueryInfo> {
-        let token = MainThreadToken::acquire_fmt("enumerate archetypes in a tag intersection");
-
-        let mut archetypes = Vec::new();
-        Self::reify_tag_list(tags, |tags| {
-            DbRoot::get(token).enumerate_tag_intersection(tags, |info| {
-                archetypes.push(NamedArchetypeQueryInfo {
-                    archetype: info.archetype.into_dangerous_archetype_id(),
-                    last_heap_len: info.last_heap_len,
-                    entities: info.entities.clone(),
+                    entities: include_entities.then(|| info.entities.clone()),
                 });
             })
         });
@@ -239,13 +222,14 @@ impl ArchetypeId {
 }
 
 #[derive(Debug, Clone)]
-pub struct AnonymousArchetypeQueryInfo {
+pub struct ArchetypeQueryInfo {
     archetype: ArchetypeId,
     heap_count: usize,
     last_heap_len: usize,
+    entities: Option<Vec<Arc<[NMainCell<InertEntity>]>>>,
 }
 
-impl AnonymousArchetypeQueryInfo {
+impl ArchetypeQueryInfo {
     pub fn archetype(&self) -> ArchetypeId {
         self.archetype
     }
@@ -261,41 +245,8 @@ impl AnonymousArchetypeQueryInfo {
     pub fn heaps_for<T>(&self, storage: &Storage<T>) -> Vec<Arc<Heap<T>>> {
         DbRoot::heaps_from_archetype_aba(self.archetype.0, &storage.inner.borrow(&storage.token))
     }
-}
 
-#[derive(Debug, Clone)]
-pub struct NamedArchetypeQueryInfo {
-    archetype: ArchetypeId,
-    last_heap_len: usize,
-    entities: Vec<Arc<[NMainCell<InertEntity>]>>,
-}
-
-impl NamedArchetypeQueryInfo {
-    pub fn as_anonymous(&self) -> AnonymousArchetypeQueryInfo {
-        AnonymousArchetypeQueryInfo {
-            archetype: self.archetype,
-            heap_count: self.entities.len(),
-            last_heap_len: self.last_heap_len,
-        }
-    }
-
-    pub fn archetype(&self) -> ArchetypeId {
-        self.archetype
-    }
-
-    pub fn heap_count(&self) -> usize {
-        self.entities.len()
-    }
-
-    pub fn last_heap_len(&self) -> usize {
-        self.last_heap_len
-    }
-
-    pub fn heaps_for<T>(&self, storage: &Storage<T>) -> Vec<Arc<Heap<T>>> {
-        DbRoot::heaps_from_archetype_aba(self.archetype.0, &storage.inner.borrow(&storage.token))
-    }
-
-    // TODO: Expose `entities`
+    // TODO: Expose entities
 }
 
 // === Flushing === //
@@ -353,8 +304,7 @@ pub mod query_internals {
     };
 
     use super::{
-        borrow_flush_guard, AnonymousArchetypeQueryInfo, ArchetypeId, HasGlobalManagedTag, RawTag,
-        Tag,
+        borrow_flush_guard, ArchetypeId, ArchetypeQueryInfo, HasGlobalManagedTag, RawTag, Tag,
     };
 
     pub use {
@@ -364,23 +314,34 @@ pub mod query_internals {
 
     // === QueryHeap === //
 
+    /// A heap over which a [`QueryPart`] will be iterating.
     pub trait QueryHeap: Sized + 'static {
+        /// The set of storages from which the heap will be derived.
         type Storages;
+
+        /// An iterator over instances of this heap.
         type HeapIter: Iterator<Item = Self>;
 
+        /// An iterator over blocks in this heap, parameterized by the lifetime of the heap borrow
+		/// and the token used.
         #[rustfmt::skip]
         type BlockIter<'a, N>: RandomAccessIter<Item = Self::Block<'a, N>> where N: 'a + Token;
 
+        /// An iterator over blocks in this heap, parameterized by the lifetime of the heap borrow
+		/// and the token used.
         #[rustfmt::skip]
         type Block<'a, N> where N: 'a + Token;
 
+        /// Fetches the storages needed to fetch these heaps.
         fn storages() -> Self::Storages;
 
+        /// Fetches the set of heaps associated with this archetype.
         fn heaps_for_archetype(
             storages: &Self::Storages,
-            archetype: &AnonymousArchetypeQueryInfo,
+            archetype: &ArchetypeQueryInfo,
         ) -> Self::HeapIter;
 
+        /// Fetches the blocks present in this heap.
         fn blocks<'a, N: Token>(&'a self, token: &'a N) -> Self::BlockIter<'a, N>;
     }
 
@@ -398,7 +359,7 @@ pub mod query_internals {
 
         fn heaps_for_archetype(
             _storages: &Self::Storages,
-            _archetype: &AnonymousArchetypeQueryInfo,
+            _archetype: &ArchetypeQueryInfo,
         ) -> Self::HeapIter {
             iter::repeat(())
         }
@@ -424,7 +385,7 @@ pub mod query_internals {
 
         fn heaps_for_archetype(
             storages: &Self::Storages,
-            archetype: &AnonymousArchetypeQueryInfo,
+            archetype: &ArchetypeQueryInfo,
         ) -> Self::HeapIter {
             archetype.heaps_for(storages).into_iter()
         }
@@ -451,7 +412,7 @@ pub mod query_internals {
 
         fn heaps_for_archetype(
             storages: &Self::Storages,
-            archetype: &AnonymousArchetypeQueryInfo,
+            archetype: &ArchetypeQueryInfo,
         ) -> Self::HeapIter {
             A::heaps_for_archetype(&storages.0, archetype)
                 .zip(B::heaps_for_archetype(&storages.1, archetype))
@@ -464,77 +425,135 @@ pub mod query_internals {
 
     // === QueryGroupBorrow === //
 
-    pub trait QueryGroupBorrow<'a, B, L>: Sized {
+    /// The group borrow guard living for lifetime `'a` which can be acquired from a given cell `B`
+    /// and loaner token `L`.
+    pub trait QueryGroupBorrow<'guard, B, L>: Sized + 'guard {
+        #[rustfmt::skip]
+        type Iter<'iter>: Iterator<Item = Self::IterItem<'iter>> where Self: 'iter;
+
+        #[rustfmt::skip]
+		type IterItem<'iter> where Self: 'iter;
+
         fn try_borrow_group(
-            block: &'a B,
+            block: &'guard B,
             token: &'static MainThreadToken,
-            loaner: &'a mut L,
+            loaner: &'guard mut L,
         ) -> Option<Self>;
+
+        fn iter(&mut self) -> Self::Iter<'_>;
     }
 
     pub struct GroupBorrowSupported;
 
-    impl<'a, B, L> QueryGroupBorrow<'a, B, L> for GroupBorrowSupported {
+    impl<'guard, B, L> QueryGroupBorrow<'guard, B, L> for GroupBorrowSupported {
+        type Iter<'iter> = iter::Repeat<()>;
+        type IterItem<'iter> = ();
+
         fn try_borrow_group(
-            _block: &'a B,
+            _block: &'guard B,
             _token: &'static MainThreadToken,
-            _loaner: &'a mut L,
+            _loaner: &'guard mut L,
         ) -> Option<Self> {
             Some(GroupBorrowSupported)
+        }
+
+        fn iter(&mut self) -> Self::Iter<'_> {
+            iter::repeat(())
         }
     }
 
     pub enum GroupBorrowUnsupported {}
 
-    impl<'a, B, L> QueryGroupBorrow<'a, B, L> for GroupBorrowUnsupported {
+    impl<'guard, B, L> QueryGroupBorrow<'guard, B, L> for GroupBorrowUnsupported {
+        type Iter<'iter> = iter::Repeat<()>;
+        type IterItem<'iter> = ();
+
         fn try_borrow_group(
-            _block: &'a B,
+            _block: &'guard B,
             _token: &'static MainThreadToken,
-            _loaner: &'a mut L,
+            _loaner: &'guard mut L,
         ) -> Option<Self> {
             None
         }
-    }
 
-    impl<'a, 'b, T: 'static>
-        QueryGroupBorrow<'a, HeapSlotBlock<'b, T, MainThreadToken>, ImmutableBorrow<T>>
-        for MultiOptRef<'a, T>
-    {
-        fn try_borrow_group(
-            block: &'a HeapSlotBlock<'a, T, MainThreadToken>,
-            token: &'static MainThreadToken,
-            loaner: &'a mut ImmutableBorrow<T>,
-        ) -> Option<Self> {
-            block.values().try_borrow_all(token, loaner.downgrade_ref())
+        fn iter(&mut self) -> Self::Iter<'_> {
+            iter::repeat(())
         }
     }
 
-    impl<'a, 'b, T: 'static>
-        QueryGroupBorrow<'a, HeapSlotBlock<'b, T, MainThreadToken>, MutableBorrow<T>>
-        for MultiOptRefMut<'a, T>
+    impl<'guard, 'block, T: 'static>
+        QueryGroupBorrow<'guard, HeapSlotBlock<'block, T, MainThreadToken>, ImmutableBorrow<T>>
+        for MultiOptRef<'guard, T>
     {
+        #[rustfmt::skip]
+        type Iter<'iter> = std::slice::Iter<'iter, T> where Self: 'iter;
+
+		#[rustfmt::skip]
+        type IterItem<'iter> = &'iter T where Self: 'iter;
+
         fn try_borrow_group(
-            block: &'a HeapSlotBlock<'a, T, MainThreadToken>,
+            block: &'guard HeapSlotBlock<'block, T, MainThreadToken>,
             token: &'static MainThreadToken,
-            loaner: &'a mut MutableBorrow<T>,
+            loaner: &'guard mut ImmutableBorrow<T>,
+        ) -> Option<Self> {
+            block.values().try_borrow_all(token, loaner.downgrade_ref())
+        }
+
+        fn iter(&mut self) -> Self::Iter<'_> {
+            (**self).iter()
+        }
+    }
+
+    impl<'guard, 'block, T: 'static>
+        QueryGroupBorrow<'guard, HeapSlotBlock<'block, T, MainThreadToken>, MutableBorrow<T>>
+        for MultiOptRefMut<'guard, T>
+    {
+        #[rustfmt::skip]
+        type Iter<'iter> = std::slice::IterMut<'iter, T> where Self: 'iter;
+
+		#[rustfmt::skip]
+        type IterItem<'iter> = &'iter mut T where Self: 'iter;
+
+        fn try_borrow_group(
+            block: &'guard HeapSlotBlock<'block, T, MainThreadToken>,
+            token: &'static MainThreadToken,
+            loaner: &'guard mut MutableBorrow<T>,
         ) -> Option<Self> {
             block
                 .values()
                 .try_borrow_all_mut(token, loaner.downgrade_mut())
         }
+
+        fn iter(&mut self) -> Self::Iter<'_> {
+            (**self).iter_mut()
+        }
     }
 
-    impl<'a, ItemA, ItemB, B1, L1, B2, L2> QueryGroupBorrow<'a, (B1, B2), (L1, L2)> for (ItemA, ItemB)
+    impl<'guard, ItemA, ItemB, B1, L1, B2, L2> QueryGroupBorrow<'guard, (B1, B2), (L1, L2)>
+        for (ItemA, ItemB)
     where
-        ItemA: QueryGroupBorrow<'a, B1, L1>,
-        ItemB: QueryGroupBorrow<'a, B2, L2>,
+        ItemA: QueryGroupBorrow<'guard, B1, L1>,
+        ItemB: QueryGroupBorrow<'guard, B2, L2>,
     {
+        #[rustfmt::skip]
+        type Iter<'iter> = iter::Zip<ItemA::Iter<'iter>, ItemB::Iter<'iter>> where Self: 'iter;
+
+		#[rustfmt::skip]
+        type IterItem<'iter> = (ItemA::IterItem<'iter>, ItemB::IterItem<'iter>) where Self: 'iter;
+
         fn try_borrow_group(
-            block: &'a (B1, B2),
+            block: &'guard (B1, B2),
             token: &'static MainThreadToken,
-            loaner: &'a mut (L1, L2),
+            loaner: &'guard mut (L1, L2),
         ) -> Option<Self> {
-            todo!()
+            Some((
+                ItemA::try_borrow_group(&block.0, token, &mut loaner.0)?,
+                ItemB::try_borrow_group(&block.1, token, &mut loaner.1)?,
+            ))
+        }
+
+        fn iter(&mut self) -> Self::Iter<'_> {
+            self.0.iter().zip(self.1.iter())
         }
     }
 
@@ -545,40 +564,73 @@ pub mod query_internals {
         type Heap: QueryHeap;
         type TagIter: Iterator<Item = RawTag>;
         type AutokenLoan: Default;
-        type GroupBorrow<'a>: for<'b> QueryGroupBorrow<
-            'a,
-            <Self::Heap as QueryHeap>::Block<'b, MainThreadToken>,
+        type GroupBorrow<'guard>: for<'block_iter> QueryGroupBorrow<
+            'guard,
+            <Self::Heap as QueryHeap>::Block<'block_iter, MainThreadToken>,
             Self::AutokenLoan,
         >;
 
+        const NEEDS_ENTITIES: bool;
+
         fn tags(self) -> Self::TagIter;
+
+        fn elem_from_block_item<'elem, 'guard>(
+            elem: &'elem mut <Self::GroupBorrow<'guard> as QueryGroupBorrow<
+                'guard,
+                <Self::Heap as QueryHeap>::Block<'_, MainThreadToken>,
+                Self::AutokenLoan,
+            >>::IterItem<'_>,
+        ) -> Self::Input<'elem>;
 
         fn query<B>(
             self,
             extra_tags: impl IntoIterator<Item = RawTag>,
-            f: impl FnMut(Self::Input<'_>) -> ControlFlow<B>,
+            mut f: impl FnMut(Self::Input<'_>) -> ControlFlow<B>,
         ) -> ControlFlow<B> {
+            // Ensure that we're running on the main thread.
             let token = MainThreadToken::acquire_fmt("run a query");
-            let _guard = borrow_flush_guard();
-            let storages = <Self::Heap>::storages();
-            let archetypes = ArchetypeId::in_intersection(self.tags().chain(extra_tags));
 
+            // Ensure that users cannot flush the database while we're running a query.
+            let _guard = borrow_flush_guard();
+
+            // Fetch the storages used by this query.
+            let storages = <Self::Heap>::storages();
+
+            // Fetch the archetypes containing our desired intersection of tags.
+            let archetypes =
+                ArchetypeId::in_intersection(self.tags().chain(extra_tags), Self::NEEDS_ENTITIES);
+
+            // Acquire a loan to all the components we're going to borrow.
             let mut loaner = <Self::AutokenLoan>::default();
 
+            // For each archetype...
             for archetype in archetypes {
+                // Fetch the component heaps associated with that archetype.
                 let heaps = <Self::Heap>::heaps_for_archetype(&storages, &archetype);
 
+                // For each of those heaps...
                 for (heap_i, heap) in heaps.enumerate() {
+                    // Fetch the blocks comprising it.
                     let blocks = RandomAccessZip::new(RandomAccessEnumerate, heap.blocks(token));
 
+                    // For each block...
                     for (block_i, block) in blocks.into_iter() {
-                        if let Some(block) =
+                        // Attempt to run the fast-path...
+                        if let Some(mut block) =
                             <Self::GroupBorrow<'_>>::try_borrow_group(&block, token, &mut loaner)
                         {
-                            // Fast-path
-                        } else {
-                            // Slow-path
+                            for mut elem in block.iter() {
+                                f(Self::elem_from_block_item(&mut elem))?;
+                            }
+
+                            // N.B. we `continue` here rather than putting the slow path in an `else`
+                            // block because the lifetime of the `loaner` borrow extends into both
+                            // branches of the `if` expression.
+                            continue;
                         }
+
+                        // Otherwise, run the slow-path.
+                        // todo!();
                     }
                 }
             }
@@ -596,8 +648,14 @@ pub mod query_internals {
         type AutokenLoan = ();
         type GroupBorrow<'a> = GroupBorrowSupported;
 
+        const NEEDS_ENTITIES: bool = true;
+
         fn tags(self) -> Self::TagIter {
             iter::empty()
+        }
+
+        fn elem_from_block_item(elem: &mut ()) -> Self::Input<'_> {
+            todo!()
         }
     }
 
@@ -610,8 +668,14 @@ pub mod query_internals {
         type AutokenLoan = ();
         type GroupBorrow<'a> = GroupBorrowSupported;
 
+        const NEEDS_ENTITIES: bool = false;
+
         fn tags(self) -> Self::TagIter {
             iter::once(self.0.raw())
+        }
+
+        fn elem_from_block_item(elem: &mut ()) -> Self::Input<'_> {
+            todo!()
         }
     }
 
@@ -624,8 +688,14 @@ pub mod query_internals {
         type AutokenLoan = ();
         type GroupBorrow<'a> = GroupBorrowSupported;
 
+        const NEEDS_ENTITIES: bool = true;
+
         fn tags(self) -> Self::TagIter {
             iter::once(self.0.raw())
+        }
+
+        fn elem_from_block_item(elem: &mut ()) -> Self::Input<'_> {
+            todo!()
         }
     }
 
@@ -638,8 +708,14 @@ pub mod query_internals {
         type AutokenLoan = ImmutableBorrow<T>;
         type GroupBorrow<'a> = GroupBorrowUnsupported;
 
+        const NEEDS_ENTITIES: bool = true;
+
         fn tags(self) -> Self::TagIter {
             iter::once(self.0.raw())
+        }
+
+        fn elem_from_block_item(_elem: &mut ()) -> Self::Input<'_> {
+            unreachable!()
         }
     }
 
@@ -652,8 +728,14 @@ pub mod query_internals {
         type AutokenLoan = MutableBorrow<T>;
         type GroupBorrow<'a> = GroupBorrowUnsupported;
 
+        const NEEDS_ENTITIES: bool = true;
+
         fn tags(self) -> Self::TagIter {
             iter::once(self.0.raw())
+        }
+
+        fn elem_from_block_item(_elem: &mut ()) -> Self::Input<'_> {
+            unreachable!()
         }
     }
 
@@ -666,8 +748,14 @@ pub mod query_internals {
         type AutokenLoan = ImmutableBorrow<T>;
         type GroupBorrow<'a> = MultiOptRef<'a, T>;
 
+        const NEEDS_ENTITIES: bool = false;
+
         fn tags(self) -> Self::TagIter {
             iter::once(self.0.raw())
+        }
+
+        fn elem_from_block_item<'elem>(elem: &'elem mut &T) -> Self::Input<'elem> {
+            elem
         }
     }
 
@@ -680,8 +768,14 @@ pub mod query_internals {
         type AutokenLoan = MutableBorrow<T>;
         type GroupBorrow<'a> = MultiOptRefMut<'a, T>;
 
+        const NEEDS_ENTITIES: bool = false;
+
         fn tags(self) -> Self::TagIter {
             iter::once(self.0.raw())
+        }
+
+        fn elem_from_block_item<'elem>(elem: &'elem mut &mut T) -> Self::Input<'elem> {
+            elem
         }
     }
 
@@ -692,8 +786,23 @@ pub mod query_internals {
         type AutokenLoan = (A::AutokenLoan, B::AutokenLoan);
         type GroupBorrow<'a> = (A::GroupBorrow<'a>, B::GroupBorrow<'a>);
 
+        const NEEDS_ENTITIES: bool = A::NEEDS_ENTITIES || B::NEEDS_ENTITIES;
+
         fn tags(self) -> Self::TagIter {
             self.0.tags().chain(self.1.tags())
+        }
+
+        fn elem_from_block_item<'elem, 'guard>(
+            elem: &'elem mut <Self::GroupBorrow<'guard> as QueryGroupBorrow<
+                'guard,
+                <Self::Heap as QueryHeap>::Block<'_, MainThreadToken>,
+                Self::AutokenLoan,
+            >>::IterItem<'_>,
+        ) -> Self::Input<'elem> {
+            (
+                A::elem_from_block_item(&mut elem.0),
+                B::elem_from_block_item(&mut elem.1),
+            )
         }
     }
 
@@ -704,9 +813,13 @@ pub mod query_internals {
         type AutokenLoan = ();
         type GroupBorrow<'a> = GroupBorrowSupported;
 
+        const NEEDS_ENTITIES: bool = false;
+
         fn tags(self) -> Self::TagIter {
             iter::empty()
         }
+
+        fn elem_from_block_item(_elem: &mut ()) -> Self::Input<'_> {}
     }
 
     pub fn get_tag<T: 'static + HasGlobalManagedTag>() -> Tag<T::Component> {
