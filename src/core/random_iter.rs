@@ -136,7 +136,7 @@ impl<'a, T> RandomAccessIter for RandomAccessSliceMut<'a, T> {
     }
 
     unsafe fn get_unchecked(&self, i: usize) -> Self::Item {
-        unsafe { &mut *self.ptr.as_ptr().cast::<T>().add(i) }
+        &mut *self.ptr.as_ptr().cast::<T>().add(i)
     }
 }
 
@@ -208,5 +208,49 @@ where
 
     unsafe fn get_unchecked(&self, i: usize) -> Self::Item {
         self.1.map(self.0.get_unchecked(i))
+    }
+}
+
+// === Repeat === //
+
+#[derive(Debug, Clone)]
+pub struct RandomAccessRepeat<T>(T);
+
+impl<T> RandomAccessRepeat<T> {
+    pub fn new(value: T) -> Self {
+        Self(value)
+    }
+}
+
+impl<T: Clone> RandomAccessIter for RandomAccessRepeat<T> {
+    type Item = T;
+
+    const IS_FINITE: bool = false;
+
+    fn len(&self) -> usize {
+        usize::MAX
+    }
+
+    unsafe fn get_unchecked(&self, _i: usize) -> Self::Item {
+        self.0.clone()
+    }
+}
+
+// === Enumerate === //
+
+#[derive(Debug, Clone)]
+pub struct RandomAccessEnumerate;
+
+impl RandomAccessIter for RandomAccessEnumerate {
+    type Item = usize;
+
+    const IS_FINITE: bool = false;
+
+    fn len(&self) -> usize {
+        usize::MAX
+    }
+
+    unsafe fn get_unchecked(&self, i: usize) -> Self::Item {
+        i
     }
 }
