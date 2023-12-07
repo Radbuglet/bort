@@ -263,10 +263,10 @@ impl<T> Arena for FreeListArena<T> {
     type Value = T;
     type AbaPtr = FreeListAbaPtr<T>;
 
-	#[rustfmt::skip]
+    #[rustfmt::skip]
     type Ref<'a> = &'a T where Self: 'a;
 
-	#[rustfmt::skip]
+    #[rustfmt::skip]
     type RefMut<'a> = &'a mut T where Self: 'a;
 
     fn alloc_aba(&mut self, value: Self::Value) -> Self::AbaPtr {
@@ -395,10 +395,10 @@ impl<T: 'static> Arena for LeakyArena<T> {
     type Value = T;
     type AbaPtr = LeakyPtr<T>;
 
-	#[rustfmt::skip]
+    #[rustfmt::skip]
     type Ref<'a> = Ref<'a, T> where Self: 'a;
 
-	#[rustfmt::skip]
+    #[rustfmt::skip]
     type RefMut<'a> = RefMut<'a, T> where Self: 'a;
 
     fn alloc_aba(&mut self, value: Self::Value) -> Self::AbaPtr {
