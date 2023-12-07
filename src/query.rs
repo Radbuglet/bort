@@ -1,15 +1,32 @@
-use std::{any::TypeId, fmt, marker::PhantomData, sync::Arc};
+use std::{
+    any::{Any, TypeId},
+    fmt,
+    hash::Hash,
+    marker::PhantomData,
+    ops::ControlFlow,
+    sync::Arc,
+};
 
 use derive_where::derive_where;
 
 use crate::{
-    core::{cell::OptRef, heap::Heap, token::MainThreadToken, token_cell::NMainCell},
+    core::{
+        cell::{MultiRefCellIndex, OptRef},
+        heap::Heap,
+        token::MainThreadToken,
+        token_cell::NMainCell,
+    },
     database::{
         get_global_tag, DbRoot, InertArchetypeId, InertEntity, InertTag, RecursiveQueryGuardTy,
         ReifiedTagList,
     },
     entity::Storage,
-    util::misc::NamedTypeId,
+    util::{
+        hash_map::{ConstSafeBuildHasherDefault, FxHashMap},
+        iter::hash_one,
+        misc::NamedTypeId,
+    },
+    Entity,
 };
 
 // === Tag === //
@@ -281,7 +298,125 @@ pub fn borrow_flush_guard() -> FlushGuard {
     FlushGuard(DbRoot::get(token).borrow_query_guard(token))
 }
 
-// === Query Traits === //
+// === Query Version Tracking === //
+
+#[derive_where(Default)]
+pub struct QueryVersionMap<V> {
+    versions: FxHashMap<ReifiedQueryKey, V>,
+}
+
+struct ReifiedQueryKey {
+    hash: u64,
+    value: Box<dyn Any + Send + Sync>,
+}
+
+impl<V> fmt::Debug for QueryVersionMap<V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("QueryVersionMap").finish_non_exhaustive()
+    }
+}
+
+impl<V> QueryVersionMap<V> {
+    pub const fn new() -> Self {
+        Self {
+            versions: FxHashMap::with_hasher(ConstSafeBuildHasherDefault::new()),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.versions.clear();
+    }
+
+    pub fn entry<K>(&mut self, key: K, version_ctor: impl FnOnce() -> V) -> &mut V
+    where
+        K: QueryKey,
+    {
+        let hash = hash_one(self.versions.hasher(), &key);
+        let entry = self.versions.raw_entry_mut().from_hash(hash, |entry| {
+            hash == entry.hash
+                && entry
+                    .value
+                    .downcast_ref::<K>()
+                    .is_some_and(|candidate| candidate == &key)
+        });
+
+        match entry {
+            hashbrown::hash_map::RawEntryMut::Occupied(occupied) => occupied.into_mut(),
+            hashbrown::hash_map::RawEntryMut::Vacant(vacant) => {
+                vacant
+                    .insert_with_hasher(
+                        hash,
+                        ReifiedQueryKey {
+                            hash,
+                            value: Box::new(key),
+                        },
+                        version_ctor(),
+                        |entry| entry.hash,
+                    )
+                    .1
+            }
+        }
+    }
+}
+
+pub trait QueryKey: 'static + Sized + Send + Sync + Hash + PartialEq {}
+
+impl<T: 'static + Send + Sync + Hash + PartialEq> QueryKey for T {}
+
+// === Query Drivers === //
+
+pub trait QueryDriver {
+    #[rustfmt::skip]
+    type Item<'a> where Self: 'a;
+
+    #[rustfmt::skip]
+    type ArchetypeIterInfo<'a> where Self: 'a;
+
+    #[rustfmt::skip]
+    type HeapIterInfo<'a> where Self: 'a;
+
+    #[rustfmt::skip]
+    type BlockIterInfo<'a> where Self: 'a;
+
+    fn drive_query<B>(
+        &self,
+        query_key: impl QueryKey,
+        tags: impl IntoIterator<Item = RawTag>,
+        include_entities: bool,
+        process_arch: impl FnMut(&ArchetypeQueryInfo, Self::ArchetypeIterInfo<'_>) -> ControlFlow<B>,
+        process_arbitrary: impl FnMut(Entity) -> ControlFlow<B>,
+    ) -> ControlFlow<B>;
+
+    fn foreach_heap<B>(
+        &self,
+        arch: &ArchetypeQueryInfo,
+        arch_userdata: &mut Self::ArchetypeIterInfo<'_>,
+        process: impl FnMut(usize, Self::HeapIterInfo<'_>) -> ControlFlow<B>,
+    ) -> ControlFlow<B>;
+
+    fn foreach_block<B>(
+        &self,
+        heap: usize,
+        heap_userdata: &mut Self::HeapIterInfo<'_>,
+        process: impl FnMut(usize, Self::BlockIterInfo<'_>) -> ControlFlow<B>,
+    ) -> ControlFlow<B>;
+
+    fn foreach_element_in_full_block<B>(
+        &self,
+        block: usize,
+        block_userdata: &mut Self::BlockIterInfo<'_>,
+        process: impl FnMut(MultiRefCellIndex, Self::Item<'_>) -> ControlFlow<B>,
+    ) -> ControlFlow<B>;
+
+    fn foreach_element_in_semi_block<B>(
+        &self,
+        block: usize,
+        block_userdata: &mut Self::BlockIterInfo<'_>,
+        process: impl FnMut(MultiRefCellIndex, Self::Item<'_>) -> ControlFlow<B>,
+    ) -> ControlFlow<B>;
+}
+
+// === Query Macro === //
 
 #[doc(hidden)]
 pub mod query_internals {
