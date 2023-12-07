@@ -1,6 +1,8 @@
 //! A re-implementation of the standard library's `TrustedRandomAccess` trait such that non-nightly
 //! users like us can implement it.
 
+use std::{marker::PhantomData, ptr::NonNull};
+
 use derive_where::derive_where;
 
 // === Core === //
@@ -27,12 +29,20 @@ pub trait RandomAccessIter {
     #[allow(clippy::mut_from_ref)]
     unsafe fn get_unchecked(&self, i: usize) -> Self::Item;
 
+    fn get(&mut self, i: usize) -> Option<Self::Item> {
+        (i < self.len()).then(|| unsafe { self.get_unchecked(i) })
+    }
+
     fn iter(&mut self) -> RandomAccessIterAdapter<&mut Self> {
+        self.iter_since(0)
+    }
+
+    fn iter_since(&mut self, index: usize) -> RandomAccessIterAdapter<&mut Self> {
         let len = if Self::IS_FINITE { self.len() } else { 0 };
 
         RandomAccessIterAdapter {
             iter: self,
-            index: 0,
+            index,
             len,
         }
     }
@@ -41,11 +51,18 @@ pub trait RandomAccessIter {
     where
         Self: Sized,
     {
+        self.into_iter_since(0)
+    }
+
+    fn into_iter_since(self, index: usize) -> RandomAccessIterAdapter<Self>
+    where
+        Self: Sized,
+    {
         let len = if Self::IS_FINITE { self.len() } else { 0 };
 
         RandomAccessIterAdapter {
             iter: self,
-            index: 0,
+            index,
             len,
         }
     }
@@ -110,6 +127,34 @@ impl<'a, T> RandomAccessIter for RandomAccessSliceRef<'a, T> {
     }
 }
 
+pub struct RandomAccessSliceMut<'a, T> {
+    _ty: PhantomData<&'a mut [T]>,
+    ptr: NonNull<[T]>,
+}
+
+impl<'a, T> RandomAccessSliceMut<'a, T> {
+    pub fn new(slice: &'a mut [T]) -> Self {
+        Self {
+            _ty: PhantomData,
+            ptr: NonNull::from(slice),
+        }
+    }
+}
+
+impl<'a, T> RandomAccessIter for RandomAccessSliceMut<'a, T> {
+    type Item = &'a mut T;
+
+    const IS_FINITE: bool = true;
+
+    fn len(&self) -> usize {
+        self.ptr.len()
+    }
+
+    unsafe fn get_unchecked(&self, i: usize) -> Self::Item {
+        unsafe { &mut *self.ptr.as_ptr().cast::<T>().add(i) }
+    }
+}
+
 // === Zip === //
 
 #[derive(Clone)]
@@ -143,17 +188,17 @@ pub struct RandomAccessMap<I, F>(I, F);
 pub trait RandomAccessMapper<I> {
     type Output;
 
-    fn map(&self, i: I) -> Self::Output;
+    fn map(&self, idx: usize, input: I) -> Self::Output;
 }
 
 impl<F, I, O> RandomAccessMapper<I> for F
 where
-    F: Fn(I) -> O,
+    F: Fn(usize, I) -> O,
 {
     type Output = O;
 
-    fn map(&self, i: I) -> Self::Output {
-        self(i)
+    fn map(&self, idx: usize, input: I) -> Self::Output {
+        self(idx, input)
     }
 }
 
@@ -177,7 +222,7 @@ where
     }
 
     unsafe fn get_unchecked(&self, i: usize) -> Self::Item {
-        self.1.map(self.0.get_unchecked(i))
+        self.1.map(i, self.0.get_unchecked(i))
     }
 }
 
@@ -222,5 +267,30 @@ impl RandomAccessIter for RandomAccessEnumerate {
 
     unsafe fn get_unchecked(&self, i: usize) -> Self::Item {
         i
+    }
+}
+
+// === Take === //
+
+#[derive(Debug, Clone)]
+pub struct RandomAccessTake<T>(T, usize);
+
+impl<I> RandomAccessTake<I> {
+    pub fn new(iter: I, len: usize) -> Self {
+        Self(iter, len)
+    }
+}
+
+impl<I: RandomAccessIter> RandomAccessIter for RandomAccessTake<I> {
+    type Item = I::Item;
+
+    const IS_FINITE: bool = true;
+
+    fn len(&self) -> usize {
+        self.0.len().min(self.1)
+    }
+
+    unsafe fn get_unchecked(&self, i: usize) -> Self::Item {
+        self.0.get_unchecked(i)
     }
 }

@@ -229,7 +229,7 @@ impl<T> Heap<T> {
     pub(crate) fn blocks_expose_random_access<'a, N: Token>(
         &'a self,
         token: &'a N,
-    ) -> heap_iter::RandomAccessHeapBlockIter<'a, T, N> {
+    ) -> heap_block_iter::Iter<'a, T, N> {
         RandomAccessMap::new(
             RandomAccessZip::new(
                 RandomAccessSliceRef::new(self.values()),
@@ -237,7 +237,7 @@ impl<T> Heap<T> {
                     &self.slots,
                 )),
             ),
-            heap_iter::RandomAccessHeapBlockIterMapper(token),
+            heap_block_iter::Mapper(token),
         )
     }
 
@@ -282,44 +282,6 @@ impl<T> Drop for Heap<T> {
     }
 }
 
-pub(crate) mod heap_iter {
-    use super::*;
-
-    pub type RandomAccessHeapBlockIter<'a, T, N> = RandomAccessMap<
-        RandomAccessZip<
-            RandomAccessSliceRef<'a, NMultiOptRefCell<T>>,
-            RandomAccessSliceRef<'a, [NMainCell<Slot<T>>; MultiRefCellIndex::COUNT]>,
-        >,
-        RandomAccessHeapBlockIterMapper<'a, N>,
-    >;
-
-    #[derive_where(Clone)]
-    pub struct RandomAccessHeapBlockIterMapper<'a, N: Token>(pub(crate) &'a N);
-
-    impl<'a, T: 'static, N: Token>
-        RandomAccessMapper<(
-            &'a NMultiOptRefCell<T>,
-            &'a [NMainCell<Slot<T>>; MultiRefCellIndex::COUNT],
-        )> for RandomAccessHeapBlockIterMapper<'a, N>
-    {
-        type Output = HeapSlotBlock<'a, T, N>;
-
-        fn map(
-            &self,
-            (values, slots): (
-                &'a NMultiOptRefCell<T>,
-                &'a [NMainCell<Slot<T>>; MultiRefCellIndex::COUNT],
-            ),
-        ) -> Self::Output {
-            HeapSlotBlock {
-                token: self.0,
-                values,
-                slots,
-            }
-        }
-    }
-}
-
 #[derive(Debug)]
 #[derive_where(Copy, Clone)]
 pub struct HeapSlotBlock<'a, T: 'static, N: Token> {
@@ -341,8 +303,88 @@ impl<'a, T: 'static, N: Token> HeapSlotBlock<'a, T, N> {
         }
     }
 
+    pub(crate) fn slots_expose_random_access(&self) -> heap_block_slot_iter::Iter<'a, T, N> {
+        heap_block_slot_iter::Iter::new(
+            RandomAccessSliceRef::new(self.slots),
+            heap_block_slot_iter::Mapper {
+                token: self.token,
+                values: self.values,
+            },
+        )
+    }
+
     pub fn slots(&self) -> impl Iterator<Item = DirectSlot<'a, T>> + '_ {
-        MultiRefCellIndex::iter().map(|i| self.slot(i))
+        self.slots_expose_random_access().into_iter()
+    }
+}
+
+pub(crate) mod heap_block_iter {
+    use super::*;
+
+    pub type Iter<'a, T, N> = RandomAccessMap<
+        RandomAccessZip<
+            RandomAccessSliceRef<'a, NMultiOptRefCell<T>>,
+            RandomAccessSliceRef<'a, [NMainCell<Slot<T>>; MultiRefCellIndex::COUNT]>,
+        >,
+        Mapper<'a, N>,
+    >;
+
+    #[derive_where(Clone)]
+    pub struct Mapper<'a, N: Token>(pub(super) &'a N);
+
+    impl<'a, T: 'static, N: Token>
+        RandomAccessMapper<(
+            &'a NMultiOptRefCell<T>,
+            &'a [NMainCell<Slot<T>>; MultiRefCellIndex::COUNT],
+        )> for Mapper<'a, N>
+    {
+        type Output = HeapSlotBlock<'a, T, N>;
+
+        fn map(
+            &self,
+            _index: usize,
+            (values, slots): (
+                &'a NMultiOptRefCell<T>,
+                &'a [NMainCell<Slot<T>>; MultiRefCellIndex::COUNT],
+            ),
+        ) -> Self::Output {
+            HeapSlotBlock {
+                token: self.0,
+                values,
+                slots,
+            }
+        }
+    }
+}
+
+pub(crate) mod heap_block_slot_iter {
+    use crate::core::{
+        cell::MultiRefCellIndex,
+        random_iter::{RandomAccessMap, RandomAccessMapper, RandomAccessSliceRef},
+        token::Token,
+        token_cell::{NMainCell, NMultiOptRefCell},
+    };
+
+    use super::{DirectSlot, Slot};
+
+    pub type Iter<'a, T, N> =
+        RandomAccessMap<RandomAccessSliceRef<'a, NMainCell<Slot<T>>>, Mapper<'a, T, N>>;
+
+    pub struct Mapper<'a, T: 'static, N: Token> {
+        pub(super) token: &'a N,
+        pub(super) values: &'a NMultiOptRefCell<T>,
+    }
+
+    impl<'a, 'i, T: 'static, N: Token> RandomAccessMapper<&'i NMainCell<Slot<T>>> for Mapper<'a, T, N> {
+        type Output = DirectSlot<'a, T>;
+
+        fn map(&self, idx: usize, input: &'i NMainCell<Slot<T>>) -> Self::Output {
+            DirectSlot {
+                slot: input.get(self.token),
+                heap_value: self.values,
+                heap_index: MultiRefCellIndex::from_index(idx),
+            }
+        }
     }
 }
 

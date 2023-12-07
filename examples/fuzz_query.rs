@@ -8,7 +8,7 @@ fn main() {
         fn drop(&mut self) {
             if std::thread::panicking() {
                 println!("=== Database crash dump ===");
-                println!("{}", bort::debug::dump_database_state());
+                // println!("{}", bort::debug::dump_database_state());
             }
         }
     }
