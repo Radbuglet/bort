@@ -416,909 +416,909 @@ pub trait QueryDriver {
     ) -> ControlFlow<B>;
 }
 
-// === Query Macro === //
-
-#[doc(hidden)]
-pub mod query_internals {
-    use std::{iter, ops::ControlFlow, sync::Arc};
-
-    use autoken::{ImmutableBorrow, MutableBorrow};
-
-    use crate::{
-        core::{
-            cell::{MultiOptRef, MultiOptRefMut, MultiRefCellIndex},
-            heap::{
-                array_chunks, heap_block_iter, heap_block_slot_iter, DirectSlot, Heap,
-                HeapSlotBlock,
-            },
-            random_iter::{
-                RandomAccessIter, RandomAccessRepeat, RandomAccessSliceMut, RandomAccessSliceRef,
-                RandomAccessTake, RandomAccessZip,
-            },
-            token::{BorrowMutToken, BorrowToken, MainThreadToken, Token},
-            token_cell::NMainCell,
-        },
-        database::InertEntity,
-        entity::{CompMut, CompRef, Entity},
-        obj::Obj,
-        storage, Storage,
-    };
-
-    use super::{
-        borrow_flush_guard, ArchetypeId, ArchetypeQueryInfo, HasGlobalManagedTag, RawTag, Tag,
-    };
-
-    pub use {
-        cbit::cbit,
-        std::{compile_error, concat, iter::Iterator, stringify},
-    };
-
-    // === QueryHeap === //
-
-    /// A heap over which a [`QueryPart`] can iterate.
-    pub trait QueryHeap: Sized + 'static {
-        /// The set of storages from which the heap will be derived.
-        type Storages;
-
-        /// An iterator over instances of this heap.
-        type HeapIter: Iterator<Item = Self>;
-
-        /// An iterator over blocks in this heap, parameterized by the lifetime of the heap borrow
-        /// and the token used.
-        #[rustfmt::skip]
-        type BlockIter<'a, N>: RandomAccessIter<Item = Self::Block<'a, N>> where N: 'a + Token;
-
-        /// An iterator over blocks in this heap, parameterized by the lifetime of the heap borrow
-        /// and the token used.
-        #[rustfmt::skip]
-        type Block<'a, N> where N: 'a + Token;
-
-        /// Fetches the storages needed to fetch these heaps.
-        fn storages() -> Self::Storages;
-
-        /// Fetches the set of heaps associated with this archetype.
-        fn heaps_for_archetype(
-            storages: &Self::Storages,
-            archetype: &ArchetypeQueryInfo,
-        ) -> Self::HeapIter;
-
-        /// Fetches the blocks present in this heap.
-        fn blocks<'a, N: Token>(&'a self, token: &'a N) -> Self::BlockIter<'a, N>;
-    }
-
-    // No heap
-    impl QueryHeap for () {
-        type Storages = ();
-        type HeapIter = iter::Repeat<()>;
-
-        #[rustfmt::skip]
-        type BlockIter<'a, N> = RandomAccessRepeat<()> where N: 'a + Token;
-
-        #[rustfmt::skip]
-        type Block<'a, N> = () where N: 'a + Token;
-
-        fn storages() -> Self::Storages {}
-
-        fn heaps_for_archetype(
-            _storages: &Self::Storages,
-            _archetype: &ArchetypeQueryInfo,
-        ) -> Self::HeapIter {
-            iter::repeat(())
-        }
-
-        fn blocks<'a, N: Token>(&'a self, _token: &'a N) -> Self::BlockIter<'a, N> {
-            RandomAccessRepeat::new(())
-        }
-    }
-
-    // Arc<Heap<T>>
-    impl<T: 'static> QueryHeap for Arc<Heap<T>> {
-        type Storages = Storage<T>;
-        type HeapIter = std::vec::IntoIter<Self>;
-
-        #[rustfmt::skip]
-        type BlockIter<'a, N> = heap_block_iter::Iter<'a, T, N> where N: 'a + Token;
-
-        #[rustfmt::skip]
-        type Block<'a, N> = HeapSlotBlock<'a, T, N> where N: 'a + Token;
-
-        fn storages() -> Self::Storages {
-            storage::<T>()
-        }
-
-        fn heaps_for_archetype(
-            storages: &Self::Storages,
-            archetype: &ArchetypeQueryInfo,
-        ) -> Self::HeapIter {
-            archetype.heaps_for(storages).into_iter()
-        }
-
-        fn blocks<'a, N: Token>(&'a self, token: &'a N) -> Self::BlockIter<'a, N> {
-            self.blocks_expose_random_access(token)
-        }
-    }
-
-    // EntityQueryHeap
-    type EntityQueryHeap = Arc<[NMainCell<InertEntity>]>;
-
-    impl QueryHeap for EntityQueryHeap {
-        type Storages = ();
-        type HeapIter = std::vec::IntoIter<EntityQueryHeap>;
-
-        type BlockIter<'a, N> = RandomAccessSliceRef<'a, [NMainCell<InertEntity>; MultiRefCellIndex::COUNT]>
-        where N: 'a + Token;
-
-        type Block<'a, N> = &'a [NMainCell<InertEntity>; MultiRefCellIndex::COUNT]
-        where N: 'a + Token;
-
-        fn storages() -> Self::Storages {}
-
-        fn heaps_for_archetype(
-            _storages: &Self::Storages,
-            archetype: &ArchetypeQueryInfo,
-        ) -> Self::HeapIter {
-            archetype.entities.clone().unwrap().into_iter()
-        }
-
-        fn blocks<'a, N: Token>(&'a self, _token: &'a N) -> Self::BlockIter<'a, N> {
-            RandomAccessSliceRef::new(array_chunks(self))
-        }
-    }
-
-    // Joined heap
-    impl<A: QueryHeap, B: QueryHeap> QueryHeap for (A, B) {
-        type Storages = (A::Storages, B::Storages);
-        type HeapIter = iter::Zip<A::HeapIter, B::HeapIter>;
-
-        type BlockIter<'a, N> = RandomAccessZip<A::BlockIter<'a, N>, B::BlockIter<'a, N>>
-        where
-            N: 'a + Token;
-
-        #[rustfmt::skip]
-        type Block<'a, N> = (A::Block<'a, N>, B::Block<'a, N>) where N: 'a + Token;
-
-        fn storages() -> Self::Storages {
-            (A::storages(), B::storages())
-        }
-
-        fn heaps_for_archetype(
-            storages: &Self::Storages,
-            archetype: &ArchetypeQueryInfo,
-        ) -> Self::HeapIter {
-            A::heaps_for_archetype(&storages.0, archetype)
-                .zip(B::heaps_for_archetype(&storages.1, archetype))
-        }
-
-        fn blocks<'a, N: Token>(&'a self, token: &'a N) -> Self::BlockIter<'a, N> {
-            RandomAccessZip::new(self.0.blocks(token), self.1.blocks(token))
-        }
-    }
-
-    // === QueryGroupBorrow === //
-
-    pub trait QueryGroupBorrow<B, N, L: 'static>: 'static {
-        #[rustfmt::skip]
-        type Guard<'a> where B: 'a, N: 'a;
-
-        #[rustfmt::skip]
-        type Iter<'a>: RandomAccessIter<Item = Self::IterItem<'a>> where B: 'a, N: 'a;
-
-        #[rustfmt::skip]
-        type IterItem<'a> where B: 'a, N: 'a;
-
-        fn try_borrow_group<'a>(
-            block: &'a B,
-            token: &'a N,
-            loaner: &'a mut L,
-        ) -> Option<Self::Guard<'a>>;
-
-        fn iter<'a, 'g: 'a>(guard: &'a mut Self::Guard<'g>) -> Self::Iter<'a>
-        where
-            B: 'g,
-            N: 'g;
-    }
-
-    // SupportedQueryGroupBorrow
-    pub struct SupportedQueryGroupBorrow;
-
-    impl<B, N: Token, L: 'static> QueryGroupBorrow<B, N, L> for SupportedQueryGroupBorrow {
-        #[rustfmt::skip]
-        type Guard<'a> = () where B: 'a, N: 'a;
-
-        #[rustfmt::skip]
-        type Iter<'a> = RandomAccessRepeat<()> where B: 'a, N: 'a;
-
-        #[rustfmt::skip]
-        type IterItem<'a> = () where B: 'a, N: 'a;
-
-        fn try_borrow_group<'a>(
-            _block: &'a B,
-            _token: &'a N,
-            _loaner: &'a mut L,
-        ) -> Option<Self::Guard<'a>> {
-            Some(())
-        }
-
-        fn iter<'a, 'g: 'a>(_guard: &'a mut Self::Guard<'g>) -> Self::Iter<'a>
-        where
-            B: 'g,
-            N: 'g,
-        {
-            RandomAccessRepeat::new(())
-        }
-    }
-
-    // CompRefQueryGroupBorrow
-    pub struct CompRefQueryGroupBorrow;
-
-    impl<'b, N: BorrowToken<T>, T: 'static>
-        QueryGroupBorrow<HeapSlotBlock<'b, T, N>, N, ImmutableBorrow<T>>
-        for CompRefQueryGroupBorrow
-    {
-        #[rustfmt::skip]
-        type Guard<'a> = MultiOptRef<'a, T> where 'b: 'a, N: 'a;
-
-        #[rustfmt::skip]
-        type Iter<'a> = RandomAccessSliceRef<'a, T> where 'b: 'a, N: 'a;
-
-        #[rustfmt::skip]
-        type IterItem<'a> = &'a T where 'b: 'a, N: 'a;
-
-        fn try_borrow_group<'a>(
-            block: &'a HeapSlotBlock<'b, T, N>,
-            token: &'a N,
-            loaner: &'a mut ImmutableBorrow<T>,
-        ) -> Option<Self::Guard<'a>> {
-            block.values().try_borrow_all(token, loaner.downgrade_ref())
-        }
-
-        fn iter<'a, 'g: 'a>(guard: &'a mut Self::Guard<'g>) -> Self::Iter<'a>
-        where
-            'b: 'g,
-            N: 'g,
-        {
-            RandomAccessSliceRef::new(&**guard)
-        }
-    }
-
-    // CompMutQueryGroupBorrow
-    pub struct CompMutQueryGroupBorrow;
-
-    impl<'b, N: BorrowMutToken<T>, T: 'static>
-        QueryGroupBorrow<HeapSlotBlock<'b, T, N>, N, MutableBorrow<T>> for CompMutQueryGroupBorrow
-    {
-        #[rustfmt::skip]
-        type Guard<'a> = MultiOptRefMut<'a, T> where 'b: 'a, N: 'a;
-
-        #[rustfmt::skip]
-        type Iter<'a> = RandomAccessSliceMut<'a, T> where 'b: 'a, N: 'a;
-
-        #[rustfmt::skip]
-        type IterItem<'a> = &'a mut T where 'b: 'a, N: 'a;
-
-        fn try_borrow_group<'a>(
-            block: &'a HeapSlotBlock<'b, T, N>,
-            token: &'a N,
-            loaner: &'a mut MutableBorrow<T>,
-        ) -> Option<Self::Guard<'a>> {
-            block
-                .values()
-                .try_borrow_all_mut(token, loaner.downgrade_mut())
-        }
-
-        fn iter<'a, 'g: 'a>(guard: &'a mut Self::Guard<'g>) -> Self::Iter<'a>
-        where
-            'b: 'g,
-            N: 'g,
-        {
-            RandomAccessSliceMut::new(&mut **guard)
-        }
-    }
-
-    // EntityQueryGroupBorrow
-    pub struct EntityQueryGroupBorrow;
-
-    impl<'b, N: Token>
-        QueryGroupBorrow<&'b [NMainCell<InertEntity>; MultiRefCellIndex::COUNT], N, ()>
-        for EntityQueryGroupBorrow
-    {
-        #[rustfmt::skip]
-        type Guard<'a> = &'a [NMainCell<InertEntity>; MultiRefCellIndex::COUNT] where 'b: 'a, N: 'a;
-
-        #[rustfmt::skip]
-        type Iter<'a> = RandomAccessSliceRef<'a, NMainCell<InertEntity>> where 'b: 'a, N: 'a;
-
-        #[rustfmt::skip]
-        type IterItem<'a> = &'a NMainCell<InertEntity> where 'b: 'a, N: 'a;
-
-        fn try_borrow_group<'a>(
-            block: &'a &'b [NMainCell<InertEntity>; MultiRefCellIndex::COUNT],
-            _token: &'a N,
-            _loaner: &'a mut (),
-        ) -> Option<Self::Guard<'a>> {
-            Some(block)
-        }
-
-        fn iter<'a, 'g: 'a>(block: &'a mut Self::Guard<'g>) -> Self::Iter<'a>
-        where
-            'b: 'g,
-            N: 'g,
-        {
-            RandomAccessSliceRef::new(&**block)
-        }
-    }
-
-    // SlotQueryGroupBorrow
-    pub struct SlotQueryGroupBorrow;
-
-    impl<'b, T: 'static, N: Token> QueryGroupBorrow<HeapSlotBlock<'b, T, N>, N, ()>
-        for SlotQueryGroupBorrow
-    {
-        #[rustfmt::skip]
-        type Guard<'a> = HeapSlotBlock<'a, T, N> where 'b: 'a, N: 'a;
-
-        #[rustfmt::skip]
-        type Iter<'a> = heap_block_slot_iter::Iter<'a, T, N> where 'b: 'a, N: 'a;
-
-        #[rustfmt::skip]
-        type IterItem<'a> = DirectSlot<'a, T> where 'b: 'a, N: 'a;
-
-        fn try_borrow_group<'a>(
-            block: &'a HeapSlotBlock<'b, T, N>,
-            _token: &'a N,
-            _loaner: &'a mut (),
-        ) -> Option<Self::Guard<'a>> {
-            Some(*block)
-        }
-
-        fn iter<'a, 'g: 'a>(guard: &'a mut Self::Guard<'g>) -> Self::Iter<'a>
-        where
-            'b: 'g,
-            N: 'g,
-        {
-            guard.slots_expose_random_access()
-        }
-    }
-
-    // ChainBorrow
-    impl<ItemA, ItemB, BA, BB, LA, LB, N> QueryGroupBorrow<(BA, BB), N, (LA, LB)> for (ItemA, ItemB)
-    where
-        ItemA: QueryGroupBorrow<BA, N, LA>,
-        ItemB: QueryGroupBorrow<BB, N, LB>,
-        LA: 'static,
-        LB: 'static,
-    {
-        type Guard<'a> = (ItemA::Guard<'a>, ItemB::Guard<'a>)
-        where
-            (BA, BB): 'a,
-            N: 'a;
-
-        type Iter<'a> = RandomAccessZip<ItemA::Iter<'a>, ItemB::Iter<'a>>
-        where
-            (BA, BB): 'a,
-            N: 'a;
-
-        type IterItem<'a> = (ItemA::IterItem<'a>, ItemB::IterItem<'a>)
-        where
-            (BA, BB): 'a,
-            N: 'a;
-
-        fn try_borrow_group<'a>(
-            block: &'a (BA, BB),
-            token: &'a N,
-            loaner: &'a mut (LA, LB),
-        ) -> Option<Self::Guard<'a>> {
-            Some((
-                ItemA::try_borrow_group(&block.0, token, &mut loaner.0)?,
-                ItemB::try_borrow_group(&block.1, token, &mut loaner.1)?,
-            ))
-        }
-
-        fn iter<'a, 'g: 'a>(guard: &'a mut Self::Guard<'g>) -> Self::Iter<'a>
-        where
-            (BA, BB): 'g,
-            N: 'g,
-        {
-            RandomAccessZip::new(ItemA::iter(&mut guard.0), ItemB::iter(&mut guard.1))
-        }
-    }
-
-    // === QueryPart === //
-
-    type BlockForQueryPart<'a, Q> =
-        <<Q as QueryPart>::Heap as QueryHeap>::Block<'a, MainThreadToken>;
-
-    type IterItemForQueryPart<'a, 'b, Q> = <<Q as QueryPart>::GroupBorrow as QueryGroupBorrow<
-        BlockForQueryPart<'a, Q>,
-        MainThreadToken,
-        <Q as QueryPart>::GroupAutokenLoan,
-    >>::IterItem<'b>;
-
-    pub trait QueryPart: Sized {
-        type Input<'a>;
-        type TagIter: Iterator<Item = RawTag>;
-        type Heap: QueryHeap;
-        type GroupAutokenLoan: Default + 'static;
-        type GroupBorrow: for<'block> QueryGroupBorrow<
-            <Self::Heap as QueryHeap>::Block<'block, MainThreadToken>,
-            MainThreadToken,
-            Self::GroupAutokenLoan,
-        >;
-
-        const NEEDS_ENTITIES: bool;
-
-        fn tags(self) -> Self::TagIter;
-
-        fn elem_from_block_item<'elem>(
-            token: &'static MainThreadToken,
-            elem: &'elem mut IterItemForQueryPart<Self>,
-        ) -> Self::Input<'elem>;
-
-        fn call_slow_borrow<B>(
-            token: &'static MainThreadToken,
-            block: &BlockForQueryPart<Self>,
-            index: MultiRefCellIndex,
-            f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
-        ) -> ControlFlow<B>;
-
-        fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to>;
-
-        fn query<B>(
-            self,
-            extra_tags: impl IntoIterator<Item = RawTag>,
-            mut f: impl FnMut(Self::Input<'_>) -> ControlFlow<B>,
-        ) -> ControlFlow<B> {
-            // Ensure that we're running on the main thread.
-            let token = MainThreadToken::acquire_fmt("run a query");
-
-            // Ensure that users cannot flush the database while we're running a query.
-            let _guard = borrow_flush_guard();
-
-            // Fetch the storages used by this query.
-            let storages = <Self::Heap>::storages();
-
-            // Fetch the archetypes containing our desired intersection of tags.
-            let archetypes =
-                ArchetypeId::in_intersection(self.tags().chain(extra_tags), Self::NEEDS_ENTITIES);
-
-            // For each archetype...
-            for archetype in archetypes {
-                // Fetch the component heaps associated with that archetype.
-                let heaps = <Self::Heap>::heaps_for_archetype(&storages, &archetype);
-
-                // For each of those heaps...
-                for (heap_i, heap) in heaps.enumerate() {
-                    // Determine the length of this heap. If this is not the last heap in the
-                    // archetype, we know that it is entirely full and can set its length to something
-                    // really high.
-                    let is_last_heap = heap_i == archetype.heap_count() - 1;
-                    let heap_len_or_big = if is_last_heap {
-                        archetype.last_heap_len()
-                    } else {
-                        usize::MAX
-                    };
-
-                    let complete_heap_block_count_or_big =
-                        heap_len_or_big / MultiRefCellIndex::COUNT;
-
-                    // Fetch the blocks comprising it.
-                    let mut blocks = heap.blocks(token);
-                    let complete_blocks_if_truncated =
-                        RandomAccessTake::new(&mut blocks, complete_heap_block_count_or_big);
-
-                    // For each complete block...
-                    for block in complete_blocks_if_truncated.into_iter() {
-                        // Attempt to run the fast-path...
-                        let mut loaner = <Self::GroupAutokenLoan>::default();
-
-                        if let Some(mut block) =
-                            <Self::GroupBorrow>::try_borrow_group(&block, token, &mut loaner)
-                        {
-                            for mut elem in <Self::GroupBorrow>::iter(&mut block).into_iter() {
-                                f(Self::elem_from_block_item(token, &mut elem))?;
-                            }
-
-                            // N.B. we `continue` here rather than putting the slow path in an `else`
-                            // block because the lifetime of the `loaner` borrow extends into both
-                            // branches of the `if` expression.
-                            continue;
-                        }
-
-                        drop(loaner);
-
-                        // Otherwise, run the slow-path.
-                        for index in MultiRefCellIndex::iter() {
-                            Self::call_slow_borrow(token, &block, index, &mut f);
-                        }
-                    }
-
-                    // For the last incomplete block...
-                    let leftover = heap_len_or_big
-                        - complete_heap_block_count_or_big * MultiRefCellIndex::COUNT;
-
-                    if is_last_heap && leftover > 0 {
-                        let block = blocks.get(complete_heap_block_count_or_big).unwrap();
-
-                        for index in MultiRefCellIndex::iter().take(leftover) {
-                            Self::call_slow_borrow(token, &block, index, &mut f);
-                        }
-                    }
-                }
-            }
-
-            ControlFlow::Continue(())
-        }
-    }
-
-    pub struct EntityQueryPart;
-
-    impl QueryPart for EntityQueryPart {
-        type Input<'a> = Entity;
-        type TagIter = iter::Empty<RawTag>;
-        type Heap = EntityQueryHeap;
-        type GroupAutokenLoan = ();
-        type GroupBorrow = EntityQueryGroupBorrow;
-
-        const NEEDS_ENTITIES: bool = true;
-
-        fn tags(self) -> Self::TagIter {
-            iter::empty()
-        }
-
-        fn elem_from_block_item<'elem>(
-            token: &'static MainThreadToken,
-            elem: &'elem mut &NMainCell<InertEntity>,
-        ) -> Self::Input<'elem> {
-            elem.get(token).into_dangerous_entity()
-        }
-
-        fn call_slow_borrow<B>(
-            token: &'static MainThreadToken,
-            block: &BlockForQueryPart<Self>,
-            index: MultiRefCellIndex,
-            f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
-        ) -> ControlFlow<B> {
-            f(block[index as usize].get(token).into_dangerous_entity())
-        }
-
-        fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
-            src
-        }
-    }
-
-    pub struct SlotQueryPart<T: 'static>(pub Tag<T>);
-
-    impl<T: 'static> QueryPart for SlotQueryPart<T> {
-        type Input<'a> = DirectSlot<'a, T>;
-        type TagIter = iter::Once<RawTag>;
-        type Heap = Arc<Heap<T>>;
-        type GroupAutokenLoan = ();
-        type GroupBorrow = SlotQueryGroupBorrow;
-
-        const NEEDS_ENTITIES: bool = false;
-
-        fn tags(self) -> Self::TagIter {
-            iter::once(self.0.raw())
-        }
-
-        fn elem_from_block_item<'elem>(
-            _token: &'static MainThreadToken,
-            elem: &'elem mut DirectSlot<'_, T>,
-        ) -> Self::Input<'elem> {
-            *elem
-        }
-
-        fn call_slow_borrow<B>(
-            _token: &'static MainThreadToken,
-            block: &BlockForQueryPart<Self>,
-            index: MultiRefCellIndex,
-            f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
-        ) -> ControlFlow<B> {
-            f(block.slot(index))
-        }
-
-        fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
-            src
-        }
-    }
-
-    pub struct ObjQueryPart<T: 'static>(pub Tag<T>);
-
-    impl<T: 'static> QueryPart for ObjQueryPart<T> {
-        type Input<'a> = Obj<T>;
-        type TagIter = iter::Once<RawTag>;
-        type Heap = (EntityQueryHeap, Arc<Heap<T>>);
-        type GroupAutokenLoan = ((), ());
-        type GroupBorrow = (EntityQueryGroupBorrow, SlotQueryGroupBorrow);
-
-        const NEEDS_ENTITIES: bool = true;
-
-        fn tags(self) -> Self::TagIter {
-            iter::once(self.0.raw())
-        }
-
-        fn elem_from_block_item<'elem>(
-            token: &'static MainThreadToken,
-            (entity, slot): &'elem mut (&NMainCell<InertEntity>, DirectSlot<'_, T>),
-        ) -> Self::Input<'elem> {
-            Obj::from_raw_parts(entity.get(token).into_dangerous_entity(), slot.slot())
-        }
-
-        fn call_slow_borrow<B>(
-            token: &'static MainThreadToken,
-            (entities, slots): &BlockForQueryPart<Self>,
-            index: MultiRefCellIndex,
-            f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
-        ) -> ControlFlow<B> {
-            let entity = &entities[index as usize];
-            let slot = slots.slot(index);
-
-            f(Obj::from_raw_parts(
-                entity.get(token).into_dangerous_entity(),
-                slot.slot(),
-            ))
-        }
-
-        fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
-            src
-        }
-    }
-
-    pub struct ORefQueryPart<T: 'static>(pub Tag<T>);
-
-    impl<T: 'static> QueryPart for ORefQueryPart<T> {
-        type Input<'a> = CompRef<'a, T>;
-        type TagIter = iter::Once<RawTag>;
-        type Heap = (EntityQueryHeap, Arc<Heap<T>>);
-        type GroupAutokenLoan = ((), ());
-        type GroupBorrow = (EntityQueryGroupBorrow, SlotQueryGroupBorrow);
-
-        const NEEDS_ENTITIES: bool = true;
-
-        fn tags(self) -> Self::TagIter {
-            iter::once(self.0.raw())
-        }
-
-        fn elem_from_block_item<'elem>(
-            token: &'static MainThreadToken,
-            (entity, slot): &'elem mut (&NMainCell<InertEntity>, DirectSlot<'_, T>),
-        ) -> Self::Input<'elem> {
-            CompRef::new(
-                Obj::from_raw_parts(entity.get(token).into_dangerous_entity(), slot.slot()),
-                slot.borrow(token),
-            )
-        }
-
-        fn call_slow_borrow<B>(
-            token: &'static MainThreadToken,
-            (entities, slots): &BlockForQueryPart<Self>,
-            index: MultiRefCellIndex,
-            f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
-        ) -> ControlFlow<B> {
-            let entity = &entities[index as usize];
-            let slot = slots.slot(index);
-
-            f(CompRef::new(
-                Obj::from_raw_parts(entity.get(token).into_dangerous_entity(), slot.slot()),
-                slot.borrow(token),
-            ))
-        }
-
-        fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
-            src
-        }
-    }
-
-    pub struct OMutQueryPart<T: 'static>(pub Tag<T>);
-
-    impl<T: 'static> QueryPart for OMutQueryPart<T> {
-        type Input<'a> = CompMut<'a, T>;
-        type TagIter = iter::Once<RawTag>;
-        type Heap = (EntityQueryHeap, Arc<Heap<T>>);
-        type GroupAutokenLoan = ((), ());
-        type GroupBorrow = (EntityQueryGroupBorrow, SlotQueryGroupBorrow);
-
-        const NEEDS_ENTITIES: bool = true;
-
-        fn tags(self) -> Self::TagIter {
-            iter::once(self.0.raw())
-        }
-
-        fn elem_from_block_item<'elem>(
-            token: &'static MainThreadToken,
-            (entity, slot): &'elem mut (&NMainCell<InertEntity>, DirectSlot<'_, T>),
-        ) -> Self::Input<'elem> {
-            CompMut::new(
-                Obj::from_raw_parts(entity.get(token).into_dangerous_entity(), slot.slot()),
-                slot.borrow_mut(token),
-            )
-        }
-
-        fn call_slow_borrow<B>(
-            token: &'static MainThreadToken,
-            (entities, slots): &BlockForQueryPart<Self>,
-            index: MultiRefCellIndex,
-            f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
-        ) -> ControlFlow<B> {
-            let entity = &entities[index as usize];
-            let slot = slots.slot(index);
-
-            f(CompMut::new(
-                Obj::from_raw_parts(entity.get(token).into_dangerous_entity(), slot.slot()),
-                slot.borrow_mut(token),
-            ))
-        }
-
-        fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
-            src
-        }
-    }
-
-    pub struct RefQueryPart<T: 'static>(pub Tag<T>);
-
-    impl<T: 'static> QueryPart for RefQueryPart<T> {
-        type Input<'a> = &'a T;
-        type TagIter = iter::Once<RawTag>;
-        type Heap = Arc<Heap<T>>;
-        type GroupAutokenLoan = ImmutableBorrow<T>;
-        type GroupBorrow = CompRefQueryGroupBorrow;
-
-        const NEEDS_ENTITIES: bool = false;
-
-        fn tags(self) -> Self::TagIter {
-            iter::once(self.0.raw())
-        }
-
-        fn elem_from_block_item<'elem>(
-            _token: &'static MainThreadToken,
-            elem: &'elem mut &T,
-        ) -> Self::Input<'elem> {
-            elem
-        }
-
-        fn call_slow_borrow<B>(
-            token: &'static MainThreadToken,
-            block: &BlockForQueryPart<Self>,
-            index: MultiRefCellIndex,
-            f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
-        ) -> ControlFlow<B> {
-            f(&block.values().borrow(token, index))
-        }
-
-        fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
-            src
-        }
-    }
-
-    pub struct MutQueryPart<T: 'static>(pub Tag<T>);
-
-    impl<T: 'static> QueryPart for MutQueryPart<T> {
-        type Input<'a> = &'a mut T;
-        type TagIter = iter::Once<RawTag>;
-        type Heap = Arc<Heap<T>>;
-        type GroupAutokenLoan = MutableBorrow<T>;
-        type GroupBorrow = CompMutQueryGroupBorrow;
-
-        const NEEDS_ENTITIES: bool = false;
-
-        fn tags(self) -> Self::TagIter {
-            iter::once(self.0.raw())
-        }
-
-        fn elem_from_block_item<'elem>(
-            _token: &'static MainThreadToken,
-            elem: &'elem mut &mut T,
-        ) -> Self::Input<'elem> {
-            elem
-        }
-
-        fn call_slow_borrow<B>(
-            token: &'static MainThreadToken,
-            block: &BlockForQueryPart<Self>,
-            index: MultiRefCellIndex,
-            f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
-        ) -> ControlFlow<B> {
-            f(&mut block.values().borrow_mut(token, index))
-        }
-
-        fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
-            src
-        }
-    }
-
-    impl<A: QueryPart, B: QueryPart> QueryPart for (A, B) {
-        type Input<'a> = (A::Input<'a>, B::Input<'a>);
-        type Heap = (A::Heap, B::Heap);
-        type TagIter = iter::Chain<A::TagIter, B::TagIter>;
-        type GroupAutokenLoan = (A::GroupAutokenLoan, B::GroupAutokenLoan);
-        type GroupBorrow = (A::GroupBorrow, B::GroupBorrow);
-
-        const NEEDS_ENTITIES: bool = A::NEEDS_ENTITIES || B::NEEDS_ENTITIES;
-
-        fn tags(self) -> Self::TagIter {
-            self.0.tags().chain(self.1.tags())
-        }
-
-        fn elem_from_block_item<'elem, 'guard>(
-            token: &'static MainThreadToken,
-            elem: &'elem mut IterItemForQueryPart<Self>,
-        ) -> Self::Input<'elem> {
-            (
-                A::elem_from_block_item(token, &mut elem.0),
-                B::elem_from_block_item(token, &mut elem.1),
-            )
-        }
-
-        fn call_slow_borrow<Br>(
-            token: &'static MainThreadToken,
-            block: &BlockForQueryPart<Self>,
-            index: MultiRefCellIndex,
-            f: impl FnOnce(Self::Input<'_>) -> ControlFlow<Br>,
-        ) -> ControlFlow<Br> {
-            A::call_slow_borrow(token, &block.0, index, |a| {
-                B::call_slow_borrow(token, &block.1, index, |b| {
-                    f((A::covariant_cast_input(a), B::covariant_cast_input(b)))
-                })
-            })
-        }
-
-        fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
-            (
-                A::covariant_cast_input(src.0),
-                B::covariant_cast_input(src.1),
-            )
-        }
-    }
-
-    impl QueryPart for () {
-        type Input<'a> = ();
-        type TagIter = iter::Empty<RawTag>;
-        type GroupAutokenLoan = ();
-        type Heap = ();
-        type GroupBorrow = SupportedQueryGroupBorrow;
-
-        const NEEDS_ENTITIES: bool = false;
-
-        fn tags(self) -> Self::TagIter {
-            iter::empty()
-        }
-
-        fn elem_from_block_item<'elem>(
-            _token: &'static MainThreadToken,
-            _elem: &'elem mut (),
-        ) -> Self::Input<'elem> {
-        }
-
-        fn call_slow_borrow<B>(
-            _token: &'static MainThreadToken,
-            _block: &BlockForQueryPart<Self>,
-            _index: MultiRefCellIndex,
-            f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
-        ) -> ControlFlow<B> {
-            f(())
-        }
-
-        fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
-            src
-        }
-    }
-
-    pub fn get_tag<T: 'static + HasGlobalManagedTag>() -> Tag<T::Component> {
-        Tag::global::<T>()
-    }
-
-    pub fn from_tag<T: 'static>(tag: impl Into<Tag<T>>) -> Tag<T> {
-        tag.into()
-    }
-
-    pub fn from_tag_virtual(tag: impl Into<RawTag>) -> RawTag {
-        tag.into()
-    }
-
-    pub fn empty_tag_iter() -> impl Iterator<Item = RawTag> {
-        [].into_iter()
-    }
-}
+// // === Query Macro === //
+//
+// #[doc(hidden)]
+// pub mod query_internals {
+//     use std::{iter, ops::ControlFlow, sync::Arc};
+//
+//     use autoken::{ImmutableBorrow, MutableBorrow};
+//
+//     use crate::{
+//         core::{
+//             cell::{MultiOptRef, MultiOptRefMut, MultiRefCellIndex},
+//             heap::{
+//                 array_chunks, heap_block_iter, heap_block_slot_iter, DirectSlot, Heap,
+//                 HeapSlotBlock,
+//             },
+//             random_iter::{
+//                 RandomAccessIter, RandomAccessRepeat, RandomAccessSliceMut, RandomAccessSliceRef,
+//                 RandomAccessTake, RandomAccessZip,
+//             },
+//             token::{BorrowMutToken, BorrowToken, MainThreadToken, Token},
+//             token_cell::NMainCell,
+//         },
+//         database::InertEntity,
+//         entity::{CompMut, CompRef, Entity},
+//         obj::Obj,
+//         storage, Storage,
+//     };
+//
+//     use super::{
+//         borrow_flush_guard, ArchetypeId, ArchetypeQueryInfo, HasGlobalManagedTag, RawTag, Tag,
+//     };
+//
+//     pub use {
+//         cbit::cbit,
+//         std::{compile_error, concat, iter::Iterator, stringify},
+//     };
+//
+//     // === QueryHeap === //
+//
+//     /// A heap over which a [`QueryPart`] can iterate.
+//     pub trait QueryHeap: Sized + 'static {
+//         /// The set of storages from which the heap will be derived.
+//         type Storages;
+//
+//         /// An iterator over instances of this heap.
+//         type HeapIter: Iterator<Item = Self>;
+//
+//         /// An iterator over blocks in this heap, parameterized by the lifetime of the heap borrow
+//         /// and the token used.
+//         #[rustfmt::skip]
+//         type BlockIter<'a, N>: RandomAccessIter<Item = Self::Block<'a, N>> where N: 'a + Token;
+//
+//         /// An iterator over blocks in this heap, parameterized by the lifetime of the heap borrow
+//         /// and the token used.
+//         #[rustfmt::skip]
+//         type Block<'a, N> where N: 'a + Token;
+//
+//         /// Fetches the storages needed to fetch these heaps.
+//         fn storages() -> Self::Storages;
+//
+//         /// Fetches the set of heaps associated with this archetype.
+//         fn heaps_for_archetype(
+//             storages: &Self::Storages,
+//             archetype: &ArchetypeQueryInfo,
+//         ) -> Self::HeapIter;
+//
+//         /// Fetches the blocks present in this heap.
+//         fn blocks<'a, N: Token>(&'a self, token: &'a N) -> Self::BlockIter<'a, N>;
+//     }
+//
+//     // No heap
+//     impl QueryHeap for () {
+//         type Storages = ();
+//         type HeapIter = iter::Repeat<()>;
+//
+//         #[rustfmt::skip]
+//         type BlockIter<'a, N> = RandomAccessRepeat<()> where N: 'a + Token;
+//
+//         #[rustfmt::skip]
+//         type Block<'a, N> = () where N: 'a + Token;
+//
+//         fn storages() -> Self::Storages {}
+//
+//         fn heaps_for_archetype(
+//             _storages: &Self::Storages,
+//             _archetype: &ArchetypeQueryInfo,
+//         ) -> Self::HeapIter {
+//             iter::repeat(())
+//         }
+//
+//         fn blocks<'a, N: Token>(&'a self, _token: &'a N) -> Self::BlockIter<'a, N> {
+//             RandomAccessRepeat::new(())
+//         }
+//     }
+//
+//     // Arc<Heap<T>>
+//     impl<T: 'static> QueryHeap for Arc<Heap<T>> {
+//         type Storages = Storage<T>;
+//         type HeapIter = std::vec::IntoIter<Self>;
+//
+//         #[rustfmt::skip]
+//         type BlockIter<'a, N> = heap_block_iter::Iter<'a, T, N> where N: 'a + Token;
+//
+//         #[rustfmt::skip]
+//         type Block<'a, N> = HeapSlotBlock<'a, T, N> where N: 'a + Token;
+//
+//         fn storages() -> Self::Storages {
+//             storage::<T>()
+//         }
+//
+//         fn heaps_for_archetype(
+//             storages: &Self::Storages,
+//             archetype: &ArchetypeQueryInfo,
+//         ) -> Self::HeapIter {
+//             archetype.heaps_for(storages).into_iter()
+//         }
+//
+//         fn blocks<'a, N: Token>(&'a self, token: &'a N) -> Self::BlockIter<'a, N> {
+//             self.blocks_expose_random_access(token)
+//         }
+//     }
+//
+//     // EntityQueryHeap
+//     type EntityQueryHeap = Arc<[NMainCell<InertEntity>]>;
+//
+//     impl QueryHeap for EntityQueryHeap {
+//         type Storages = ();
+//         type HeapIter = std::vec::IntoIter<EntityQueryHeap>;
+//
+//         type BlockIter<'a, N> = RandomAccessSliceRef<'a, [NMainCell<InertEntity>; MultiRefCellIndex::COUNT]>
+//         where N: 'a + Token;
+//
+//         type Block<'a, N> = &'a [NMainCell<InertEntity>; MultiRefCellIndex::COUNT]
+//         where N: 'a + Token;
+//
+//         fn storages() -> Self::Storages {}
+//
+//         fn heaps_for_archetype(
+//             _storages: &Self::Storages,
+//             archetype: &ArchetypeQueryInfo,
+//         ) -> Self::HeapIter {
+//             archetype.entities.clone().unwrap().into_iter()
+//         }
+//
+//         fn blocks<'a, N: Token>(&'a self, _token: &'a N) -> Self::BlockIter<'a, N> {
+//             RandomAccessSliceRef::new(array_chunks(self))
+//         }
+//     }
+//
+//     // Joined heap
+//     impl<A: QueryHeap, B: QueryHeap> QueryHeap for (A, B) {
+//         type Storages = (A::Storages, B::Storages);
+//         type HeapIter = iter::Zip<A::HeapIter, B::HeapIter>;
+//
+//         type BlockIter<'a, N> = RandomAccessZip<A::BlockIter<'a, N>, B::BlockIter<'a, N>>
+//         where
+//             N: 'a + Token;
+//
+//         #[rustfmt::skip]
+//         type Block<'a, N> = (A::Block<'a, N>, B::Block<'a, N>) where N: 'a + Token;
+//
+//         fn storages() -> Self::Storages {
+//             (A::storages(), B::storages())
+//         }
+//
+//         fn heaps_for_archetype(
+//             storages: &Self::Storages,
+//             archetype: &ArchetypeQueryInfo,
+//         ) -> Self::HeapIter {
+//             A::heaps_for_archetype(&storages.0, archetype)
+//                 .zip(B::heaps_for_archetype(&storages.1, archetype))
+//         }
+//
+//         fn blocks<'a, N: Token>(&'a self, token: &'a N) -> Self::BlockIter<'a, N> {
+//             RandomAccessZip::new(self.0.blocks(token), self.1.blocks(token))
+//         }
+//     }
+//
+//     // === QueryGroupBorrow === //
+//
+//     pub trait QueryGroupBorrow<B, N, L: 'static>: 'static {
+//         #[rustfmt::skip]
+//         type Guard<'a> where B: 'a, N: 'a;
+//
+//         #[rustfmt::skip]
+//         type Iter<'a>: RandomAccessIter<Item = Self::IterItem<'a>> where B: 'a, N: 'a;
+//
+//         #[rustfmt::skip]
+//         type IterItem<'a> where B: 'a, N: 'a;
+//
+//         fn try_borrow_group<'a>(
+//             block: &'a B,
+//             token: &'a N,
+//             loaner: &'a mut L,
+//         ) -> Option<Self::Guard<'a>>;
+//
+//         fn iter<'a, 'g: 'a>(guard: &'a mut Self::Guard<'g>) -> Self::Iter<'a>
+//         where
+//             B: 'g,
+//             N: 'g;
+//     }
+//
+//     // SupportedQueryGroupBorrow
+//     pub struct SupportedQueryGroupBorrow;
+//
+//     impl<B, N: Token, L: 'static> QueryGroupBorrow<B, N, L> for SupportedQueryGroupBorrow {
+//         #[rustfmt::skip]
+//         type Guard<'a> = () where B: 'a, N: 'a;
+//
+//         #[rustfmt::skip]
+//         type Iter<'a> = RandomAccessRepeat<()> where B: 'a, N: 'a;
+//
+//         #[rustfmt::skip]
+//         type IterItem<'a> = () where B: 'a, N: 'a;
+//
+//         fn try_borrow_group<'a>(
+//             _block: &'a B,
+//             _token: &'a N,
+//             _loaner: &'a mut L,
+//         ) -> Option<Self::Guard<'a>> {
+//             Some(())
+//         }
+//
+//         fn iter<'a, 'g: 'a>(_guard: &'a mut Self::Guard<'g>) -> Self::Iter<'a>
+//         where
+//             B: 'g,
+//             N: 'g,
+//         {
+//             RandomAccessRepeat::new(())
+//         }
+//     }
+//
+//     // CompRefQueryGroupBorrow
+//     pub struct CompRefQueryGroupBorrow;
+//
+//     impl<'b, N: BorrowToken<T>, T: 'static>
+//         QueryGroupBorrow<HeapSlotBlock<'b, T, N>, N, ImmutableBorrow<T>>
+//         for CompRefQueryGroupBorrow
+//     {
+//         #[rustfmt::skip]
+//         type Guard<'a> = MultiOptRef<'a, T> where 'b: 'a, N: 'a;
+//
+//         #[rustfmt::skip]
+//         type Iter<'a> = RandomAccessSliceRef<'a, T> where 'b: 'a, N: 'a;
+//
+//         #[rustfmt::skip]
+//         type IterItem<'a> = &'a T where 'b: 'a, N: 'a;
+//
+//         fn try_borrow_group<'a>(
+//             block: &'a HeapSlotBlock<'b, T, N>,
+//             token: &'a N,
+//             loaner: &'a mut ImmutableBorrow<T>,
+//         ) -> Option<Self::Guard<'a>> {
+//             block.values().try_borrow_all(token, loaner.downgrade_ref())
+//         }
+//
+//         fn iter<'a, 'g: 'a>(guard: &'a mut Self::Guard<'g>) -> Self::Iter<'a>
+//         where
+//             'b: 'g,
+//             N: 'g,
+//         {
+//             RandomAccessSliceRef::new(&**guard)
+//         }
+//     }
+//
+//     // CompMutQueryGroupBorrow
+//     pub struct CompMutQueryGroupBorrow;
+//
+//     impl<'b, N: BorrowMutToken<T>, T: 'static>
+//         QueryGroupBorrow<HeapSlotBlock<'b, T, N>, N, MutableBorrow<T>> for CompMutQueryGroupBorrow
+//     {
+//         #[rustfmt::skip]
+//         type Guard<'a> = MultiOptRefMut<'a, T> where 'b: 'a, N: 'a;
+//
+//         #[rustfmt::skip]
+//         type Iter<'a> = RandomAccessSliceMut<'a, T> where 'b: 'a, N: 'a;
+//
+//         #[rustfmt::skip]
+//         type IterItem<'a> = &'a mut T where 'b: 'a, N: 'a;
+//
+//         fn try_borrow_group<'a>(
+//             block: &'a HeapSlotBlock<'b, T, N>,
+//             token: &'a N,
+//             loaner: &'a mut MutableBorrow<T>,
+//         ) -> Option<Self::Guard<'a>> {
+//             block
+//                 .values()
+//                 .try_borrow_all_mut(token, loaner.downgrade_mut())
+//         }
+//
+//         fn iter<'a, 'g: 'a>(guard: &'a mut Self::Guard<'g>) -> Self::Iter<'a>
+//         where
+//             'b: 'g,
+//             N: 'g,
+//         {
+//             RandomAccessSliceMut::new(&mut **guard)
+//         }
+//     }
+//
+//     // EntityQueryGroupBorrow
+//     pub struct EntityQueryGroupBorrow;
+//
+//     impl<'b, N: Token>
+//         QueryGroupBorrow<&'b [NMainCell<InertEntity>; MultiRefCellIndex::COUNT], N, ()>
+//         for EntityQueryGroupBorrow
+//     {
+//         #[rustfmt::skip]
+//         type Guard<'a> = &'a [NMainCell<InertEntity>; MultiRefCellIndex::COUNT] where 'b: 'a, N: 'a;
+//
+//         #[rustfmt::skip]
+//         type Iter<'a> = RandomAccessSliceRef<'a, NMainCell<InertEntity>> where 'b: 'a, N: 'a;
+//
+//         #[rustfmt::skip]
+//         type IterItem<'a> = &'a NMainCell<InertEntity> where 'b: 'a, N: 'a;
+//
+//         fn try_borrow_group<'a>(
+//             block: &'a &'b [NMainCell<InertEntity>; MultiRefCellIndex::COUNT],
+//             _token: &'a N,
+//             _loaner: &'a mut (),
+//         ) -> Option<Self::Guard<'a>> {
+//             Some(block)
+//         }
+//
+//         fn iter<'a, 'g: 'a>(block: &'a mut Self::Guard<'g>) -> Self::Iter<'a>
+//         where
+//             'b: 'g,
+//             N: 'g,
+//         {
+//             RandomAccessSliceRef::new(&**block)
+//         }
+//     }
+//
+//     // SlotQueryGroupBorrow
+//     pub struct SlotQueryGroupBorrow;
+//
+//     impl<'b, T: 'static, N: Token> QueryGroupBorrow<HeapSlotBlock<'b, T, N>, N, ()>
+//         for SlotQueryGroupBorrow
+//     {
+//         #[rustfmt::skip]
+//         type Guard<'a> = HeapSlotBlock<'a, T, N> where 'b: 'a, N: 'a;
+//
+//         #[rustfmt::skip]
+//         type Iter<'a> = heap_block_slot_iter::Iter<'a, T, N> where 'b: 'a, N: 'a;
+//
+//         #[rustfmt::skip]
+//         type IterItem<'a> = DirectSlot<'a, T> where 'b: 'a, N: 'a;
+//
+//         fn try_borrow_group<'a>(
+//             block: &'a HeapSlotBlock<'b, T, N>,
+//             _token: &'a N,
+//             _loaner: &'a mut (),
+//         ) -> Option<Self::Guard<'a>> {
+//             Some(*block)
+//         }
+//
+//         fn iter<'a, 'g: 'a>(guard: &'a mut Self::Guard<'g>) -> Self::Iter<'a>
+//         where
+//             'b: 'g,
+//             N: 'g,
+//         {
+//             guard.slots_expose_random_access()
+//         }
+//     }
+//
+//     // ChainBorrow
+//     impl<ItemA, ItemB, BA, BB, LA, LB, N> QueryGroupBorrow<(BA, BB), N, (LA, LB)> for (ItemA, ItemB)
+//     where
+//         ItemA: QueryGroupBorrow<BA, N, LA>,
+//         ItemB: QueryGroupBorrow<BB, N, LB>,
+//         LA: 'static,
+//         LB: 'static,
+//     {
+//         type Guard<'a> = (ItemA::Guard<'a>, ItemB::Guard<'a>)
+//         where
+//             (BA, BB): 'a,
+//             N: 'a;
+//
+//         type Iter<'a> = RandomAccessZip<ItemA::Iter<'a>, ItemB::Iter<'a>>
+//         where
+//             (BA, BB): 'a,
+//             N: 'a;
+//
+//         type IterItem<'a> = (ItemA::IterItem<'a>, ItemB::IterItem<'a>)
+//         where
+//             (BA, BB): 'a,
+//             N: 'a;
+//
+//         fn try_borrow_group<'a>(
+//             block: &'a (BA, BB),
+//             token: &'a N,
+//             loaner: &'a mut (LA, LB),
+//         ) -> Option<Self::Guard<'a>> {
+//             Some((
+//                 ItemA::try_borrow_group(&block.0, token, &mut loaner.0)?,
+//                 ItemB::try_borrow_group(&block.1, token, &mut loaner.1)?,
+//             ))
+//         }
+//
+//         fn iter<'a, 'g: 'a>(guard: &'a mut Self::Guard<'g>) -> Self::Iter<'a>
+//         where
+//             (BA, BB): 'g,
+//             N: 'g,
+//         {
+//             RandomAccessZip::new(ItemA::iter(&mut guard.0), ItemB::iter(&mut guard.1))
+//         }
+//     }
+//
+//     // === QueryPart === //
+//
+//     type BlockForQueryPart<'a, Q> =
+//         <<Q as QueryPart>::Heap as QueryHeap>::Block<'a, MainThreadToken>;
+//
+//     type IterItemForQueryPart<'a, 'b, Q> = <<Q as QueryPart>::GroupBorrow as QueryGroupBorrow<
+//         BlockForQueryPart<'a, Q>,
+//         MainThreadToken,
+//         <Q as QueryPart>::GroupAutokenLoan,
+//     >>::IterItem<'b>;
+//
+//     pub trait QueryPart: Sized {
+//         type Input<'a>;
+//         type TagIter: Iterator<Item = RawTag>;
+//         type Heap: QueryHeap;
+//         type GroupAutokenLoan: Default + 'static;
+//         type GroupBorrow: for<'block> QueryGroupBorrow<
+//             <Self::Heap as QueryHeap>::Block<'block, MainThreadToken>,
+//             MainThreadToken,
+//             Self::GroupAutokenLoan,
+//         >;
+//
+//         const NEEDS_ENTITIES: bool;
+//
+//         fn tags(self) -> Self::TagIter;
+//
+//         fn elem_from_block_item<'elem>(
+//             token: &'static MainThreadToken,
+//             elem: &'elem mut IterItemForQueryPart<Self>,
+//         ) -> Self::Input<'elem>;
+//
+//         fn call_slow_borrow<B>(
+//             token: &'static MainThreadToken,
+//             block: &BlockForQueryPart<Self>,
+//             index: MultiRefCellIndex,
+//             f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
+//         ) -> ControlFlow<B>;
+//
+//         fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to>;
+//
+//         fn query<B>(
+//             self,
+//             extra_tags: impl IntoIterator<Item = RawTag>,
+//             mut f: impl FnMut(Self::Input<'_>) -> ControlFlow<B>,
+//         ) -> ControlFlow<B> {
+//             // Ensure that we're running on the main thread.
+//             let token = MainThreadToken::acquire_fmt("run a query");
+//
+//             // Ensure that users cannot flush the database while we're running a query.
+//             let _guard = borrow_flush_guard();
+//
+//             // Fetch the storages used by this query.
+//             let storages = <Self::Heap>::storages();
+//
+//             // Fetch the archetypes containing our desired intersection of tags.
+//             let archetypes =
+//                 ArchetypeId::in_intersection(self.tags().chain(extra_tags), Self::NEEDS_ENTITIES);
+//
+//             // For each archetype...
+//             for archetype in archetypes {
+//                 // Fetch the component heaps associated with that archetype.
+//                 let heaps = <Self::Heap>::heaps_for_archetype(&storages, &archetype);
+//
+//                 // For each of those heaps...
+//                 for (heap_i, heap) in heaps.enumerate() {
+//                     // Determine the length of this heap. If this is not the last heap in the
+//                     // archetype, we know that it is entirely full and can set its length to something
+//                     // really high.
+//                     let is_last_heap = heap_i == archetype.heap_count() - 1;
+//                     let heap_len_or_big = if is_last_heap {
+//                         archetype.last_heap_len()
+//                     } else {
+//                         usize::MAX
+//                     };
+//
+//                     let complete_heap_block_count_or_big =
+//                         heap_len_or_big / MultiRefCellIndex::COUNT;
+//
+//                     // Fetch the blocks comprising it.
+//                     let mut blocks = heap.blocks(token);
+//                     let complete_blocks_if_truncated =
+//                         RandomAccessTake::new(&mut blocks, complete_heap_block_count_or_big);
+//
+//                     // For each complete block...
+//                     for block in complete_blocks_if_truncated.into_iter() {
+//                         // Attempt to run the fast-path...
+//                         let mut loaner = <Self::GroupAutokenLoan>::default();
+//
+//                         if let Some(mut block) =
+//                             <Self::GroupBorrow>::try_borrow_group(&block, token, &mut loaner)
+//                         {
+//                             for mut elem in <Self::GroupBorrow>::iter(&mut block).into_iter() {
+//                                 f(Self::elem_from_block_item(token, &mut elem))?;
+//                             }
+//
+//                             // N.B. we `continue` here rather than putting the slow path in an `else`
+//                             // block because the lifetime of the `loaner` borrow extends into both
+//                             // branches of the `if` expression.
+//                             continue;
+//                         }
+//
+//                         drop(loaner);
+//
+//                         // Otherwise, run the slow-path.
+//                         for index in MultiRefCellIndex::iter() {
+//                             Self::call_slow_borrow(token, &block, index, &mut f);
+//                         }
+//                     }
+//
+//                     // For the last incomplete block...
+//                     let leftover = heap_len_or_big
+//                         - complete_heap_block_count_or_big * MultiRefCellIndex::COUNT;
+//
+//                     if is_last_heap && leftover > 0 {
+//                         let block = blocks.get(complete_heap_block_count_or_big).unwrap();
+//
+//                         for index in MultiRefCellIndex::iter().take(leftover) {
+//                             Self::call_slow_borrow(token, &block, index, &mut f);
+//                         }
+//                     }
+//                 }
+//             }
+//
+//             ControlFlow::Continue(())
+//         }
+//     }
+//
+//     pub struct EntityQueryPart;
+//
+//     impl QueryPart for EntityQueryPart {
+//         type Input<'a> = Entity;
+//         type TagIter = iter::Empty<RawTag>;
+//         type Heap = EntityQueryHeap;
+//         type GroupAutokenLoan = ();
+//         type GroupBorrow = EntityQueryGroupBorrow;
+//
+//         const NEEDS_ENTITIES: bool = true;
+//
+//         fn tags(self) -> Self::TagIter {
+//             iter::empty()
+//         }
+//
+//         fn elem_from_block_item<'elem>(
+//             token: &'static MainThreadToken,
+//             elem: &'elem mut &NMainCell<InertEntity>,
+//         ) -> Self::Input<'elem> {
+//             elem.get(token).into_dangerous_entity()
+//         }
+//
+//         fn call_slow_borrow<B>(
+//             token: &'static MainThreadToken,
+//             block: &BlockForQueryPart<Self>,
+//             index: MultiRefCellIndex,
+//             f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
+//         ) -> ControlFlow<B> {
+//             f(block[index as usize].get(token).into_dangerous_entity())
+//         }
+//
+//         fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
+//             src
+//         }
+//     }
+//
+//     pub struct SlotQueryPart<T: 'static>(pub Tag<T>);
+//
+//     impl<T: 'static> QueryPart for SlotQueryPart<T> {
+//         type Input<'a> = DirectSlot<'a, T>;
+//         type TagIter = iter::Once<RawTag>;
+//         type Heap = Arc<Heap<T>>;
+//         type GroupAutokenLoan = ();
+//         type GroupBorrow = SlotQueryGroupBorrow;
+//
+//         const NEEDS_ENTITIES: bool = false;
+//
+//         fn tags(self) -> Self::TagIter {
+//             iter::once(self.0.raw())
+//         }
+//
+//         fn elem_from_block_item<'elem>(
+//             _token: &'static MainThreadToken,
+//             elem: &'elem mut DirectSlot<'_, T>,
+//         ) -> Self::Input<'elem> {
+//             *elem
+//         }
+//
+//         fn call_slow_borrow<B>(
+//             _token: &'static MainThreadToken,
+//             block: &BlockForQueryPart<Self>,
+//             index: MultiRefCellIndex,
+//             f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
+//         ) -> ControlFlow<B> {
+//             f(block.slot(index))
+//         }
+//
+//         fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
+//             src
+//         }
+//     }
+//
+//     pub struct ObjQueryPart<T: 'static>(pub Tag<T>);
+//
+//     impl<T: 'static> QueryPart for ObjQueryPart<T> {
+//         type Input<'a> = Obj<T>;
+//         type TagIter = iter::Once<RawTag>;
+//         type Heap = (EntityQueryHeap, Arc<Heap<T>>);
+//         type GroupAutokenLoan = ((), ());
+//         type GroupBorrow = (EntityQueryGroupBorrow, SlotQueryGroupBorrow);
+//
+//         const NEEDS_ENTITIES: bool = true;
+//
+//         fn tags(self) -> Self::TagIter {
+//             iter::once(self.0.raw())
+//         }
+//
+//         fn elem_from_block_item<'elem>(
+//             token: &'static MainThreadToken,
+//             (entity, slot): &'elem mut (&NMainCell<InertEntity>, DirectSlot<'_, T>),
+//         ) -> Self::Input<'elem> {
+//             Obj::from_raw_parts(entity.get(token).into_dangerous_entity(), slot.slot())
+//         }
+//
+//         fn call_slow_borrow<B>(
+//             token: &'static MainThreadToken,
+//             (entities, slots): &BlockForQueryPart<Self>,
+//             index: MultiRefCellIndex,
+//             f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
+//         ) -> ControlFlow<B> {
+//             let entity = &entities[index as usize];
+//             let slot = slots.slot(index);
+//
+//             f(Obj::from_raw_parts(
+//                 entity.get(token).into_dangerous_entity(),
+//                 slot.slot(),
+//             ))
+//         }
+//
+//         fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
+//             src
+//         }
+//     }
+//
+//     pub struct ORefQueryPart<T: 'static>(pub Tag<T>);
+//
+//     impl<T: 'static> QueryPart for ORefQueryPart<T> {
+//         type Input<'a> = CompRef<'a, T>;
+//         type TagIter = iter::Once<RawTag>;
+//         type Heap = (EntityQueryHeap, Arc<Heap<T>>);
+//         type GroupAutokenLoan = ((), ());
+//         type GroupBorrow = (EntityQueryGroupBorrow, SlotQueryGroupBorrow);
+//
+//         const NEEDS_ENTITIES: bool = true;
+//
+//         fn tags(self) -> Self::TagIter {
+//             iter::once(self.0.raw())
+//         }
+//
+//         fn elem_from_block_item<'elem>(
+//             token: &'static MainThreadToken,
+//             (entity, slot): &'elem mut (&NMainCell<InertEntity>, DirectSlot<'_, T>),
+//         ) -> Self::Input<'elem> {
+//             CompRef::new(
+//                 Obj::from_raw_parts(entity.get(token).into_dangerous_entity(), slot.slot()),
+//                 slot.borrow(token),
+//             )
+//         }
+//
+//         fn call_slow_borrow<B>(
+//             token: &'static MainThreadToken,
+//             (entities, slots): &BlockForQueryPart<Self>,
+//             index: MultiRefCellIndex,
+//             f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
+//         ) -> ControlFlow<B> {
+//             let entity = &entities[index as usize];
+//             let slot = slots.slot(index);
+//
+//             f(CompRef::new(
+//                 Obj::from_raw_parts(entity.get(token).into_dangerous_entity(), slot.slot()),
+//                 slot.borrow(token),
+//             ))
+//         }
+//
+//         fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
+//             src
+//         }
+//     }
+//
+//     pub struct OMutQueryPart<T: 'static>(pub Tag<T>);
+//
+//     impl<T: 'static> QueryPart for OMutQueryPart<T> {
+//         type Input<'a> = CompMut<'a, T>;
+//         type TagIter = iter::Once<RawTag>;
+//         type Heap = (EntityQueryHeap, Arc<Heap<T>>);
+//         type GroupAutokenLoan = ((), ());
+//         type GroupBorrow = (EntityQueryGroupBorrow, SlotQueryGroupBorrow);
+//
+//         const NEEDS_ENTITIES: bool = true;
+//
+//         fn tags(self) -> Self::TagIter {
+//             iter::once(self.0.raw())
+//         }
+//
+//         fn elem_from_block_item<'elem>(
+//             token: &'static MainThreadToken,
+//             (entity, slot): &'elem mut (&NMainCell<InertEntity>, DirectSlot<'_, T>),
+//         ) -> Self::Input<'elem> {
+//             CompMut::new(
+//                 Obj::from_raw_parts(entity.get(token).into_dangerous_entity(), slot.slot()),
+//                 slot.borrow_mut(token),
+//             )
+//         }
+//
+//         fn call_slow_borrow<B>(
+//             token: &'static MainThreadToken,
+//             (entities, slots): &BlockForQueryPart<Self>,
+//             index: MultiRefCellIndex,
+//             f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
+//         ) -> ControlFlow<B> {
+//             let entity = &entities[index as usize];
+//             let slot = slots.slot(index);
+//
+//             f(CompMut::new(
+//                 Obj::from_raw_parts(entity.get(token).into_dangerous_entity(), slot.slot()),
+//                 slot.borrow_mut(token),
+//             ))
+//         }
+//
+//         fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
+//             src
+//         }
+//     }
+//
+//     pub struct RefQueryPart<T: 'static>(pub Tag<T>);
+//
+//     impl<T: 'static> QueryPart for RefQueryPart<T> {
+//         type Input<'a> = &'a T;
+//         type TagIter = iter::Once<RawTag>;
+//         type Heap = Arc<Heap<T>>;
+//         type GroupAutokenLoan = ImmutableBorrow<T>;
+//         type GroupBorrow = CompRefQueryGroupBorrow;
+//
+//         const NEEDS_ENTITIES: bool = false;
+//
+//         fn tags(self) -> Self::TagIter {
+//             iter::once(self.0.raw())
+//         }
+//
+//         fn elem_from_block_item<'elem>(
+//             _token: &'static MainThreadToken,
+//             elem: &'elem mut &T,
+//         ) -> Self::Input<'elem> {
+//             elem
+//         }
+//
+//         fn call_slow_borrow<B>(
+//             token: &'static MainThreadToken,
+//             block: &BlockForQueryPart<Self>,
+//             index: MultiRefCellIndex,
+//             f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
+//         ) -> ControlFlow<B> {
+//             f(&block.values().borrow(token, index))
+//         }
+//
+//         fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
+//             src
+//         }
+//     }
+//
+//     pub struct MutQueryPart<T: 'static>(pub Tag<T>);
+//
+//     impl<T: 'static> QueryPart for MutQueryPart<T> {
+//         type Input<'a> = &'a mut T;
+//         type TagIter = iter::Once<RawTag>;
+//         type Heap = Arc<Heap<T>>;
+//         type GroupAutokenLoan = MutableBorrow<T>;
+//         type GroupBorrow = CompMutQueryGroupBorrow;
+//
+//         const NEEDS_ENTITIES: bool = false;
+//
+//         fn tags(self) -> Self::TagIter {
+//             iter::once(self.0.raw())
+//         }
+//
+//         fn elem_from_block_item<'elem>(
+//             _token: &'static MainThreadToken,
+//             elem: &'elem mut &mut T,
+//         ) -> Self::Input<'elem> {
+//             elem
+//         }
+//
+//         fn call_slow_borrow<B>(
+//             token: &'static MainThreadToken,
+//             block: &BlockForQueryPart<Self>,
+//             index: MultiRefCellIndex,
+//             f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
+//         ) -> ControlFlow<B> {
+//             f(&mut block.values().borrow_mut(token, index))
+//         }
+//
+//         fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
+//             src
+//         }
+//     }
+//
+//     impl<A: QueryPart, B: QueryPart> QueryPart for (A, B) {
+//         type Input<'a> = (A::Input<'a>, B::Input<'a>);
+//         type Heap = (A::Heap, B::Heap);
+//         type TagIter = iter::Chain<A::TagIter, B::TagIter>;
+//         type GroupAutokenLoan = (A::GroupAutokenLoan, B::GroupAutokenLoan);
+//         type GroupBorrow = (A::GroupBorrow, B::GroupBorrow);
+//
+//         const NEEDS_ENTITIES: bool = A::NEEDS_ENTITIES || B::NEEDS_ENTITIES;
+//
+//         fn tags(self) -> Self::TagIter {
+//             self.0.tags().chain(self.1.tags())
+//         }
+//
+//         fn elem_from_block_item<'elem, 'guard>(
+//             token: &'static MainThreadToken,
+//             elem: &'elem mut IterItemForQueryPart<Self>,
+//         ) -> Self::Input<'elem> {
+//             (
+//                 A::elem_from_block_item(token, &mut elem.0),
+//                 B::elem_from_block_item(token, &mut elem.1),
+//             )
+//         }
+//
+//         fn call_slow_borrow<Br>(
+//             token: &'static MainThreadToken,
+//             block: &BlockForQueryPart<Self>,
+//             index: MultiRefCellIndex,
+//             f: impl FnOnce(Self::Input<'_>) -> ControlFlow<Br>,
+//         ) -> ControlFlow<Br> {
+//             A::call_slow_borrow(token, &block.0, index, |a| {
+//                 B::call_slow_borrow(token, &block.1, index, |b| {
+//                     f((A::covariant_cast_input(a), B::covariant_cast_input(b)))
+//                 })
+//             })
+//         }
+//
+//         fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
+//             (
+//                 A::covariant_cast_input(src.0),
+//                 B::covariant_cast_input(src.1),
+//             )
+//         }
+//     }
+//
+//     impl QueryPart for () {
+//         type Input<'a> = ();
+//         type TagIter = iter::Empty<RawTag>;
+//         type GroupAutokenLoan = ();
+//         type Heap = ();
+//         type GroupBorrow = SupportedQueryGroupBorrow;
+//
+//         const NEEDS_ENTITIES: bool = false;
+//
+//         fn tags(self) -> Self::TagIter {
+//             iter::empty()
+//         }
+//
+//         fn elem_from_block_item<'elem>(
+//             _token: &'static MainThreadToken,
+//             _elem: &'elem mut (),
+//         ) -> Self::Input<'elem> {
+//         }
+//
+//         fn call_slow_borrow<B>(
+//             _token: &'static MainThreadToken,
+//             _block: &BlockForQueryPart<Self>,
+//             _index: MultiRefCellIndex,
+//             f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
+//         ) -> ControlFlow<B> {
+//             f(())
+//         }
+//
+//         fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
+//             src
+//         }
+//     }
+//
+//     pub fn get_tag<T: 'static + HasGlobalManagedTag>() -> Tag<T::Component> {
+//         Tag::global::<T>()
+//     }
+//
+//     pub fn from_tag<T: 'static>(tag: impl Into<Tag<T>>) -> Tag<T> {
+//         tag.into()
+//     }
+//
+//     pub fn from_tag_virtual(tag: impl Into<RawTag>) -> RawTag {
+//         tag.into()
+//     }
+//
+//     pub fn empty_tag_iter() -> impl Iterator<Item = RawTag> {
+//         [].into_iter()
+//     }
+// }
 
 #[macro_export]
 macro_rules! query {

@@ -20,7 +20,7 @@ use crate::{
 use super::{
     cell::{MultiRefCellIndex, OptRef, OptRefMut},
     random_iter::{
-        RandomAccessIter, RandomAccessMap, RandomAccessMapper, RandomAccessSliceRef,
+        RandomAccessIterUntied, RandomAccessMap, RandomAccessMapper, RandomAccessSliceRef,
         RandomAccessZip,
     },
     token::{
@@ -237,7 +237,7 @@ impl<T> Heap<T> {
                     &self.slots,
                 )),
             ),
-            heap_block_iter::Mapper(token),
+            heap_block_iter::Mapper(token, PhantomData),
         )
     }
 
@@ -319,6 +319,8 @@ impl<'a, T: 'static, N: Token> HeapSlotBlock<'a, T, N> {
 }
 
 pub(crate) mod heap_block_iter {
+    use crate::core::random_iter::{RandomAccessMapperUntied, RandomAccessMapperUntiedUsingInput};
+
     use super::*;
 
     pub type Iter<'a, T, N> = RandomAccessMap<
@@ -326,17 +328,20 @@ pub(crate) mod heap_block_iter {
             RandomAccessSliceRef<'a, NMultiOptRefCell<T>>,
             RandomAccessSliceRef<'a, [NMainCell<Slot<T>>; MultiRefCellIndex::COUNT]>,
         >,
-        Mapper<'a, N>,
+        Mapper<'a, T, N>,
     >;
 
     #[derive_where(Clone)]
-    pub struct Mapper<'a, N: Token>(pub(super) &'a N);
+    pub struct Mapper<'a, T: 'static, N: Token>(
+        pub(super) &'a N,
+        pub(super) PhantomData<fn(T) -> T>,
+    );
 
     impl<'a, T: 'static, N: Token>
         RandomAccessMapper<(
             &'a NMultiOptRefCell<T>,
             &'a [NMainCell<Slot<T>>; MultiRefCellIndex::COUNT],
-        )> for Mapper<'a, N>
+        )> for Mapper<'a, T, N>
     {
         type Output = HeapSlotBlock<'a, T, N>;
 
@@ -355,12 +360,27 @@ pub(crate) mod heap_block_iter {
             }
         }
     }
+
+    impl<'a, T: 'static, N: Token> RandomAccessMapperUntied for Mapper<'a, T, N> {
+        type UntiedOutput = HeapSlotBlock<'a, T, N>;
+    }
+
+    impl<'a, T: 'static, N: Token>
+        RandomAccessMapperUntiedUsingInput<(
+            &'a NMultiOptRefCell<T>,
+            &'a [NMainCell<Slot<T>>; MultiRefCellIndex::COUNT],
+        )> for Mapper<'a, T, N>
+    {
+    }
 }
 
 pub(crate) mod heap_block_slot_iter {
     use crate::core::{
         cell::MultiRefCellIndex,
-        random_iter::{RandomAccessMap, RandomAccessMapper, RandomAccessSliceRef},
+        random_iter::{
+            RandomAccessMap, RandomAccessMapper, RandomAccessMapperUntied,
+            RandomAccessMapperUntiedUsingInput, RandomAccessSliceRef,
+        },
         token::Token,
         token_cell::{NMainCell, NMultiOptRefCell},
     };
@@ -385,6 +405,15 @@ pub(crate) mod heap_block_slot_iter {
                 heap_index: MultiRefCellIndex::from_index(idx),
             }
         }
+    }
+
+    impl<'a, T: 'static, N: Token> RandomAccessMapperUntied for Mapper<'a, T, N> {
+        type UntiedOutput = DirectSlot<'a, T>;
+    }
+
+    impl<'a, 'i, T: 'static, N: Token> RandomAccessMapperUntiedUsingInput<&'i NMainCell<Slot<T>>>
+        for Mapper<'a, T, N>
+    {
     }
 }
 
