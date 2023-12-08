@@ -4,21 +4,20 @@ use derive_where::derive_where;
 
 // === RandomAccessMapper === //
 
-pub trait RandomAccessMapper<I: MaybeContainerTied> {
-    type Output<'a>
-    where
-        Self: 'a,
-        I: 'a;
+// Public traits
+pub trait RandomAccessMapper<I> {
+    type Output;
 
-    fn map<'a>(&self, idx: usize, input: MctResolve<'a, I>) -> Self::Output<'a>;
+    fn map(&self, idx: usize, input: I) -> Self::Output;
 }
 
-pub trait RandomAccessMapperUntied<I: MaybeContainerTied>: RandomAccessMapper<I> {
+pub trait RandomAccessMapperUntied {
     type UntiedOutput;
+}
 
-    fn cast_untie_output<'a>(output: Self::Output<'a>) -> Self::UntiedOutput
-    where
-        Self: 'a;
+pub trait RandomAccessMapperUntiedUsingInput<I>:
+    RandomAccessMapperUntied + RandomAccessMapper<I, Output = Self::UntiedOutput>
+{
 }
 
 // === MaybeContainerTied === //
@@ -89,9 +88,9 @@ pub struct MapTied<I, F>(Invariant<(I, F)>);
 impl<I, F> MaybeContainerTied for MapTied<I, F>
 where
     I: MaybeContainerTied,
-    F: RandomAccessMapper<I>,
+    F: for<'a> RandomAccessMapper<MctResolve<'a, I>>,
 {
-    type Borrowed<'a> = <F as RandomAccessMapper<I>>::Output<'a>
+    type Borrowed<'a> = <F as RandomAccessMapper<MctResolve<'a, I>>>::Output
     where
         Self: 'a;
 }
@@ -99,7 +98,7 @@ where
 impl<I, F> ActuallyNotContainerTied for MapTied<I, F>
 where
     I: MaybeContainerTied,
-    F: RandomAccessMapperUntied<I>,
+    F: for<'a> RandomAccessMapperUntiedUsingInput<MctResolve<'a, I>>,
 {
     type BorrowedUntied = F::UntiedOutput;
 
@@ -107,7 +106,7 @@ where
     where
         Self: 'a,
     {
-        F::cast_untie_output(borrowed)
+        borrowed
     }
 }
 
@@ -331,7 +330,7 @@ impl<I, F> RandomAccessMap<I, F> {
 impl<I, F> RandomAccessIter for RandomAccessMap<I, F>
 where
     I: RandomAccessIter,
-    F: RandomAccessMapper<I::Item>,
+    F: for<'a> RandomAccessMapper<MctResolve<'a, I::Item>>,
 {
     type Item = MapTied<I::Item, F>;
 
