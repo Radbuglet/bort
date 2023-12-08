@@ -5,7 +5,7 @@ use derive_where::derive_where;
 // === RandomAccessMapper === //
 
 // Public traits
-pub trait RandomAccessMapper<I> {
+pub trait RandomAccessMapper<I>: Sized {
     type Output;
 
     fn map(&self, idx: usize, input: I) -> Self::Output;
@@ -20,39 +20,64 @@ pub trait RandomAccessMapperUntiedUsingInput<I>:
 {
 }
 
+impl<F: Fn(usize, I) -> O, I, O> RandomAccessMapper<I> for F {
+    type Output = O;
+
+    fn map(&self, idx: usize, input: I) -> Self::Output {
+        self(idx, input)
+    }
+}
+
 // === MaybeContainerTied === //
 
 type Invariant<T> = PhantomData<fn(T) -> T>;
 
 // Core
-type MctResolve<'a, M> = <M as MaybeContainerTied>::Borrowed<'a>;
+type MctResolve<'a, M> = <M as MaybeContainerTied<'a>>::Borrowed;
 type MctResolveUntied<M> = <M as ActuallyNotContainerTied>::BorrowedUntied;
 
-pub trait MaybeContainerTied: Sized {
-    type Borrowed<'a>
+pub trait MaybeContainerTied<'a>: Sized {
+    type Borrowed;
+}
+
+pub trait ActuallyNotContainerTied: UMaybeContainerTied {
+    type BorrowedUntied;
+
+    fn cast_untie<'a>(borrowed: MctResolve<'a, Self>) -> Self::BorrowedUntied
     where
         Self: 'a;
 }
 
-pub trait ActuallyNotContainerTied: MaybeContainerTied {
-    type BorrowedUntied;
+// HRTB helpers
+mod mct_with_bind {
+    use super::MaybeContainerTied;
 
-    fn cast_untie<'a>(borrowed: Self::Borrowed<'a>) -> Self::BorrowedUntied
-    where
-        Self: 'a;
+    pub trait MaybeContainerTiedWithBind<'a, Bound: ?Sized>: MaybeContainerTied<'a> {}
+
+    impl<'a, T: MaybeContainerTied<'a>, Bound: ?Sized> MaybeContainerTiedWithBind<'a, Bound> for T {}
+}
+
+pub trait UMaybeContainerTied:
+    for<'a> mct_with_bind::MaybeContainerTiedWithBind<'a, [&'a Self; 0]>
+{
+}
+
+impl<T> UMaybeContainerTied for T where
+    T: for<'a> mct_with_bind::MaybeContainerTiedWithBind<'a, [&'a Self; 0]>
+{
 }
 
 // NotContainerTied
 pub struct NotContainerTied<T>(Invariant<T>);
 
-impl<T> MaybeContainerTied for NotContainerTied<T> {
-    type Borrowed<'a> = T where Self: 'a;
+impl<'a, T> MaybeContainerTied<'a> for NotContainerTied<T> {
+    type Borrowed = T;
 }
 
 impl<T> ActuallyNotContainerTied for NotContainerTied<T> {
     type BorrowedUntied = T;
 
-    fn cast_untie<'a>(borrowed: Self::Borrowed<'a>) -> Self::BorrowedUntied
+    fn cast_untie<'a>(borrowed: MctResolve<'a, Self>) -> Self::BorrowedUntied
     where
         Self: 'a,
     {
@@ -63,10 +88,8 @@ impl<T> ActuallyNotContainerTied for NotContainerTied<T> {
 // ZipTied
 pub struct ZipTied<A, B>(Invariant<(A, B)>);
 
-impl<A: MaybeContainerTied, B: MaybeContainerTied> MaybeContainerTied for ZipTied<A, B> {
-    type Borrowed<'a> = (A::Borrowed<'a>, B::Borrowed<'a>)
-    where
-        Self: 'a;
+impl<'a, A: UMaybeContainerTied, B: UMaybeContainerTied> MaybeContainerTied<'a> for ZipTied<A, B> {
+    type Borrowed = (MctResolve<'a, A>, MctResolve<'a, B>);
 }
 
 impl<A: ActuallyNotContainerTied, B: ActuallyNotContainerTied> ActuallyNotContainerTied
@@ -74,7 +97,7 @@ impl<A: ActuallyNotContainerTied, B: ActuallyNotContainerTied> ActuallyNotContai
 {
     type BorrowedUntied = (A::BorrowedUntied, B::BorrowedUntied);
 
-    fn cast_untie<'a>((left, right): Self::Borrowed<'a>) -> Self::BorrowedUntied
+    fn cast_untie<'a>((left, right): MctResolve<'a, Self>) -> Self::BorrowedUntied
     where
         Self: 'a,
     {
@@ -85,24 +108,22 @@ impl<A: ActuallyNotContainerTied, B: ActuallyNotContainerTied> ActuallyNotContai
 // MapTied
 pub struct MapTied<I, F>(Invariant<(I, F)>);
 
-impl<I, F> MaybeContainerTied for MapTied<I, F>
+impl<'a, I, F> MaybeContainerTied<'a> for MapTied<I, F>
 where
-    I: MaybeContainerTied,
-    F: for<'a> RandomAccessMapper<MctResolve<'a, I>>,
+    I: UMaybeContainerTied,
+    F: for<'b> RandomAccessMapper<MctResolve<'b, I>>,
 {
-    type Borrowed<'a> = <F as RandomAccessMapper<MctResolve<'a, I>>>::Output
-    where
-        Self: 'a;
+    type Borrowed = <F as RandomAccessMapper<MctResolve<'a, I>>>::Output;
 }
 
 impl<I, F> ActuallyNotContainerTied for MapTied<I, F>
 where
-    I: MaybeContainerTied,
+    I: UMaybeContainerTied,
     F: for<'a> RandomAccessMapperUntiedUsingInput<MctResolve<'a, I>>,
 {
     type BorrowedUntied = F::UntiedOutput;
 
-    fn cast_untie<'a>(borrowed: Self::Borrowed<'a>) -> Self::BorrowedUntied
+    fn cast_untie<'a>(borrowed: MctResolve<'a, Self>) -> Self::BorrowedUntied
     where
         Self: 'a,
     {
@@ -113,21 +134,21 @@ where
 // ContainerTiedRef
 pub struct ContainerTiedRef<T: ?Sized>(Invariant<T>);
 
-impl<T: ?Sized> MaybeContainerTied for ContainerTiedRef<T> {
-    type Borrowed<'a> = &'a T where Self: 'a;
+impl<'a, T: ?Sized + 'a> MaybeContainerTied<'a> for ContainerTiedRef<T> {
+    type Borrowed = &'a T;
 }
 
 // ContainedTiedMut
 pub struct ContainedTiedMut<T: ?Sized>(Invariant<T>);
 
-impl<T: ?Sized> MaybeContainerTied for ContainedTiedMut<T> {
-    type Borrowed<'a> = &'a mut T where Self: 'a;
+impl<'a, T: ?Sized + 'a> MaybeContainerTied<'a> for ContainedTiedMut<T> {
+    type Borrowed = &'a mut T;
 }
 
 // === RandomAccessIter === //
 
 pub trait RandomAccessIter {
-    type Item: MaybeContainerTied;
+    type Item: UMaybeContainerTied;
 
     const IS_FINITE: bool;
 
@@ -411,5 +432,34 @@ impl<I: RandomAccessIter> RandomAccessIter for RandomAccessTake<I> {
 
     unsafe fn get_unchecked(&self, i: usize) -> MctResolve<'_, I::Item> {
         self.0.get_unchecked(i)
+    }
+}
+
+// === Demo === //
+
+mod demo {
+    use super::{
+        RandomAccessIter, RandomAccessMap, RandomAccessMapper, RandomAccessMapperUntied,
+        RandomAccessMapperUntiedUsingInput, RandomAccessSliceRef,
+    };
+
+    struct GetAddrMapper;
+
+    impl<'a, T> RandomAccessMapper<&'a T> for GetAddrMapper {
+        type Output = usize;
+
+        fn map(&self, _idx: usize, input: &'a T) -> Self::Output {
+            input as *const T as usize
+        }
+    }
+
+    impl RandomAccessMapperUntied for GetAddrMapper {
+        type UntiedOutput = usize;
+    }
+
+    impl<'a, T> RandomAccessMapperUntiedUsingInput<&'a T> for GetAddrMapper {}
+
+    fn whee<'a, T>(slice: &'a [T]) -> impl Iterator<Item = usize> + 'a {
+        RandomAccessMap::new(RandomAccessSliceRef::new(slice), GetAddrMapper).into_iter()
     }
 }
