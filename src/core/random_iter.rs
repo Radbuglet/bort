@@ -1,6 +1,6 @@
 // === Core === //
 
-use std::{marker::PhantomData, ptr::NonNull};
+use std::{marker::PhantomData, mem, ptr::NonNull};
 
 use derive_where::derive_where;
 
@@ -31,6 +31,10 @@ pub trait RandomAccessIter<'i, WhereACannotOutliveSelf = &'i Self> {
 
     fn get(&'i mut self, i: usize) -> Option<Self::Item> {
         (i < self.len()).then(|| unsafe { self.get_unchecked(i) })
+    }
+
+    fn by_mut(&'i mut self) -> BorrowedRandomAccessIter<'_, Self> {
+        BorrowedRandomAccessIter::new(self)
     }
 }
 
@@ -193,6 +197,49 @@ impl<'i, 'a, T> RandomAccessIter<'i> for RandomAccessSliceMut<'a, T> {
 
 impl<'a, T> UntiedRandomAccessIter for RandomAccessSliceMut<'a, T> {
     type UntiedItem = &'a mut T;
+}
+
+pub struct RandomAccessVec<T> {
+    _ty: PhantomData<Vec<T>>,
+    ptr: *mut T,
+    len: usize,
+    cap: usize,
+}
+
+impl<T> RandomAccessVec<T> {
+    pub fn new(mut vec: Vec<T>) -> Self {
+        let len = vec.len();
+        let cap = vec.capacity();
+        let ptr = vec.as_mut_ptr();
+        mem::forget(vec);
+
+        Self {
+            _ty: PhantomData,
+            ptr,
+            len,
+            cap,
+        }
+    }
+}
+
+impl<'i, T> RandomAccessIter<'i> for RandomAccessVec<T> {
+    type Item = &'i mut T;
+
+    const IS_FINITE: bool = true;
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    unsafe fn get_unchecked(&'i self, i: usize) -> Self::Item {
+        &mut *self.ptr.add(i)
+    }
+}
+
+impl<T> Drop for RandomAccessVec<T> {
+    fn drop(&mut self) {
+        drop(unsafe { Vec::from_raw_parts(self.ptr, self.len, self.cap) });
+    }
 }
 
 // === Zip === //
