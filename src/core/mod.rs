@@ -3,5 +3,6 @@
 pub mod cell;
 pub mod heap;
 pub(crate) mod random_iter;
+pub(crate) mod random_iter2;
 pub mod token;
 pub mod token_cell;
