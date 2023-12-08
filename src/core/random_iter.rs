@@ -1,152 +1,14 @@
+// === Core === //
+
 use std::{marker::PhantomData, ptr::NonNull};
 
 use derive_where::derive_where;
 
-// === RandomAccessMapper === //
+// RandomAccessIter
+pub type RaiItem<'i, I> = <I as RandomAccessIter<'i>>::Item;
 
-// Public traits
-pub trait RandomAccessMapper<I>: Sized {
-    type Output;
-
-    fn map(&self, idx: usize, input: I) -> Self::Output;
-}
-
-pub trait RandomAccessMapperUntied {
-    type UntiedOutput;
-}
-
-pub trait RandomAccessMapperUntiedUsingInput<I>:
-    RandomAccessMapperUntied + RandomAccessMapper<I, Output = Self::UntiedOutput>
-{
-}
-
-impl<F: Fn(usize, I) -> O, I, O> RandomAccessMapper<I> for F {
-    type Output = O;
-
-    fn map(&self, idx: usize, input: I) -> Self::Output {
-        self(idx, input)
-    }
-}
-
-// === MaybeContainerTied === //
-
-type Invariant<T> = PhantomData<fn(T) -> T>;
-
-// Core
-type MctResolve<'a, M> = <M as MaybeContainerTied<'a>>::Borrowed;
-type MctResolveUntied<M> = <M as NotContainedTied>::BorrowedUntied;
-
-pub trait MaybeContainerTied<'a>: Sized {
-    type Borrowed;
-}
-
-pub trait NotContainedTied: UMaybeContainerTied {
-    type BorrowedUntied;
-
-    fn cast_untie<'a>(borrowed: MctResolve<'a, Self>) -> Self::BorrowedUntied
-    where
-        Self: 'a;
-}
-
-// HRTB helpers
-mod mct_with_bind {
-    use super::MaybeContainerTied;
-
-    pub trait MaybeContainerTiedWithBind<'a, Bound: ?Sized>: MaybeContainerTied<'a> {}
-
-    impl<'a, T: MaybeContainerTied<'a>, Bound: ?Sized> MaybeContainerTiedWithBind<'a, Bound> for T {}
-}
-
-pub trait UMaybeContainerTied:
-    for<'a> mct_with_bind::MaybeContainerTiedWithBind<'a, [&'a Self; 0]>
-{
-}
-
-impl<T> UMaybeContainerTied for T where
-    T: for<'a> mct_with_bind::MaybeContainerTiedWithBind<'a, [&'a Self; 0]>
-{
-}
-
-// NotContainerTied
-pub struct TrivialNotContainerTied<T>(Invariant<T>);
-
-impl<'a, T> MaybeContainerTied<'a> for TrivialNotContainerTied<T> {
-    type Borrowed = T;
-}
-
-impl<T> NotContainedTied for TrivialNotContainerTied<T> {
-    type BorrowedUntied = T;
-
-    fn cast_untie<'a>(borrowed: MctResolve<'a, Self>) -> Self::BorrowedUntied
-    where
-        Self: 'a,
-    {
-        borrowed
-    }
-}
-
-// ZipTied
-pub struct ZipTied<A, B>(Invariant<(A, B)>);
-
-impl<'a, A: UMaybeContainerTied, B: UMaybeContainerTied> MaybeContainerTied<'a> for ZipTied<A, B> {
-    type Borrowed = (MctResolve<'a, A>, MctResolve<'a, B>);
-}
-
-impl<A: NotContainedTied, B: NotContainedTied> NotContainedTied for ZipTied<A, B> {
-    type BorrowedUntied = (A::BorrowedUntied, B::BorrowedUntied);
-
-    fn cast_untie<'a>((left, right): MctResolve<'a, Self>) -> Self::BorrowedUntied
-    where
-        Self: 'a,
-    {
-        (A::cast_untie(left), B::cast_untie(right))
-    }
-}
-
-// MapTied
-pub struct MapTied<I, F>(Invariant<(I, F)>);
-
-impl<'a, I, F> MaybeContainerTied<'a> for MapTied<I, F>
-where
-    I: UMaybeContainerTied,
-    F: for<'b> RandomAccessMapper<MctResolve<'b, I>>,
-{
-    type Borrowed = <F as RandomAccessMapper<MctResolve<'a, I>>>::Output;
-}
-
-impl<I, F> NotContainedTied for MapTied<I, F>
-where
-    I: UMaybeContainerTied,
-    F: for<'a> RandomAccessMapperUntiedUsingInput<MctResolve<'a, I>>,
-{
-    type BorrowedUntied = F::UntiedOutput;
-
-    fn cast_untie<'a>(borrowed: MctResolve<'a, Self>) -> Self::BorrowedUntied
-    where
-        Self: 'a,
-    {
-        borrowed
-    }
-}
-
-// ContainerTiedRef
-pub struct ContainerTiedRef<T: ?Sized>(Invariant<T>);
-
-impl<'a, T: ?Sized + 'a> MaybeContainerTied<'a> for ContainerTiedRef<T> {
-    type Borrowed = &'a T;
-}
-
-// ContainedTiedMut
-pub struct ContainedTiedMut<T: ?Sized>(Invariant<T>);
-
-impl<'a, T: ?Sized + 'a> MaybeContainerTied<'a> for ContainedTiedMut<T> {
-    type Borrowed = &'a mut T;
-}
-
-// === RandomAccessIter === //
-
-pub trait RandomAccessIter {
-    type Item: UMaybeContainerTied;
+pub trait RandomAccessIter<'i, WhereACannotOutliveSelf = &'i Self> {
+    type Item;
 
     const IS_FINITE: bool;
 
@@ -165,12 +27,14 @@ pub trait RandomAccessIter {
     ///   true (i.e. either the underlying container is cloned or all references are actually immutable).
     ///
     #[allow(clippy::mut_from_ref)]
-    unsafe fn get_unchecked(&self, i: usize) -> MctResolve<'_, Self::Item>;
+    unsafe fn get_unchecked(&'i self, i: usize) -> Self::Item;
 
-    fn get(&mut self, i: usize) -> Option<MctResolve<'_, Self::Item>> {
+    fn get(&'i mut self, i: usize) -> Option<Self::Item> {
         (i < self.len()).then(|| unsafe { self.get_unchecked(i) })
     }
+}
 
+pub trait UnivRandomAccessIter: for<'i> RandomAccessIter<'i> {
     fn iter(&mut self) -> RandomAccessIterAdapter<BorrowedRandomAccessIter<'_, Self>> {
         self.iter_since(0)
     }
@@ -179,7 +43,7 @@ pub trait RandomAccessIter {
         &mut self,
         index: usize,
     ) -> RandomAccessIterAdapter<BorrowedRandomAccessIter<'_, Self>> {
-        let len = if Self::IS_FINITE { self.len() } else { 0 };
+        let len = self.len();
 
         RandomAccessIterAdapter {
             iter: BorrowedRandomAccessIter::new(self),
@@ -189,21 +53,24 @@ pub trait RandomAccessIter {
     }
 }
 
-pub trait RandomAccessIterUntied: RandomAccessIter<Item = Self::ItemUntied> {
-    type ItemUntied: NotContainedTied;
+impl<I: for<'i> RandomAccessIter<'i>> UnivRandomAccessIter for I {}
+
+// UntiedRandomAccessIter
+pub trait UntiedRandomAccessIter: for<'i> RandomAccessIter<'i, Item = Self::UntiedItem> {
+    type UntiedItem;
 
     fn into_iter(self) -> RandomAccessIterAdapter<Self>
     where
         Self: Sized,
     {
-        self.into_iter_since(0)
+        self.iter_since(0)
     }
 
-    fn into_iter_since(self, index: usize) -> RandomAccessIterAdapter<Self>
+    fn iter_since(self, index: usize) -> RandomAccessIterAdapter<Self>
     where
         Self: Sized,
     {
-        let len = if Self::IS_FINITE { self.len() } else { 0 };
+        let len = self.len();
 
         RandomAccessIterAdapter {
             iter: self,
@@ -213,13 +80,7 @@ pub trait RandomAccessIterUntied: RandomAccessIter<Item = Self::ItemUntied> {
     }
 }
 
-impl<I: ?Sized + RandomAccessIter> RandomAccessIterUntied for I
-where
-    I::Item: NotContainedTied,
-{
-    type ItemUntied = I::Item;
-}
-
+// BorrowedRandomAccessIter
 pub struct BorrowedRandomAccessIter<'a, I: ?Sized>(&'a I);
 
 impl<'a, I: ?Sized> BorrowedRandomAccessIter<'a, I> {
@@ -228,11 +89,11 @@ impl<'a, I: ?Sized> BorrowedRandomAccessIter<'a, I> {
     }
 }
 
-impl<'a, I: ?Sized + RandomAccessIter> RandomAccessIter for BorrowedRandomAccessIter<'a, I>
+impl<'i, 'a, I> RandomAccessIter<'i> for BorrowedRandomAccessIter<'a, I>
 where
-    I::Item: 'a,
+    I: ?Sized + RandomAccessIter<'a>,
 {
-    type Item = TrivialNotContainerTied<MctResolve<'a, I::Item>>;
+    type Item = I::Item;
 
     const IS_FINITE: bool = I::IS_FINITE;
 
@@ -240,27 +101,32 @@ where
         self.0.len()
     }
 
-    unsafe fn get_unchecked(&self, i: usize) -> MctResolve<'a, I::Item> {
+    unsafe fn get_unchecked(&'i self, i: usize) -> Self::Item {
         self.0.get_unchecked(i)
     }
 }
 
+impl<'a, I> UntiedRandomAccessIter for BorrowedRandomAccessIter<'a, I>
+where
+    I: ?Sized + RandomAccessIter<'a>,
+{
+    type UntiedItem = I::Item;
+}
+
+// RandomAccessIterAdapter
 #[derive(Debug, Clone)]
-pub struct RandomAccessIterAdapter<I> {
+pub struct RandomAccessIterAdapter<I: UntiedRandomAccessIter> {
     iter: I,
     index: usize,
     len: usize,
 }
 
-impl<I: RandomAccessIter> Iterator for RandomAccessIterAdapter<I>
-where
-    I::Item: NotContainedTied,
-{
-    type Item = MctResolveUntied<I::Item>;
+impl<I: UntiedRandomAccessIter> Iterator for RandomAccessIterAdapter<I> {
+    type Item = I::UntiedItem;
 
     fn next(&mut self) -> Option<Self::Item> {
         (self.index < self.len).then(|| {
-            let item = <I::Item>::cast_untie(unsafe { self.iter.get_unchecked(self.index) });
+            let item = unsafe { self.iter.get_unchecked(self.index) };
             self.index += 1;
             item
         })
@@ -279,8 +145,8 @@ impl<'a, T> RandomAccessSliceRef<'a, T> {
     }
 }
 
-impl<'a, T> RandomAccessIter for RandomAccessSliceRef<'a, T> {
-    type Item = TrivialNotContainerTied<&'a T>;
+impl<'i, 'a, T> RandomAccessIter<'i> for RandomAccessSliceRef<'a, T> {
+    type Item = &'a T;
 
     const IS_FINITE: bool = true;
 
@@ -288,9 +154,13 @@ impl<'a, T> RandomAccessIter for RandomAccessSliceRef<'a, T> {
         self.0.len()
     }
 
-    unsafe fn get_unchecked(&self, i: usize) -> &'a T {
+    unsafe fn get_unchecked(&'i self, i: usize) -> &'a T {
         self.0.get_unchecked(i)
     }
+}
+
+impl<'b, T> UntiedRandomAccessIter for RandomAccessSliceRef<'b, T> {
+    type UntiedItem = &'b T;
 }
 
 pub struct RandomAccessSliceMut<'a, T> {
@@ -307,8 +177,8 @@ impl<'a, T> RandomAccessSliceMut<'a, T> {
     }
 }
 
-impl<'a, T> RandomAccessIter for RandomAccessSliceMut<'a, T> {
-    type Item = TrivialNotContainerTied<&'a mut T>;
+impl<'i, 'a, T> RandomAccessIter<'i> for RandomAccessSliceMut<'a, T> {
+    type Item = &'a mut T;
 
     const IS_FINITE: bool = true;
 
@@ -316,9 +186,13 @@ impl<'a, T> RandomAccessIter for RandomAccessSliceMut<'a, T> {
         self.ptr.len()
     }
 
-    unsafe fn get_unchecked(&self, i: usize) -> &'a mut T {
+    unsafe fn get_unchecked(&'i self, i: usize) -> &'a mut T {
         unsafe { &mut *self.ptr.as_ptr().cast::<T>().add(i) }
     }
+}
+
+impl<'a, T> UntiedRandomAccessIter for RandomAccessSliceMut<'a, T> {
+    type UntiedItem = &'a mut T;
 }
 
 // === Zip === //
@@ -332,8 +206,10 @@ impl<A, B> RandomAccessZip<A, B> {
     }
 }
 
-impl<A: RandomAccessIter, B: RandomAccessIter> RandomAccessIter for RandomAccessZip<A, B> {
-    type Item = ZipTied<A::Item, B::Item>;
+impl<'i, A: RandomAccessIter<'i>, B: RandomAccessIter<'i>> RandomAccessIter<'i>
+    for RandomAccessZip<A, B>
+{
+    type Item = (A::Item, B::Item);
 
     const IS_FINITE: bool = A::IS_FINITE || B::IS_FINITE;
 
@@ -341,9 +217,17 @@ impl<A: RandomAccessIter, B: RandomAccessIter> RandomAccessIter for RandomAccess
         self.0.len().min(self.1.len())
     }
 
-    unsafe fn get_unchecked(&self, i: usize) -> MctResolve<'_, Self::Item> {
+    unsafe fn get_unchecked(&'i self, i: usize) -> Self::Item {
         (self.0.get_unchecked(i), self.1.get_unchecked(i))
     }
+}
+
+impl<A, B> UntiedRandomAccessIter for RandomAccessZip<A, B>
+where
+    A: UntiedRandomAccessIter,
+    B: UntiedRandomAccessIter,
+{
+    type UntiedItem = (A::UntiedItem, B::UntiedItem);
 }
 
 // === Map === //
@@ -357,12 +241,12 @@ impl<I, F> RandomAccessMap<I, F> {
     }
 }
 
-impl<I, F> RandomAccessIter for RandomAccessMap<I, F>
+impl<'i, I, F> RandomAccessIter<'i> for RandomAccessMap<I, F>
 where
-    I: RandomAccessIter,
-    F: for<'a> RandomAccessMapper<MctResolve<'a, I::Item>>,
+    I: RandomAccessIter<'i>,
+    F: RandomAccessMapper<I::Item>,
 {
-    type Item = MapTied<I::Item, F>;
+    type Item = F::Output;
 
     const IS_FINITE: bool = I::IS_FINITE;
 
@@ -370,8 +254,31 @@ where
         self.0.len()
     }
 
-    unsafe fn get_unchecked(&self, i: usize) -> MctResolve<'_, Self::Item> {
+    unsafe fn get_unchecked(&'i self, i: usize) -> Self::Item {
         self.1.map(i, self.0.get_unchecked(i))
+    }
+}
+
+impl<I, F> UntiedRandomAccessIter for RandomAccessMap<I, F>
+where
+    I: UntiedRandomAccessIter,
+    F: RandomAccessMapper<I::UntiedItem>,
+{
+    type UntiedItem = F::Output;
+}
+
+// Mappers
+pub trait RandomAccessMapper<I> {
+    type Output;
+
+    fn map(&self, index: usize, item: I) -> Self::Output;
+}
+
+impl<F: ?Sized + Fn(usize, I) -> O, I, O> RandomAccessMapper<I> for F {
+    type Output = O;
+
+    fn map(&self, index: usize, item: I) -> Self::Output {
+        self(index, item)
     }
 }
 
@@ -386,8 +293,8 @@ impl<T> RandomAccessRepeat<T> {
     }
 }
 
-impl<T: Clone> RandomAccessIter for RandomAccessRepeat<T> {
-    type Item = TrivialNotContainerTied<T>;
+impl<'i, T: Clone> RandomAccessIter<'i> for RandomAccessRepeat<T> {
+    type Item = T;
 
     const IS_FINITE: bool = false;
 
@@ -395,9 +302,13 @@ impl<T: Clone> RandomAccessIter for RandomAccessRepeat<T> {
         usize::MAX
     }
 
-    unsafe fn get_unchecked(&self, _i: usize) -> T {
+    unsafe fn get_unchecked(&'i self, _i: usize) -> T {
         self.0.clone()
     }
+}
+
+impl<T: Clone> UntiedRandomAccessIter for RandomAccessRepeat<T> {
+    type UntiedItem = T;
 }
 
 // === Enumerate === //
@@ -405,8 +316,8 @@ impl<T: Clone> RandomAccessIter for RandomAccessRepeat<T> {
 #[derive(Debug, Clone)]
 pub struct RandomAccessEnumerate;
 
-impl RandomAccessIter for RandomAccessEnumerate {
-    type Item = TrivialNotContainerTied<usize>;
+impl<'i> RandomAccessIter<'i> for RandomAccessEnumerate {
+    type Item = usize;
 
     const IS_FINITE: bool = false;
 
@@ -414,9 +325,13 @@ impl RandomAccessIter for RandomAccessEnumerate {
         usize::MAX
     }
 
-    unsafe fn get_unchecked(&self, i: usize) -> usize {
+    unsafe fn get_unchecked(&'i self, i: usize) -> usize {
         i
     }
+}
+
+impl UntiedRandomAccessIter for RandomAccessEnumerate {
+    type UntiedItem = usize;
 }
 
 // === Take === //
@@ -430,7 +345,7 @@ impl<I> RandomAccessTake<I> {
     }
 }
 
-impl<I: RandomAccessIter> RandomAccessIter for RandomAccessTake<I> {
+impl<'i, I: RandomAccessIter<'i>> RandomAccessIter<'i> for RandomAccessTake<I> {
     type Item = I::Item;
 
     const IS_FINITE: bool = true;
@@ -439,7 +354,11 @@ impl<I: RandomAccessIter> RandomAccessIter for RandomAccessTake<I> {
         self.0.len().min(self.1)
     }
 
-    unsafe fn get_unchecked(&self, i: usize) -> MctResolve<'_, I::Item> {
+    unsafe fn get_unchecked(&'i self, i: usize) -> Self::Item {
         self.0.get_unchecked(i)
     }
+}
+
+impl<I: UntiedRandomAccessIter> UntiedRandomAccessIter for RandomAccessTake<I> {
+    type UntiedItem = I::UntiedItem;
 }
