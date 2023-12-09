@@ -365,7 +365,7 @@ impl<T: 'static + Send + Sync + Hash + PartialEq> QueryKey for T {}
 
 // === Query Drivers === //
 
-pub trait QueryDriver {
+pub trait QueryDriver: Sized {
     #[rustfmt::skip]
     type Item<'a> where Self: 'a;
 
@@ -378,13 +378,18 @@ pub trait QueryDriver {
     #[rustfmt::skip]
     type BlockIterInfo<'a> where Self: 'a;
 
-    fn drive_query<B>(
+    fn drive_query<B, U: ?Sized>(
         &self,
         query_key: impl QueryKey,
         tags: impl IntoIterator<Item = RawTag>,
         include_entities: bool,
-        process_arch: impl FnMut(&ArchetypeQueryInfo, Self::ArchetypeIterInfo<'_>) -> ControlFlow<B>,
-        process_arbitrary: impl FnMut(Entity) -> ControlFlow<B>,
+        userdata: &mut U,
+        process_arch: impl FnMut(
+            &mut U,
+            &ArchetypeQueryInfo,
+            Self::ArchetypeIterInfo<'_>,
+        ) -> ControlFlow<B>,
+        process_arbitrary: impl FnMut(&mut U, Entity, Self::Item<'_>) -> ControlFlow<B>,
     ) -> ControlFlow<B>;
 
     fn foreach_heap<B>(
@@ -429,7 +434,7 @@ pub mod query_internals {
             cell::{MultiOptRef, MultiOptRefMut, MultiRefCellIndex},
             heap::{
                 array_chunks, heap_block_iter, heap_block_slot_iter, DirectSlot, Heap,
-                HeapSlotBlock,
+                HeapSlotBlock, Slot,
             },
             random_iter::{
                 RandomAccessEnumerate, RandomAccessIter, RandomAccessRepeat, RandomAccessSliceMut,
@@ -446,7 +451,8 @@ pub mod query_internals {
     };
 
     use super::{
-        borrow_flush_guard, ArchetypeId, ArchetypeQueryInfo, HasGlobalManagedTag, RawTag, Tag,
+        borrow_flush_guard, ArchetypeId, ArchetypeQueryInfo, HasGlobalManagedTag, QueryDriver,
+        QueryKey, RawTag, Tag,
     };
 
     pub use {
@@ -842,7 +848,9 @@ pub mod query_internals {
     pub trait QueryPart: Sized {
         type Input<'a>;
         type TagIter: Iterator<Item = RawTag>;
+
         type Heap: QueryHeap;
+
         type GroupAutokenLoan: Default + 'static;
         type GroupBorrow: for<'block> QueryGroupBorrow<
             <Self::Heap as QueryHeap>::Block<'block, MainThreadToken>,
@@ -863,6 +871,12 @@ pub mod query_internals {
             token: &'static MainThreadToken,
             block: &BlockForQueryPart<Self>,
             index: MultiRefCellIndex,
+            f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
+        ) -> ControlFlow<B>;
+
+        fn call_super_slow_borrow<B>(
+            storages: &<Self::Heap as QueryHeap>::Storages,
+            entity: Entity,
             f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
         ) -> ControlFlow<B>;
 
@@ -954,6 +968,100 @@ pub mod query_internals {
 
             ControlFlow::Continue(())
         }
+
+        fn query_driven<B, D: QueryDriver>(
+            self,
+            query_key: impl QueryKey,
+            driver: &D,
+            extra_tags: impl IntoIterator<Item = RawTag>,
+            mut f: impl FnMut(Self::Input<'_>, D::Item<'_>) -> ControlFlow<B>,
+        ) -> ControlFlow<B> {
+            // Ensure that we're running on the main thread.
+            let token = MainThreadToken::acquire_fmt("run a query");
+
+            // Ensure that users cannot flush the database while we're running a query.
+            let _guard = borrow_flush_guard();
+
+            // Fetch the storages used by this query.
+            let storages = <Self::Heap>::storages();
+
+            // Collect the tags needed by this query.
+            let tags = self.tags().chain(extra_tags);
+
+            driver.drive_query(
+                query_key,
+                tags,
+                Self::NEEDS_ENTITIES,
+                &mut f,
+                |f, archetype, mut userdata| {
+                    // Fetch the component heaps associated with that archetype.
+                    let mut heaps = <Self::Heap>::heaps_for_archetype(&storages, archetype);
+
+                    // For each of those heaps...
+                    driver.foreach_heap(archetype, &mut userdata, |heap_i, mut userdata| {
+                        let heap = heaps.get(heap_i).unwrap();
+
+                        // Fetch the blocks comprising it.
+                        let mut blocks = <Self::Heap>::blocks(heap, token);
+
+                        // For each block...
+                        driver.foreach_block(
+                            heap_i,
+                            &mut userdata,
+                            |block_i, mut userdata| 'process_block: {
+                                let block = blocks.get(heap_i).unwrap();
+
+                                // Attempt to run the fast-path...
+                                let mut loaner = <Self::GroupAutokenLoan>::default();
+
+                                if let Some(mut block) = <Self::GroupBorrow>::try_borrow_group(
+                                    &block,
+                                    token,
+                                    &mut loaner,
+                                ) {
+                                    let mut block = <Self::GroupBorrow>::iter(&mut block);
+
+                                    driver.foreach_element_in_full_block(
+                                        block_i,
+                                        &mut userdata,
+                                        |index, item| {
+                                            f(
+                                                Self::elem_from_block_item(
+                                                    token,
+                                                    &mut block.get(index as usize).unwrap(),
+                                                ),
+                                                item,
+                                            )
+                                        },
+                                    )?;
+
+                                    // N.B. we `break` here rather than putting the slow path in an `else`
+                                    // block because the lifetime of the `loaner` borrow extends into both
+                                    // branches of the `if` expression.
+                                    break 'process_block ControlFlow::Continue(());
+                                }
+
+                                // Otherwise, run the slow-path.
+                                driver.foreach_element_in_semi_block(
+                                    block_i,
+                                    &mut userdata,
+                                    |index, item| {
+                                        Self::call_slow_borrow(token, &block, index, |args| {
+                                            f(args, item)
+                                        })
+                                    },
+                                )
+                            },
+                        )?;
+
+                        ControlFlow::Continue(())
+                    })
+                },
+                |f, entity, item| {
+                    Self::call_super_slow_borrow(&storages, entity, |args| f(args, item))
+                },
+            )
+        }
     }
 
     pub struct EntityQueryPart;
@@ -987,6 +1095,14 @@ pub mod query_internals {
             f(block[index as usize].get(token).into_dangerous_entity())
         }
 
+        fn call_super_slow_borrow<B>(
+            _storages: &<Self::Heap as QueryHeap>::Storages,
+            entity: Entity,
+            f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
+        ) -> ControlFlow<B> {
+            f(entity)
+        }
+
         fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
             src
         }
@@ -995,7 +1111,7 @@ pub mod query_internals {
     pub struct SlotQueryPart<T: 'static>(pub Tag<T>);
 
     impl<T: 'static> QueryPart for SlotQueryPart<T> {
-        type Input<'a> = DirectSlot<'a, T>;
+        type Input<'a> = Slot<T>;
         type TagIter = iter::Once<RawTag>;
         type Heap = FetchHeap<T>;
         type GroupAutokenLoan = ();
@@ -1011,7 +1127,7 @@ pub mod query_internals {
             _token: &'static MainThreadToken,
             elem: &'elem mut DirectSlot<'_, T>,
         ) -> Self::Input<'elem> {
-            *elem
+            elem.slot()
         }
 
         fn call_slow_borrow<B>(
@@ -1020,7 +1136,15 @@ pub mod query_internals {
             index: MultiRefCellIndex,
             f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
         ) -> ControlFlow<B> {
-            f(block.slot(index))
+            f(block.slot(index).slot())
+        }
+
+        fn call_super_slow_borrow<B>(
+            storages: &<Self::Heap as QueryHeap>::Storages,
+            entity: Entity,
+            f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
+        ) -> ControlFlow<B> {
+            f(storages.get_slot(entity))
         }
 
         fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
@@ -1063,6 +1187,14 @@ pub mod query_internals {
                 entity.get(token).into_dangerous_entity(),
                 slot.slot(),
             ))
+        }
+
+        fn call_super_slow_borrow<B>(
+            storages: &<Self::Heap as QueryHeap>::Storages,
+            entity: Entity,
+            f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
+        ) -> ControlFlow<B> {
+            f(Obj::from_raw_parts(entity, storages.1.get_slot(entity)))
         }
 
         fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
@@ -1110,6 +1242,14 @@ pub mod query_internals {
             ))
         }
 
+        fn call_super_slow_borrow<B>(
+            storages: &<Self::Heap as QueryHeap>::Storages,
+            entity: Entity,
+            f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
+        ) -> ControlFlow<B> {
+            f(storages.1.get(entity))
+        }
+
         fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
             src
         }
@@ -1155,6 +1295,14 @@ pub mod query_internals {
             ))
         }
 
+        fn call_super_slow_borrow<B>(
+            storages: &<Self::Heap as QueryHeap>::Storages,
+            entity: Entity,
+            f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
+        ) -> ControlFlow<B> {
+            f(storages.1.get_mut(entity))
+        }
+
         fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
             src
         }
@@ -1191,6 +1339,14 @@ pub mod query_internals {
             f(&block.values().borrow(token, index))
         }
 
+        fn call_super_slow_borrow<B>(
+            storages: &<Self::Heap as QueryHeap>::Storages,
+            entity: Entity,
+            f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
+        ) -> ControlFlow<B> {
+            f(&storages.get(entity))
+        }
+
         fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
             src
         }
@@ -1225,6 +1381,14 @@ pub mod query_internals {
             f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
         ) -> ControlFlow<B> {
             f(&mut block.values().borrow_mut(token, index))
+        }
+
+        fn call_super_slow_borrow<B>(
+            storages: &<Self::Heap as QueryHeap>::Storages,
+            entity: Entity,
+            f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
+        ) -> ControlFlow<B> {
+            f(&mut storages.get_mut(entity))
         }
 
         fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
@@ -1268,6 +1432,18 @@ pub mod query_internals {
             })
         }
 
+        fn call_super_slow_borrow<Br>(
+            storages: &<Self::Heap as QueryHeap>::Storages,
+            entity: Entity,
+            f: impl FnOnce(Self::Input<'_>) -> ControlFlow<Br>,
+        ) -> ControlFlow<Br> {
+            A::call_super_slow_borrow(&storages.0, entity, |a| {
+                B::call_super_slow_borrow(&storages.1, entity, |b| {
+                    f((A::covariant_cast_input(a), B::covariant_cast_input(b)))
+                })
+            })
+        }
+
         fn covariant_cast_input<'from: 'to, 'to>(src: Self::Input<'from>) -> Self::Input<'to> {
             (
                 A::covariant_cast_input(src.0),
@@ -1301,6 +1477,14 @@ pub mod query_internals {
             _index: MultiRefCellIndex,
             f: impl FnOnce(Self::Input<'_>) -> ControlFlow<B>,
         ) -> ControlFlow<B> {
+            f(())
+        }
+
+        fn call_super_slow_borrow<Br>(
+            _storages: &<Self::Heap as QueryHeap>::Storages,
+            _entity: Entity,
+            f: impl FnOnce(Self::Input<'_>) -> ControlFlow<Br>,
+        ) -> ControlFlow<Br> {
             f(())
         }
 

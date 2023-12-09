@@ -1,11 +1,11 @@
-// === Core === //
-
 use std::{marker::PhantomData, mem, ptr::NonNull};
 
 use derive_where::derive_where;
 
+// === Core === //
+
 // RandomAccessIter
-pub type RaiItem<'i, I> = <I as RandomAccessIter<'i>>::Item;
+// pub type RaiItem<'i, I> = <I as RandomAccessIter<'i>>::Item;
 
 pub trait RandomAccessIter<'i, WhereACannotOutliveSelf = &'i Self> {
     type Item;
