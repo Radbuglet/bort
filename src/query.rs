@@ -420,7 +420,7 @@ pub trait QueryDriver {
 
 #[doc(hidden)]
 pub mod query_internals {
-    use std::{iter, ops::ControlFlow, sync::Arc};
+    use std::{iter, marker::PhantomData, ops::ControlFlow, sync::Arc};
 
     use autoken::{ImmutableBorrow, MutableBorrow};
 
@@ -432,8 +432,9 @@ pub mod query_internals {
                 HeapSlotBlock,
             },
             random_iter::{
-                RandomAccessIter, RandomAccessRepeat, RandomAccessSliceMut, RandomAccessSliceRef,
-                RandomAccessTake, RandomAccessZip, UntiedRandomAccessIter,
+                RandomAccessEnumerate, RandomAccessIter, RandomAccessRepeat, RandomAccessSliceMut,
+                RandomAccessSliceRef, RandomAccessTake, RandomAccessVec, RandomAccessZip,
+                UnivRandomAccessIter, UntiedRandomAccessIter,
             },
             token::{BorrowMutToken, BorrowToken, MainThreadToken, Token},
             token_cell::NMainCell,
@@ -457,20 +458,15 @@ pub mod query_internals {
 
     /// A heap over which a [`QueryPart`] can iterate.
     pub trait QueryHeap: Sized + 'static {
-        /// The set of storages from which the heap will be derived.
         type Storages;
 
-        /// An iterator over instances of this heap.
-        type HeapIter: Iterator<Item = Self>;
+        type HeapIter: for<'a> RandomAccessIter<'a, Item = Self::Heap<'a>>;
+        type Heap<'a>;
 
-        /// An iterator over blocks in this heap, parameterized by the lifetime of the heap borrow
-        /// and the token used.
         type BlockIter<'a, N>: UntiedRandomAccessIter<UntiedItem = Self::Block<'a, N>>
         where
             N: 'a + Token;
 
-        /// An iterator over blocks in this heap, parameterized by the lifetime of the heap borrow
-        /// and the token used.
         type Block<'a, N>
         where
             N: 'a + Token;
@@ -485,13 +481,14 @@ pub mod query_internals {
         ) -> Self::HeapIter;
 
         /// Fetches the blocks present in this heap.
-        fn blocks<'a, N: Token>(&'a self, token: &'a N) -> Self::BlockIter<'a, N>;
+        fn blocks<'a, N: Token>(heap: Self::Heap<'a>, token: &'a N) -> Self::BlockIter<'a, N>;
     }
 
     // No heap
     impl QueryHeap for () {
         type Storages = ();
-        type HeapIter = iter::Repeat<()>;
+        type HeapIter = RandomAccessRepeat<()>;
+        type Heap<'a> = ();
 
         #[rustfmt::skip]
         type BlockIter<'a, N> = RandomAccessRepeat<()> where N: 'a + Token;
@@ -505,18 +502,21 @@ pub mod query_internals {
             _storages: &Self::Storages,
             _archetype: &ArchetypeQueryInfo,
         ) -> Self::HeapIter {
-            iter::repeat(())
+            RandomAccessRepeat::new(())
         }
 
-        fn blocks<'a, N: Token>(&'a self, _token: &'a N) -> Self::BlockIter<'a, N> {
+        fn blocks<'a, N: Token>(_heap: Self::Heap<'a>, _token: &'a N) -> Self::BlockIter<'a, N> {
             RandomAccessRepeat::new(())
         }
     }
 
-    // Arc<Heap<T>>
-    impl<T: 'static> QueryHeap for Arc<Heap<T>> {
+    // FetchHeap
+    pub struct FetchHeap<T: 'static>(PhantomData<fn(T) -> T>);
+
+    impl<T: 'static> QueryHeap for FetchHeap<T> {
         type Storages = Storage<T>;
-        type HeapIter = std::vec::IntoIter<Self>;
+        type HeapIter = RandomAccessVec<Arc<Heap<T>>>;
+        type Heap<'a> = &'a mut Arc<Heap<T>>;
 
         #[rustfmt::skip]
         type BlockIter<'a, N> = heap_block_iter::Iter<'a, T, N> where N: 'a + Token;
@@ -532,26 +532,27 @@ pub mod query_internals {
             storages: &Self::Storages,
             archetype: &ArchetypeQueryInfo,
         ) -> Self::HeapIter {
-            archetype.heaps_for(storages).into_iter()
+            RandomAccessVec::new(archetype.heaps_for(storages))
         }
 
-        fn blocks<'a, N: Token>(&'a self, token: &'a N) -> Self::BlockIter<'a, N> {
-            self.blocks_expose_random_access(token)
+        fn blocks<'a, N: Token>(heap: Self::Heap<'a>, token: &'a N) -> Self::BlockIter<'a, N> {
+            heap.blocks_expose_random_access(token)
         }
     }
 
-    // EntityQueryHeap
-    type EntityQueryHeap = Arc<[NMainCell<InertEntity>]>;
+    // FetchEntity
+    pub struct FetchEntity;
 
-    impl QueryHeap for EntityQueryHeap {
+    impl QueryHeap for FetchEntity {
         type Storages = ();
-        type HeapIter = std::vec::IntoIter<EntityQueryHeap>;
+        type HeapIter = RandomAccessVec<Arc<[NMainCell<InertEntity>]>>;
+        type Heap<'a> = &'a mut Arc<[NMainCell<InertEntity>]>;
 
         type BlockIter<'a, N> = RandomAccessSliceRef<'a, [NMainCell<InertEntity>; MultiRefCellIndex::COUNT]>
-        where N: 'a + Token;
+            where N: 'a + Token;
 
         type Block<'a, N> = &'a [NMainCell<InertEntity>; MultiRefCellIndex::COUNT]
-        where N: 'a + Token;
+            where N: 'a + Token;
 
         fn storages() -> Self::Storages {}
 
@@ -559,24 +560,25 @@ pub mod query_internals {
             _storages: &Self::Storages,
             archetype: &ArchetypeQueryInfo,
         ) -> Self::HeapIter {
-            archetype.entities.clone().unwrap().into_iter()
+            RandomAccessVec::new(archetype.entities.clone().unwrap())
         }
 
-        fn blocks<'a, N: Token>(&'a self, _token: &'a N) -> Self::BlockIter<'a, N> {
-            RandomAccessSliceRef::new(array_chunks(self))
+        fn blocks<'a, N: Token>(heap: Self::Heap<'a>, _token: &'a N) -> Self::BlockIter<'a, N> {
+            RandomAccessSliceRef::new(array_chunks(heap))
         }
     }
 
     // Joined heap
     impl<A: QueryHeap, B: QueryHeap> QueryHeap for (A, B) {
         type Storages = (A::Storages, B::Storages);
-        type HeapIter = iter::Zip<A::HeapIter, B::HeapIter>;
+        type HeapIter = RandomAccessZip<A::HeapIter, B::HeapIter>;
+        type Heap<'a> = (A::Heap<'a>, B::Heap<'a>);
 
         type BlockIter<'a, N> = RandomAccessZip<A::BlockIter<'a, N>, B::BlockIter<'a, N>>
-        where
-            N: 'a + Token;
+            where
+                N: 'a + Token;
 
-        #[rustfmt::skip]
+            #[rustfmt::skip]
         type Block<'a, N> = (A::Block<'a, N>, B::Block<'a, N>) where N: 'a + Token;
 
         fn storages() -> Self::Storages {
@@ -587,26 +589,34 @@ pub mod query_internals {
             storages: &Self::Storages,
             archetype: &ArchetypeQueryInfo,
         ) -> Self::HeapIter {
-            A::heaps_for_archetype(&storages.0, archetype)
-                .zip(B::heaps_for_archetype(&storages.1, archetype))
+            RandomAccessZip::new(
+                A::heaps_for_archetype(&storages.0, archetype),
+                B::heaps_for_archetype(&storages.1, archetype),
+            )
         }
 
-        fn blocks<'a, N: Token>(&'a self, token: &'a N) -> Self::BlockIter<'a, N> {
-            RandomAccessZip::new(self.0.blocks(token), self.1.blocks(token))
+        fn blocks<'a, N: Token>((a, b): Self::Heap<'a>, token: &'a N) -> Self::BlockIter<'a, N> {
+            RandomAccessZip::new(A::blocks(a, token), B::blocks(b, token))
         }
     }
 
     // === QueryGroupBorrow === //
 
-    pub trait QueryGroupBorrow<B, N, L: 'static>: 'static {
-        #[rustfmt::skip]
-        type Guard<'a> where B: 'a, N: 'a;
+    pub trait QueryGroupBorrow<B, N, L: 'static>: Sized + 'static {
+        type Guard<'a>
+        where
+            B: 'a,
+            N: 'a;
 
-        #[rustfmt::skip]
-        type Iter<'a>: UntiedRandomAccessIter<UntiedItem = Self::IterItem<'a>> where B: 'a, N: 'a;
+        type Iter<'a>: UntiedRandomAccessIter<UntiedItem = Self::IterItem<'a>>
+        where
+            B: 'a,
+            N: 'a;
 
-        #[rustfmt::skip]
-        type IterItem<'a> where B: 'a, N: 'a;
+        type IterItem<'a>
+        where
+            B: 'a,
+            N: 'a;
 
         fn try_borrow_group<'a>(
             block: &'a B,
@@ -624,13 +634,9 @@ pub mod query_internals {
     pub struct SupportedQueryGroupBorrow;
 
     impl<B, N: Token, L: 'static> QueryGroupBorrow<B, N, L> for SupportedQueryGroupBorrow {
-        #[rustfmt::skip]
         type Guard<'a> = () where B: 'a, N: 'a;
 
-        #[rustfmt::skip]
         type Iter<'a> = RandomAccessRepeat<()> where B: 'a, N: 'a;
-
-        #[rustfmt::skip]
         type IterItem<'a> = () where B: 'a, N: 'a;
 
         fn try_borrow_group<'a>(
@@ -657,13 +663,10 @@ pub mod query_internals {
         QueryGroupBorrow<HeapSlotBlock<'b, T, N>, N, ImmutableBorrow<T>>
         for CompRefQueryGroupBorrow
     {
-        #[rustfmt::skip]
         type Guard<'a> = MultiOptRef<'a, T> where 'b: 'a, N: 'a;
 
-        #[rustfmt::skip]
         type Iter<'a> = RandomAccessSliceRef<'a, T> where 'b: 'a, N: 'a;
 
-        #[rustfmt::skip]
         type IterItem<'a> = &'a T where 'b: 'a, N: 'a;
 
         fn try_borrow_group<'a>(
@@ -692,10 +695,10 @@ pub mod query_internals {
         #[rustfmt::skip]
         type Guard<'a> = MultiOptRefMut<'a, T> where 'b: 'a, N: 'a;
 
-        #[rustfmt::skip]
+            #[rustfmt::skip]
         type Iter<'a> = RandomAccessSliceMut<'a, T> where 'b: 'a, N: 'a;
 
-        #[rustfmt::skip]
+            #[rustfmt::skip]
         type IterItem<'a> = &'a mut T where 'b: 'a, N: 'a;
 
         fn try_borrow_group<'a>(
@@ -727,10 +730,10 @@ pub mod query_internals {
         #[rustfmt::skip]
         type Guard<'a> = &'a [NMainCell<InertEntity>; MultiRefCellIndex::COUNT] where 'b: 'a, N: 'a;
 
-        #[rustfmt::skip]
+            #[rustfmt::skip]
         type Iter<'a> = RandomAccessSliceRef<'a, NMainCell<InertEntity>> where 'b: 'a, N: 'a;
 
-        #[rustfmt::skip]
+            #[rustfmt::skip]
         type IterItem<'a> = &'a NMainCell<InertEntity> where 'b: 'a, N: 'a;
 
         fn try_borrow_group<'a>(
@@ -759,10 +762,10 @@ pub mod query_internals {
         #[rustfmt::skip]
         type Guard<'a> = HeapSlotBlock<'a, T, N> where 'b: 'a, N: 'a;
 
-        #[rustfmt::skip]
+            #[rustfmt::skip]
         type Iter<'a> = heap_block_slot_iter::Iter<'a, T, N> where 'b: 'a, N: 'a;
 
-        #[rustfmt::skip]
+            #[rustfmt::skip]
         type IterItem<'a> = DirectSlot<'a, T> where 'b: 'a, N: 'a;
 
         fn try_borrow_group<'a>(
@@ -791,19 +794,19 @@ pub mod query_internals {
         LB: 'static,
     {
         type Guard<'a> = (ItemA::Guard<'a>, ItemB::Guard<'a>)
-        where
-            (BA, BB): 'a,
-            N: 'a;
+            where
+                (BA, BB): 'a,
+                N: 'a;
 
         type Iter<'a> = RandomAccessZip<ItemA::Iter<'a>, ItemB::Iter<'a>>
-        where
-            (BA, BB): 'a,
-            N: 'a;
+            where
+                (BA, BB): 'a,
+                N: 'a;
 
         type IterItem<'a> = (ItemA::IterItem<'a>, ItemB::IterItem<'a>)
-        where
-            (BA, BB): 'a,
-            N: 'a;
+            where
+                (BA, BB): 'a,
+                N: 'a;
 
         fn try_borrow_group<'a>(
             block: &'a (BA, BB),
@@ -887,9 +890,10 @@ pub mod query_internals {
             for archetype in archetypes {
                 // Fetch the component heaps associated with that archetype.
                 let heaps = <Self::Heap>::heaps_for_archetype(&storages, &archetype);
+                let mut heaps = RandomAccessZip::new(RandomAccessEnumerate, heaps);
 
                 // For each of those heaps...
-                for (heap_i, heap) in heaps.enumerate() {
+                for (heap_i, heap) in heaps.iter() {
                     // Determine the length of this heap. If this is not the last heap in the
                     // archetype, we know that it is entirely full and can set its length to something
                     // really high.
@@ -904,7 +908,7 @@ pub mod query_internals {
                         heap_len_or_big / MultiRefCellIndex::COUNT;
 
                     // Fetch the blocks comprising it.
-                    let mut blocks = heap.blocks(token);
+                    let mut blocks = <Self::Heap>::blocks(heap, token);
                     let complete_blocks_if_truncated =
                         RandomAccessTake::new(blocks.by_mut(), complete_heap_block_count_or_big);
 
@@ -957,7 +961,7 @@ pub mod query_internals {
     impl QueryPart for EntityQueryPart {
         type Input<'a> = Entity;
         type TagIter = iter::Empty<RawTag>;
-        type Heap = EntityQueryHeap;
+        type Heap = FetchEntity;
         type GroupAutokenLoan = ();
         type GroupBorrow = EntityQueryGroupBorrow;
 
@@ -993,7 +997,7 @@ pub mod query_internals {
     impl<T: 'static> QueryPart for SlotQueryPart<T> {
         type Input<'a> = DirectSlot<'a, T>;
         type TagIter = iter::Once<RawTag>;
-        type Heap = Arc<Heap<T>>;
+        type Heap = FetchHeap<T>;
         type GroupAutokenLoan = ();
         type GroupBorrow = SlotQueryGroupBorrow;
 
@@ -1029,7 +1033,7 @@ pub mod query_internals {
     impl<T: 'static> QueryPart for ObjQueryPart<T> {
         type Input<'a> = Obj<T>;
         type TagIter = iter::Once<RawTag>;
-        type Heap = (EntityQueryHeap, Arc<Heap<T>>);
+        type Heap = (FetchEntity, FetchHeap<T>);
         type GroupAutokenLoan = ((), ());
         type GroupBorrow = (EntityQueryGroupBorrow, SlotQueryGroupBorrow);
 
@@ -1071,7 +1075,7 @@ pub mod query_internals {
     impl<T: 'static> QueryPart for ORefQueryPart<T> {
         type Input<'a> = CompRef<'a, T>;
         type TagIter = iter::Once<RawTag>;
-        type Heap = (EntityQueryHeap, Arc<Heap<T>>);
+        type Heap = (FetchEntity, FetchHeap<T>);
         type GroupAutokenLoan = ((), ());
         type GroupBorrow = (EntityQueryGroupBorrow, SlotQueryGroupBorrow);
 
@@ -1116,7 +1120,7 @@ pub mod query_internals {
     impl<T: 'static> QueryPart for OMutQueryPart<T> {
         type Input<'a> = CompMut<'a, T>;
         type TagIter = iter::Once<RawTag>;
-        type Heap = (EntityQueryHeap, Arc<Heap<T>>);
+        type Heap = (FetchEntity, FetchHeap<T>);
         type GroupAutokenLoan = ((), ());
         type GroupBorrow = (EntityQueryGroupBorrow, SlotQueryGroupBorrow);
 
@@ -1161,7 +1165,7 @@ pub mod query_internals {
     impl<T: 'static> QueryPart for RefQueryPart<T> {
         type Input<'a> = &'a T;
         type TagIter = iter::Once<RawTag>;
-        type Heap = Arc<Heap<T>>;
+        type Heap = FetchHeap<T>;
         type GroupAutokenLoan = ImmutableBorrow<T>;
         type GroupBorrow = CompRefQueryGroupBorrow;
 
@@ -1197,7 +1201,7 @@ pub mod query_internals {
     impl<T: 'static> QueryPart for MutQueryPart<T> {
         type Input<'a> = &'a mut T;
         type TagIter = iter::Once<RawTag>;
-        type Heap = Arc<Heap<T>>;
+        type Heap = FetchHeap<T>;
         type GroupAutokenLoan = MutableBorrow<T>;
         type GroupBorrow = CompMutQueryGroupBorrow;
 
