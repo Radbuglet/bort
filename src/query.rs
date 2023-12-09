@@ -283,6 +283,10 @@ pub fn flush() {
     flush_with_custom_msg("attempted to flush the entity database while a query was active");
 }
 
+pub fn total_flush_count() -> u64 {
+    DbRoot::get(MainThreadToken::acquire_fmt("query total flush count")).total_flush_count()
+}
+
 #[derive(Debug)]
 pub struct FlushGuard(OptRef<'static, RecursiveQueryGuardTy>);
 
@@ -300,14 +304,14 @@ pub fn borrow_flush_guard() -> FlushGuard {
 
 // === Query Version Tracking === //
 
+pub trait QueryKey: 'static + Sized + Send + Sync + Clone + Hash + PartialEq {}
+
+impl<T: 'static + Send + Sync + Clone + Hash + PartialEq> QueryKey for T {}
+
 #[derive_where(Default)]
+#[derive(Clone)]
 pub struct QueryVersionMap<V> {
     versions: FxHashMap<ReifiedQueryKey, V>,
-}
-
-struct ReifiedQueryKey {
-    hash: u64,
-    value: Box<dyn Any + Send + Sync>,
 }
 
 impl<V> fmt::Debug for QueryVersionMap<V> {
@@ -336,6 +340,7 @@ impl<V> QueryVersionMap<V> {
             hash == entry.hash
                 && entry
                     .value
+                    .as_any()
                     .downcast_ref::<K>()
                     .is_some_and(|candidate| candidate == &key)
         });
@@ -359,9 +364,41 @@ impl<V> QueryVersionMap<V> {
     }
 }
 
-pub trait QueryKey: 'static + Sized + Send + Sync + Hash + PartialEq {}
+struct ReifiedQueryKey {
+    hash: u64,
+    value: Box<dyn AnyAndClone>,
+}
 
-impl<T: 'static + Send + Sync + Hash + PartialEq> QueryKey for T {}
+impl Clone for ReifiedQueryKey {
+    fn clone(&self) -> Self {
+        Self {
+            hash: self.hash,
+            value: self.value.clone_box(),
+        }
+    }
+}
+
+trait AnyAndClone: Any + Send + Sync {
+    fn clone_box(&self) -> Box<dyn AnyAndClone>;
+
+    fn as_any(&self) -> &dyn Any;
+
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+}
+
+impl<T: 'static + Clone + Send + Sync> AnyAndClone for T {
+    fn clone_box(&self) -> Box<dyn AnyAndClone> {
+        Box::new(self.clone())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
 
 // === Query Drivers === //
 
@@ -405,7 +442,8 @@ pub trait QueryDriver: Sized {
 
     fn foreach_block<B>(
         &self,
-        heap: usize,
+        heap_idx: usize,
+        heap_len: usize,
         heap_userdata: &mut Self::HeapIterInfo<'_>,
         process: impl FnMut(usize, Self::BlockIterInfo<'_>) -> ControlFlow<B>,
     ) -> ControlFlow<B>;
@@ -842,7 +880,7 @@ pub mod query_internals {
 
         type GroupAutokenLoan: Default + 'static;
         type GroupBorrow: for<'block> QueryGroupBorrow<
-            <Self::Heap as QueryHeap>::Block<'block, MainThreadToken>,
+            BlockForQueryPart<'block, Self>,
             MainThreadToken,
             Self::GroupAutokenLoan,
         >;
@@ -996,6 +1034,7 @@ pub mod query_internals {
                         // For each block...
                         driver.foreach_block(
                             heap_i,
+                            blocks.len(),
                             &mut userdata,
                             |block_i, mut userdata| 'process_block: {
                                 let block = blocks.get(heap_i).unwrap();
@@ -1497,6 +1536,16 @@ pub mod query_internals {
     pub fn empty_tag_iter() -> impl Iterator<Item = RawTag> {
         [].into_iter()
     }
+
+    pub trait ExtractRefOfQueryDriver: QueryDriver {
+        fn __extract_ref_of_query_driver(&self) -> &Self;
+    }
+
+    impl<T: ?Sized + QueryDriver> ExtractRefOfQueryDriver for T {
+        fn __extract_ref_of_query_driver(&self) -> &Self {
+            self
+        }
+    }
 }
 
 #[macro_export]
@@ -1545,7 +1594,8 @@ macro_rules! query {
             extra_tags = {$extra_tags:expr};
             body = {$($body:tt)*};
         }
-    ) => {
+    ) => {{
+		use $crate::query::query_internals::ExtractRefOfQueryDriver;
         $crate::query::query_internals::cbit!(
             for ($extractor, $name) in $crate::query::query_internals::QueryPart::query_driven(
 				$parts,
@@ -1554,13 +1604,13 @@ macro_rules! query {
 					struct MyQueryKey;
 					MyQueryKey
 				},
-				$driver,
+				$driver.__extract_ref_of_query_driver(),
 				$extra_tags,
 			) {
                 $($body)*
             }
         )
-	};
+	}};
 	(
         @internal {
             remaining_input = {};

@@ -10,8 +10,6 @@ use derive_where::derive_where;
 pub trait RandomAccessIter<'i, WhereACannotOutliveSelf = &'i Self> {
     type Item;
 
-    const IS_FINITE: bool;
-
     /// Returns the length of the iterator. This value should not change unless this iterator is
     /// borrowed mutably.
     fn len(&self) -> usize;
@@ -99,8 +97,6 @@ where
 {
     type Item = I::Item;
 
-    const IS_FINITE: bool = I::IS_FINITE;
-
     fn len(&self) -> usize {
         self.0.len()
     }
@@ -152,8 +148,6 @@ impl<'a, T> RandomAccessSliceRef<'a, T> {
 impl<'i, 'a, T> RandomAccessIter<'i> for RandomAccessSliceRef<'a, T> {
     type Item = &'a T;
 
-    const IS_FINITE: bool = true;
-
     fn len(&self) -> usize {
         self.0.len()
     }
@@ -183,8 +177,6 @@ impl<'a, T> RandomAccessSliceMut<'a, T> {
 
 impl<'i, 'a, T> RandomAccessIter<'i> for RandomAccessSliceMut<'a, T> {
     type Item = &'a mut T;
-
-    const IS_FINITE: bool = true;
 
     fn len(&self) -> usize {
         self.ptr.len()
@@ -225,8 +217,6 @@ impl<T> RandomAccessVec<T> {
 impl<'i, T> RandomAccessIter<'i> for RandomAccessVec<T> {
     type Item = &'i mut T;
 
-    const IS_FINITE: bool = true;
-
     fn len(&self) -> usize {
         self.len
     }
@@ -257,8 +247,6 @@ impl<'i, A: RandomAccessIter<'i>, B: RandomAccessIter<'i>> RandomAccessIter<'i>
     for RandomAccessZip<A, B>
 {
     type Item = (A::Item, B::Item);
-
-    const IS_FINITE: bool = A::IS_FINITE || B::IS_FINITE;
 
     fn len(&self) -> usize {
         self.0.len().min(self.1.len())
@@ -294,8 +282,6 @@ where
     F: RandomAccessMapper<I::Item>,
 {
     type Item = F::Output;
-
-    const IS_FINITE: bool = I::IS_FINITE;
 
     fn len(&self) -> usize {
         self.0.len()
@@ -343,8 +329,6 @@ impl<T> RandomAccessRepeat<T> {
 impl<'i, T: Clone> RandomAccessIter<'i> for RandomAccessRepeat<T> {
     type Item = T;
 
-    const IS_FINITE: bool = false;
-
     fn len(&self) -> usize {
         usize::MAX
     }
@@ -365,8 +349,6 @@ pub struct RandomAccessEnumerate;
 
 impl<'i> RandomAccessIter<'i> for RandomAccessEnumerate {
     type Item = usize;
-
-    const IS_FINITE: bool = false;
 
     fn len(&self) -> usize {
         usize::MAX
@@ -394,8 +376,6 @@ impl<I> RandomAccessTake<I> {
 
 impl<'i, I: RandomAccessIter<'i>> RandomAccessIter<'i> for RandomAccessTake<I> {
     type Item = I::Item;
-
-    const IS_FINITE: bool = true;
 
     fn len(&self) -> usize {
         self.0.len().min(self.1)

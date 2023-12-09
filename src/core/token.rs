@@ -66,9 +66,6 @@ use crate::util::{
 
 // === Access Token Traits === //
 
-// TODO: Tighten up these traits (e.g. all immutable tokens should be workers, main threads should be
-// more generic)
-
 // Namespaces
 #[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Namespace(pub(super) NonZeroU64);

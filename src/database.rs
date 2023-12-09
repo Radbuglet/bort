@@ -69,6 +69,9 @@ pub struct DbRoot {
     // The total number of entities ever created by the application.
     debug_total_spawns: u64,
 
+    // The number of flushes performed on this database.
+    total_flush_count: u64,
+
     // A guard to protect against flushing while querying. This doesn't prevent panics but it does
     // prevent nasty concurrent modification surprises.
     query_guard: &'static NOptRefCell<RecursiveQueryGuardTy>,
@@ -370,6 +373,7 @@ impl Default for DbRoot {
             probably_alive_dirty_entities: Vec::new(),
             dead_dirty_entities: Vec::new(),
             debug_total_spawns: 0,
+            total_flush_count: 0,
             query_guard: leak(NOptRefCell::new_full(
                 &TrivialUnjailToken,
                 RecursiveQueryGuardTy,
@@ -618,6 +622,10 @@ impl DbRoot {
 
     // === Queries === //
 
+    pub fn total_flush_count(&self) -> u64 {
+        self.total_flush_count
+    }
+
     pub fn borrow_query_guard(
         &self,
         token: &'static MainThreadToken,
@@ -717,6 +725,8 @@ impl DbRoot {
             .query_guard
             .try_borrow_mut(token, &mut guard_loaner)
             .map_err(|_| ConcurrentFlushError)?;
+
+        self.total_flush_count += 1;
 
         let mut may_need_truncation = FxHashSet::default();
         let mut may_need_arch_deletion = FxHashSet::default();
