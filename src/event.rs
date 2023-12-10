@@ -1,4 +1,11 @@
-use std::{cell::RefCell, marker::PhantomData, mem, ops::ControlFlow};
+use std::{
+    any::{type_name, Any, TypeId},
+    cell::{RefCell, RefMut},
+    fmt,
+    marker::PhantomData,
+    mem,
+    ops::ControlFlow,
+};
 
 use derive_where::derive_where;
 
@@ -11,10 +18,12 @@ use crate::{
         RawTag,
     },
     util::{
-        hash_map::FxHashSet,
+        hash_map::{FxHashMap, FxHashSet},
         misc::{IsUnit, Truthy},
     },
 };
+
+use self::sealed::EventGroupMarkerWithSeparated;
 
 // === Core Traits === //
 
@@ -63,20 +72,6 @@ pub trait ClearableEvent {
     fn clear(&mut self);
 }
 
-pub trait SimpleEventTarget:
-    EventTarget<Self::Event> + QueryDriver + for<'a> QueryDriverTypes<'a, Item = &'a Self::Event>
-{
-    type Event;
-}
-
-impl<E, T> SimpleEventTarget for T
-where
-    T: EventTarget<E>,
-    T: QueryDriver + for<'a> QueryDriverTypes<'a, Item = &'a E>,
-{
-    type Event = E;
-}
-
 // === VecEventList === //
 
 #[derive(Debug)]
@@ -108,7 +103,7 @@ impl<T> ProcessableEvent for VecEventList<T> {
 
     fn has_updated_since(&self, old: Self::Version) -> (bool, Self::Version) {
         let new = self.version();
-        (new == old, new)
+        (new != old, new)
     }
 }
 
@@ -283,13 +278,13 @@ impl<E: Default> EventSwapper<E> {
 }
 
 impl<E: ProcessableEvent> EventSwapper<E> {
-    pub fn drain_recursive(&mut self, f: impl FnMut(&mut E, &mut E)) {
+    pub fn drain_recursive(&mut self, f: impl FnMut(&E, &mut E)) {
         drain_recursive(&mut self.primary, &mut self.secondary, f)
     }
 
     pub fn drain_recursive_breakable<B>(
         &mut self,
-        f: impl FnMut(&mut E, &mut E) -> ControlFlow<B>,
+        f: impl FnMut(&E, &mut E) -> ControlFlow<B>,
     ) -> ControlFlow<B> {
         drain_recursive_breakable(&mut self.primary, &mut self.secondary, f)
     }
@@ -305,7 +300,7 @@ impl<E: ClearableEvent> ClearableEvent for EventSwapper<E> {
 pub fn drain_recursive<E: ProcessableEvent>(
     primary: &mut E,
     secondary: &mut E,
-    mut f: impl FnMut(&mut E, &mut E),
+    mut f: impl FnMut(&E, &mut E),
 ) {
     drain_recursive_breakable::<_, ()>(primary, secondary, |reader, writer| {
         f(reader, writer);
@@ -316,7 +311,7 @@ pub fn drain_recursive<E: ProcessableEvent>(
 pub fn drain_recursive_breakable<E: ProcessableEvent, B>(
     primary: &mut E,
     secondary: &mut E,
-    mut f: impl FnMut(&mut E, &mut E) -> ControlFlow<B>,
+    mut f: impl FnMut(&E, &mut E) -> ControlFlow<B>,
 ) -> ControlFlow<B> {
     // Run both loops to catch up the handler
 
@@ -347,4 +342,352 @@ pub fn drain_recursive_breakable<E: ProcessableEvent, B>(
     }
 
     ControlFlow::Continue(())
+}
+
+// === EventGroup === //
+
+// SimpleEventList
+pub trait SimpleEventList:
+    'static
+    + Default
+    + Send
+    + EventTarget<Self::Event>
+    + ClearableEvent
+    + QueryDriver
+    + for<'a> QueryDriverTypes<'a, Item = &'a Self::Event>
+{
+    type Event: ClearableEvent;
+}
+
+impl<E, T> SimpleEventList for T
+where
+    T: 'static + Default + Send + EventTarget<E> + ClearableEvent,
+    T: QueryDriver + for<'a> QueryDriverTypes<'a, Item = &'a E>,
+    E: ClearableEvent,
+{
+    type Event = E;
+}
+
+// EventGroupMarkerXx
+mod sealed {
+    pub trait EventGroupMarkerWithSeparated<E> {
+        type List: 'static + super::SimpleEventList<Event = E> + Default;
+    }
+}
+
+pub trait EventGroupMarkerWith<L: 'static + SimpleEventList + Default>:
+    sealed::EventGroupMarkerWithSeparated<L::Event, List = L>
+{
+}
+
+pub trait EventGroupMarkerExtends<G: ?Sized> {}
+
+// EventGroup
+#[repr(C)]
+#[derive_where(Default)]
+pub struct EventGroup<G: ?Sized> {
+    _ty: PhantomData<fn(G) -> G>,
+    events: Vec<Box<dyn ErasedEvent>>,
+    ty_map: FxHashMap<TypeId, usize>,
+    version: u64,
+}
+
+trait ErasedEvent: Any + Send + ClearableEvent {
+    fn ty_name(&self) -> &'static str;
+
+    fn as_any(&self) -> &dyn Any;
+
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+}
+
+impl<T: Any + Send + ClearableEvent> ErasedEvent for T {
+    fn ty_name(&self) -> &'static str {
+        type_name::<T>()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+impl<G: ?Sized> fmt::Debug for EventGroup<G> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        struct FmtEventsList<'a>(&'a [Box<dyn ErasedEvent>]);
+
+        impl fmt::Debug for FmtEventsList<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_list()
+                    .entries(self.0.iter().map(|v| v.ty_name()))
+                    .finish()
+            }
+        }
+
+        f.debug_struct("EventGroup")
+            .field("events", &FmtEventsList(&self.events))
+            .finish_non_exhaustive()
+    }
+}
+
+impl<G: ?Sized> EventGroup<G> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn wrap_swapper(self) -> EventSwapper<Self> {
+        EventSwapper::new(self)
+    }
+
+    pub fn read_raw<L: SimpleEventList>(&self) -> Option<&L> {
+        self.ty_map
+            .get(&TypeId::of::<L>())
+            .map(|&idx| self.events[idx].as_any().downcast_ref::<L>().unwrap())
+    }
+
+    pub fn read<E>(&self) -> Option<&G::List>
+    where
+        G: EventGroupMarkerWithSeparated<E>,
+    {
+        self.read_raw()
+    }
+
+    fn write_raw_index<L: SimpleEventList>(&mut self) -> usize {
+        *self.ty_map.entry(TypeId::of::<L>()).or_insert_with(|| {
+            let idx = self.events.len();
+            self.events.push(Box::<L>::default());
+            idx
+        })
+    }
+
+    pub fn fire_raw<L: SimpleEventList>(&mut self, target: Entity, event: L::Event) {
+        self.version += 1;
+
+        let index = self.write_raw_index::<L>();
+        self.events[index]
+            .as_any_mut()
+            .downcast_mut::<L>()
+            .unwrap()
+            .fire(target, event);
+    }
+
+    pub fn fire_owned_raw<L: SimpleEventList>(&mut self, target: OwnedEntity, event: L::Event) {
+        self.version += 1;
+
+        let index = self.write_raw_index::<L>();
+        self.events[index]
+            .as_any_mut()
+            .downcast_mut::<L>()
+            .unwrap()
+            .fire_owned(target, event);
+    }
+
+    pub fn clear_single_raw<L: SimpleEventList>(&mut self) {
+        // N.B. we don't update the version here since this action didn't actually add any new events.
+
+        if let Some(&index) = self.ty_map.get(&TypeId::of::<L>()) {
+            self.events[index].clear();
+        }
+    }
+
+    pub fn clear_single<E>(&mut self)
+    where
+        G: EventGroupMarkerWithSeparated<E>,
+    {
+        self.clear_single_raw::<G::List>();
+    }
+
+    pub fn writer(&mut self) -> EventGroupWriter<'_, G> {
+        EventGroupWriter {
+            group: RefCell::new(self),
+        }
+    }
+
+    pub fn cast_arbitrary<G2: ?Sized>(self) -> EventGroup<G2> {
+        EventGroup {
+            _ty: PhantomData,
+            events: self.events,
+            ty_map: self.ty_map,
+            version: self.version,
+        }
+    }
+
+    pub fn cast_arbitrary_ref<G2: ?Sized>(&self) -> &EventGroup<G2> {
+        #[allow(unsafe_code)] // TODO: Use a library
+        unsafe {
+            mem::transmute(self)
+        }
+    }
+
+    pub fn cast_arbitrary_mut<G2: ?Sized>(&mut self) -> &mut EventGroup<G2> {
+        #[allow(unsafe_code)] // TODO: Use a library
+        unsafe {
+            mem::transmute(self)
+        }
+    }
+
+    pub fn cast<G2: ?Sized + EventGroupMarkerExtends<G>>(self) -> EventGroup<G2> {
+        self.cast_arbitrary()
+    }
+
+    pub fn cast_ref<G2: ?Sized + EventGroupMarkerExtends<G>>(&self) -> &EventGroup<G2> {
+        self.cast_arbitrary_ref()
+    }
+
+    pub fn cast_mut<G2: ?Sized + EventGroupMarkerExtends<G>>(&mut self) -> &mut EventGroup<G2> {
+        self.cast_arbitrary_mut()
+    }
+}
+
+impl<G: ?Sized, E, C> EventTarget<E, C> for EventGroup<G>
+where
+    G: EventGroupMarkerWithSeparated<E>,
+{
+    fn fire_cx(&mut self, target: Entity, event: E, _context: C) {
+        self.fire_raw::<G::List>(target, event);
+    }
+
+    fn fire_owned_cx(&mut self, target: OwnedEntity, event: E, _context: C) {
+        self.fire_owned_raw::<G::List>(target, event);
+    }
+}
+
+impl<G: ?Sized> ProcessableEvent for EventGroup<G> {
+    type Version = u64;
+
+    fn version(&self) -> Self::Version {
+        self.version
+    }
+
+    fn has_updated_since(&self, old: Self::Version) -> (bool, Self::Version) {
+        let new = self.version;
+        (new != old, new)
+    }
+}
+
+impl<G: ?Sized> ClearableEvent for EventGroup<G> {
+    fn clear(&mut self) {
+        // N.B. we don't update the version here since this action didn't actually add any new events.
+
+        for event in &mut self.events {
+            event.clear();
+        }
+    }
+}
+
+#[derive_where(Debug)]
+pub struct EventGroupWriter<'g, G: ?Sized> {
+    group: RefCell<&'g mut EventGroup<G>>,
+}
+
+impl<'g, G: ?Sized> EventGroupWriter<'g, G> {
+    pub fn group(&mut self) -> &mut EventGroup<G> {
+        self.group.get_mut()
+    }
+
+    pub fn event_raw<'w, L: SimpleEventList>(
+        &'w self,
+    ) -> EventGroupWriterSpec<'g, 'w, G, L::Event> {
+        EventGroupWriterSpec {
+            _ty: PhantomData,
+            index: self.group.borrow_mut().write_raw_index::<L>(),
+            writer: self,
+        }
+    }
+
+    pub fn event<'w, E>(&'w self) -> EventGroupWriterSpec<'g, 'w, G, E>
+    where
+        G: EventGroupMarkerWithSeparated<E>,
+    {
+        self.event_raw::<G::List>()
+    }
+
+    pub fn fire_raw<L: SimpleEventList>(&self, target: Entity, event: L::Event) {
+        self.group.borrow_mut().fire_raw::<L>(target, event);
+    }
+
+    pub fn fire_owned_raw<L: SimpleEventList>(&self, target: OwnedEntity, event: L::Event) {
+        self.group.borrow_mut().fire_owned_raw::<L>(target, event);
+    }
+
+    pub fn fire<E>(&self, target: Entity, event: E)
+    where
+        G: EventGroupMarkerWithSeparated<E>,
+    {
+        self.group.borrow_mut().fire(target, event);
+    }
+
+    pub fn fire_owned<E>(&self, target: OwnedEntity, event: E)
+    where
+        G: EventGroupMarkerWithSeparated<E>,
+    {
+        self.group.borrow_mut().fire_owned(target, event);
+    }
+
+    pub fn clear_single_raw<L: SimpleEventList>(&self) {
+        self.group.borrow_mut().clear_single_raw::<L>();
+    }
+
+    pub fn clear_single<E>(&self)
+    where
+        G: EventGroupMarkerWithSeparated<E>,
+    {
+        self.group.borrow_mut().clear_single::<E>();
+    }
+}
+
+pub struct EventGroupWriterSpec<'g, 'w, G: ?Sized, L> {
+    _ty: PhantomData<fn() -> L>,
+    writer: &'w EventGroupWriter<'g, G>,
+    index: usize,
+}
+
+impl<G: ?Sized, L: 'static + fmt::Debug> fmt::Debug for EventGroupWriterSpec<'_, '_, G, L> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EventGroupWriterSpec")
+            .field("writer", &self.writer)
+            .field("index", &self.index)
+            .field("instance", &*self.get(false))
+            .finish()
+    }
+}
+
+impl<G: ?Sized, L: 'static> EventGroupWriterSpec<'_, '_, G, L> {
+    fn get(&self, increment_version: bool) -> RefMut<'_, L> {
+        RefMut::map(self.writer.group.borrow_mut(), |group| {
+            if increment_version {
+                group.version += 1;
+            }
+
+            group.events[self.index]
+                .as_any_mut()
+                .downcast_mut::<L>()
+                .unwrap()
+        })
+    }
+}
+
+impl<G: ?Sized, L, C> EventTarget<L::Event, C> for EventGroupWriterSpec<'_, '_, G, L>
+where
+    L: SimpleEventList,
+{
+    fn fire_cx(&mut self, target: Entity, event: L::Event, _context: C) {
+        self.get(true).fire(target, event);
+    }
+
+    fn fire_owned_cx(&mut self, target: OwnedEntity, event: L::Event, _context: C) {
+        self.get(true).fire_owned(target, event);
+    }
+}
+
+impl<G: ?Sized, L> ClearableEvent for EventGroupWriterSpec<'_, '_, G, L>
+where
+    L: SimpleEventList,
+{
+    fn clear(&mut self) {
+        // N.B. we don't update the version here since this action didn't actually add any new events.
+        self.get(false).clear();
+    }
 }
