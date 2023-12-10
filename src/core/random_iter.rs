@@ -7,7 +7,7 @@ use derive_where::derive_where;
 // RandomAccessIter
 // pub type RaiItem<'i, I> = <I as RandomAccessIter<'i>>::Item;
 
-pub trait RandomAccessIter<'i, WhereACannotOutliveSelf = &'i Self> {
+pub trait RandomAccessIter<'i, WhereICannotOutliveSelf = &'i Self> {
     type Item;
 
     /// Returns the length of the iterator. This value should not change unless this iterator is
