@@ -54,7 +54,9 @@ where
 pub trait ProcessableEvent {
     type Version: 'static;
 
-    fn has_updated(&self, old: Self::Version) -> (bool, Self::Version);
+    fn version(&self) -> Self::Version;
+
+    fn has_updated_since(&self, old: Self::Version) -> (bool, Self::Version);
 
     fn clear(&mut self);
 }
@@ -84,8 +86,12 @@ impl<T> EventTarget<T> for VecEventList<T> {
 impl<T> ProcessableEvent for VecEventList<T> {
     type Version = (u64, usize);
 
-    fn has_updated(&self, old: Self::Version) -> (bool, Self::Version) {
-        let new = (self.gen, self.events.len());
+    fn version(&self) -> Self::Version {
+        (self.gen, self.events.len())
+    }
+
+    fn has_updated_since(&self, old: Self::Version) -> (bool, Self::Version) {
+        let new = self.version();
         (new == old, new)
     }
 
@@ -239,4 +245,53 @@ impl<E> EventTarget<E> for NopEvent {
     fn fire_cx(&mut self, _target: Entity, _event: E, _context: ()) {}
 
     fn fire_owned_cx(&mut self, _target: OwnedEntity, _event: E, _context: ()) {}
+}
+
+// === drain_recursive === //
+
+pub fn drain_recursive<E: ProcessableEvent>(
+    primary: &mut E,
+    secondary: &mut E,
+    mut f: impl FnMut(&mut E, &mut E),
+) {
+    drain_recursive_breakable::<_, ()>(primary, secondary, |reader, writer| {
+        f(reader, writer);
+        ControlFlow::Continue(())
+    });
+}
+
+pub fn drain_recursive_breakable<E: ProcessableEvent, B>(
+    primary: &mut E,
+    secondary: &mut E,
+    mut f: impl FnMut(&mut E, &mut E) -> ControlFlow<B>,
+) -> ControlFlow<B> {
+    // Run both loops to catch up the handler
+
+    // primary -> secondary
+    f(primary, secondary)?;
+
+    // secondary -> primary
+    let primary_version = primary.version();
+    let secondary_version = secondary.version();
+    f(secondary, primary)?;
+
+    // The secondary event has been drained of updates leaving only the primary potentially
+    // dirty. Hence, the `primary` is our first reader.
+    let mut reader = (primary, primary_version);
+    let mut writer = (secondary, secondary_version);
+
+    // If the reader has been updated since the last time we processed it...
+    while let (true, reader_version) = reader.0.has_updated_since(reader.1) {
+        // Mark the new version.
+        reader.1 = reader_version;
+
+        // Let the closure handle it.
+        f(reader.0, writer.0)?;
+
+        // Now, because the `writer` is potentially dirty and the `reader` is now drained, the
+        // two events swap places and the cycle continues.
+        mem::swap(&mut reader, &mut writer);
+    }
+
+    ControlFlow::Continue(())
 }
