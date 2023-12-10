@@ -4,8 +4,10 @@ fn main() {
     let tag_1 = Tag::<i32>::new();
     let tag_2 = Tag::<u32>::new();
     let haha = Entity::new_unmanaged()
-        .with_tagged(tag_1, 3)
-        .with_tagged(tag_2, 4);
+        .with(3i32)
+        .with_tag(tag_1)
+        .with(4u32)
+        .with_tag(tag_2);
 
     flush();
     haha.untag(tag_1);

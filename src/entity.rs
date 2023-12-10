@@ -17,8 +17,9 @@ use crate::{
     database::{DbRoot, DbStorage, EntityDeadError, InertEntity},
     debug::AsDebugLabel,
     obj::{Obj, OwnedObj},
-    query::{ArchetypeId, RawTag, Tag},
+    query::{ArchetypeId, RawTag},
     util::misc::RawFmt,
+    GlobalTag, HasGlobalManagedTag,
 };
 
 // === Storage === //
@@ -198,6 +199,15 @@ impl Entity {
         self
     }
 
+    pub fn with_self_referential_tagged<T: 'static>(self, func: impl FnOnce(Entity) -> T) -> Self
+    where
+        T: HasGlobalManagedTag<Component = T>,
+    {
+        self.insert(func(self));
+        self.tag(GlobalTag::<T>);
+        self
+    }
+
     pub fn with_many<F>(self, f: F) -> Self
     where
         F: FnOnce(Entity),
@@ -319,9 +329,12 @@ impl Entity {
         self
     }
 
-    pub fn with_tagged<T: 'static>(self, tag: impl Into<Tag<T>>, comp: T) -> Self {
+    pub fn with_tagged<T: 'static>(self, comp: T) -> Self
+    where
+        T: HasGlobalManagedTag<Component = T>,
+    {
         self.insert(comp);
-        self.tag(tag.into());
+        self.tag(GlobalTag::<T>);
         self
     }
 
@@ -442,6 +455,15 @@ impl OwnedEntity {
         self
     }
 
+    pub fn with_self_referential_tagged<T: 'static>(self, func: impl FnOnce(Entity) -> T) -> Self
+    where
+        T: HasGlobalManagedTag<Component = T>,
+    {
+        self.entity.insert(func(self.entity()));
+        self.entity.tag(GlobalTag::<T>);
+        self
+    }
+
     pub fn with_many<F>(self, f: F) -> Self
     where
         F: FnOnce(Entity),
@@ -546,9 +568,12 @@ impl OwnedEntity {
         self
     }
 
-    pub fn with_tagged<T: 'static>(self, tag: impl Into<Tag<T>>, comp: T) -> Self {
+    pub fn with_tagged<T: 'static>(self, comp: T) -> Self
+    where
+        T: HasGlobalManagedTag<Component = T>,
+    {
         self.insert(comp);
-        self.tag(tag.into());
+        self.tag(GlobalTag::<T>);
         self
     }
 

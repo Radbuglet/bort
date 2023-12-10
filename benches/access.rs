@@ -428,8 +428,10 @@ fn spawn_tagged_pos_vel_pop(pos_tag: Tag<Position>, vel_tag: Tag<Velocity>) -> V
     (0..100_000)
         .map(|i| {
             OwnedEntity::new()
-                .with_tagged(pos_tag, Position(i as f32))
-                .with_tagged(vel_tag, Velocity(i as f32))
+                .with(Position(i as f32))
+                .with_tag(pos_tag)
+                .with(Velocity(i as f32))
+                .with_tag(vel_tag)
         })
         .collect()
 }

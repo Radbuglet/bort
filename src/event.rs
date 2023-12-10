@@ -4,7 +4,7 @@ use std::{
     fmt,
     marker::PhantomData,
     mem,
-    ops::ControlFlow,
+    ops::{ControlFlow, Deref, DerefMut},
 };
 
 use derive_where::derive_where;
@@ -22,8 +22,6 @@ use crate::{
         misc::{IsUnit, Truthy},
     },
 };
-
-use self::sealed::EventGroupMarkerWithSeparated;
 
 // === Core Traits === //
 
@@ -284,7 +282,7 @@ impl<E: ProcessableEvent> EventSwapper<E> {
 
     pub fn drain_recursive_breakable<B>(
         &mut self,
-        f: impl FnMut(&E, &mut E) -> ControlFlow<B>,
+        f: impl FnMut((&E, &mut E)) -> ControlFlow<B>,
     ) -> ControlFlow<B> {
         drain_recursive_breakable(&mut self.primary, &mut self.secondary, f)
     }
@@ -297,12 +295,26 @@ impl<E: ClearableEvent> ClearableEvent for EventSwapper<E> {
     }
 }
 
+impl<E> Deref for EventSwapper<E> {
+    type Target = E;
+
+    fn deref(&self) -> &Self::Target {
+        &self.primary
+    }
+}
+
+impl<E> DerefMut for EventSwapper<E> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.primary
+    }
+}
+
 pub fn drain_recursive<E: ProcessableEvent>(
     primary: &mut E,
     secondary: &mut E,
     mut f: impl FnMut(&E, &mut E),
 ) {
-    drain_recursive_breakable::<_, ()>(primary, secondary, |reader, writer| {
+    drain_recursive_breakable::<_, ()>(primary, secondary, |(reader, writer)| {
         f(reader, writer);
         ControlFlow::Continue(())
     });
@@ -311,17 +323,17 @@ pub fn drain_recursive<E: ProcessableEvent>(
 pub fn drain_recursive_breakable<E: ProcessableEvent, B>(
     primary: &mut E,
     secondary: &mut E,
-    mut f: impl FnMut(&E, &mut E) -> ControlFlow<B>,
+    mut f: impl FnMut((&E, &mut E)) -> ControlFlow<B>,
 ) -> ControlFlow<B> {
     // Run both loops to catch up the handler
 
     // primary -> secondary
-    f(primary, secondary)?;
+    f((primary, secondary))?;
 
     // secondary -> primary
     let primary_version = primary.version();
     let secondary_version = secondary.version();
-    f(secondary, primary)?;
+    f((secondary, primary))?;
 
     // The secondary event has been drained of updates leaving only the primary potentially
     // dirty. Hence, the `primary` is our first reader.
@@ -334,7 +346,7 @@ pub fn drain_recursive_breakable<E: ProcessableEvent, B>(
         reader.1 = reader_version;
 
         // Let the closure handle it.
-        f(reader.0, writer.0)?;
+        f((reader.0, writer.0))?;
 
         // Now, because the `writer` is potentially dirty and the `reader` is now drained, the
         // two events swap places and the cycle continues.
@@ -368,14 +380,12 @@ where
 }
 
 // EventGroupMarkerXx
-mod sealed {
-    pub trait EventGroupMarkerWithSeparated<E> {
-        type List: 'static + super::SimpleEventList<Event = E> + Default;
-    }
+pub trait EventGroupMarkerWithSeparated<E> {
+    type List: 'static + SimpleEventList<Event = E> + Default;
 }
 
 pub trait EventGroupMarkerWith<L: 'static + SimpleEventList + Default>:
-    sealed::EventGroupMarkerWithSeparated<L::Event, List = L>
+    EventGroupMarkerWithSeparated<L::Event, List = L>
 {
 }
 

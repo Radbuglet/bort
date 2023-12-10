@@ -55,7 +55,7 @@ fn main() {
                     alive_and_tagged_2_set.remove(&target);
                 }
             } else {
-                let entity = Entity::new_unmanaged().with_tagged(my_tag, 3);
+                let entity = Entity::new_unmanaged().with(3).with_tag(my_tag);
                 assert!(alive_set.insert(entity));
                 // println!("Spawned {entity:?}");
                 alive_list.push(entity);
