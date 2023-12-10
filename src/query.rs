@@ -202,39 +202,30 @@ impl<T: HasGlobalVirtualTag> From<GlobalVirtualTag<T>> for RawTag {
 pub struct ArchetypeId(pub(crate) InertArchetypeId);
 
 impl ArchetypeId {
-    fn reify_tag_list<R>(
-        tags: impl IntoIterator<Item = RawTag>,
-        f: impl FnOnce(ReifiedTagList<'_>) -> R,
-    ) -> R {
-        let mut tags = tags.into_iter().map(|tag| tag.0);
-        let static_tags: [_; 8] = std::array::from_fn(|_| tags.next());
-        let dynamic_tags = tags.collect::<Vec<_>>();
-
-        f(ReifiedTagList {
-            static_tags: &static_tags,
-            dynamic_tags: &dynamic_tags,
-        })
-    }
-
     pub fn in_intersection(
         tags: impl IntoIterator<Item = RawTag>,
         include_entities: bool,
-    ) -> Vec<ArchetypeQueryInfo> {
+    ) -> Option<Vec<ArchetypeQueryInfo>> {
         let token = MainThreadToken::acquire_fmt("enumerate archetypes in a tag intersection");
 
         let mut archetypes = Vec::new();
-        Self::reify_tag_list(tags, |tags| {
-            DbRoot::get(token).enumerate_tag_intersection(tags, |info| {
-                archetypes.push(ArchetypeQueryInfo {
-                    archetype: info.archetype.into_dangerous_archetype_id(),
-                    heap_count: info.entities.len(),
-                    last_heap_len: info.last_heap_len,
-                    entities: include_entities.then(|| info.entities.clone()),
+        let is_non_empty = ReifiedTagList::reify(tags, |tags| {
+            if tags.is_non_empty() {
+                DbRoot::get(token).enumerate_tag_intersection(tags, |info| {
+                    archetypes.push(ArchetypeQueryInfo {
+                        archetype: info.archetype.into_dangerous_archetype_id(),
+                        heap_count: info.entities.len(),
+                        last_heap_len: info.last_heap_len,
+                        entities: include_entities.then(|| info.entities.clone()),
+                    });
                 });
-            })
+                true
+            } else {
+                false
+            }
         });
 
-        archetypes
+        is_non_empty.then_some(archetypes)
     }
 }
 
@@ -726,8 +717,8 @@ pub mod query_internals {
         type Heap<'a> = (A::Heap<'a>, B::Heap<'a>);
 
         type BlockIter<'a, N> = RandomAccessZip<A::BlockIter<'a, N>, B::BlockIter<'a, N>>
-		where
-			N: 'a + Token;
+        where
+            N: 'a + Token;
 
         type Block<'a, N> = (A::Block<'a, N>, B::Block<'a, N>) where N: 'a + Token;
 
@@ -1033,7 +1024,8 @@ pub mod query_internals {
 
             // Fetch the archetypes containing our desired intersection of tags.
             let archetypes =
-                ArchetypeId::in_intersection(self.tags().chain(extra_tags), Self::NEEDS_ENTITIES);
+                ArchetypeId::in_intersection(self.tags().chain(extra_tags), Self::NEEDS_ENTITIES)
+                    .unwrap_or_default();
 
             // For each archetype...
             for archetype in archetypes {
@@ -1145,62 +1137,62 @@ pub mod query_internals {
                                 let mut blocks = <Self::Heap>::blocks(heap, token);
 
                                 // For each block...
-								#[rustfmt::skip]
+                                #[rustfmt::skip]
                                 driver.foreach_block(
                                     heap_i,
                                     blocks.len(),
                                     &mut userdata,
                                     QueryBlockHandlerInstance(PhantomData, |block_i, mut userdata| 'pb: {
-										let block = blocks.get(heap_i).unwrap();
+                                        let block = blocks.get(heap_i).unwrap();
 
-										// Attempt to run the fast-path...
-										let mut loaner = <Self::GroupAutokenLoan>::default();
+                                        // Attempt to run the fast-path...
+                                        let mut loaner = <Self::GroupAutokenLoan>::default();
 
-										if let Some(mut block) =
-											<Self::GroupBorrow>::try_borrow_group(
-												&block,
-												token,
-												&mut loaner,
-											)
-										{
-											let mut block = <Self::GroupBorrow>::iter(&mut block);
+                                        if let Some(mut block) =
+                                            <Self::GroupBorrow>::try_borrow_group(
+                                                &block,
+                                                token,
+                                                &mut loaner,
+                                            )
+                                        {
+                                            let mut block = <Self::GroupBorrow>::iter(&mut block);
 
-											driver.foreach_element_in_full_block(
-												block_i,
-												&mut userdata,
-												QueryBlockElementHandlerInstance(PhantomData, |index, item| {
-													f((
-														Self::elem_from_block_item(
-															token,
-															&mut block
-																.get(index as usize)
-																.unwrap(),
-														),
-														item,
-													))
-												}),
-											)?;
+                                            driver.foreach_element_in_full_block(
+                                                block_i,
+                                                &mut userdata,
+                                                QueryBlockElementHandlerInstance(PhantomData, |index, item| {
+                                                    f((
+                                                        Self::elem_from_block_item(
+                                                            token,
+                                                            &mut block
+                                                                .get(index as usize)
+                                                                .unwrap(),
+                                                        ),
+                                                        item,
+                                                    ))
+                                                }),
+                                            )?;
 
-											// N.B. we `break` here rather than putting the slow path in an `else`
-											// block because the lifetime of the `loaner` borrow extends into both
-											// branches of the `if` expression.
-											break 'pb ControlFlow::Continue(());
-										}
+                                            // N.B. we `break` here rather than putting the slow path in an `else`
+                                            // block because the lifetime of the `loaner` borrow extends into both
+                                            // branches of the `if` expression.
+                                            break 'pb ControlFlow::Continue(());
+                                        }
 
-										// Otherwise, run the slow-path.
-										driver.foreach_element_in_semi_block(
-											block_i,
-											&mut userdata,
-											QueryBlockElementHandlerInstance(PhantomData, |index, item| {
-												Self::call_slow_borrow(
-													token,
-													&block,
-													index,
-													|args| f((args, item)),
-												)
-											}),
-										)
-									}),
+                                        // Otherwise, run the slow-path.
+                                        driver.foreach_element_in_semi_block(
+                                            block_i,
+                                            &mut userdata,
+                                            QueryBlockElementHandlerInstance(PhantomData, |index, item| {
+                                                Self::call_slow_borrow(
+                                                    token,
+                                                    &block,
+                                                    index,
+                                                    |args| f((args, item)),
+                                                )
+                                            }),
+                                        )
+                                    }),
                                 )?;
 
                                 ControlFlow::Continue(())
@@ -1673,7 +1665,7 @@ pub mod query_internals {
 
 #[macro_export]
 macro_rules! query {
-	// Entrypoints
+    // Entrypoints
     (
         for ($($input:tt)*) {
             $($body:tt)*
@@ -1682,7 +1674,7 @@ macro_rules! query {
         $crate::query::query! {
             @internal {
                 remaining_input = {$($input)*};
-				bound_event = {};
+                bound_event = {};
                 built_parts = {()};
                 built_extractor = {()};
                 extra_tags = {$crate::query::query_internals::empty_tag_iter()};
@@ -1691,11 +1683,11 @@ macro_rules! query {
         }
     };
 
-	// Recursion base cases
+    // Recursion base cases
     (
         @internal {
             remaining_input = {};
-			bound_event = {};
+            bound_event = {};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -1708,36 +1700,38 @@ macro_rules! query {
             }
         )
     };
-	(
+    (
         @internal {
             remaining_input = {};
-			bound_event = {$name:pat in $driver:expr};
+            bound_event = {$name:pat in $driver:expr};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
             body = {$($body:tt)*};
         }
     ) => {{
-		use $crate::query::query_internals::ExtractRefOfQueryDriver;
+        #[allow(unused_import)]
+        use $crate::query::query_internals::ExtractRefOfQueryDriver;
+
         $crate::query::query_internals::cbit!(
             for ($extractor, $name) in $crate::query::query_internals::QueryPart::query_driven(
-				$parts,
-				{
-					#[derive(Copy, Clone, Hash, Eq, PartialEq)]
-					struct MyQueryKey;
-					MyQueryKey
-				},
-				$driver.__extract_ref_of_query_driver(),
-				$extra_tags,
-			) {
+                $parts,
+                {
+                    #[derive(Copy, Clone, Hash, Eq, PartialEq)]
+                    struct MyQueryKey;
+                    MyQueryKey
+                },
+                $driver.__extract_ref_of_query_driver(),
+                $extra_tags,
+            ) {
                 $($body)*
             }
         )
-	}};
-	(
+    }};
+    (
         @internal {
             remaining_input = {};
-			bound_event = {$($invalid:tt)*};
+            bound_event = {$($invalid:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -1745,17 +1739,17 @@ macro_rules! query {
         }
     ) => {
         $crate::query::query_internals::compile_error!($crate::query::query_internals::concat!(
-			"internal error: invalid `bound_event` (tokens: `",
-			$crate::query::query_internals::stringify!($($invalid)*),
-			"`)"
-		));
+            "internal error: invalid `bound_event` (tokens: `",
+            $crate::query::query_internals::stringify!($($invalid)*),
+            "`)"
+        ));
     };
 
-	// event
-	(
+    // event
+    (
         @internal {
             remaining_input = {event $name:pat in $driver:expr $(, $($rest:tt)*)?};
-			bound_event = {};
+            bound_event = {};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -1765,7 +1759,7 @@ macro_rules! query {
         $crate::query::query! {
             @internal {
                 remaining_input = {$($($rest)*)?};
-				bound_event = {$name in $driver};
+                bound_event = {$name in $driver};
                 built_parts = {$parts};
                 built_extractor = {$extractor};
                 extra_tags = {$extra_tags};
@@ -1773,10 +1767,10 @@ macro_rules! query {
             }
         }
     };
-	(
+    (
         @internal {
             remaining_input = {event $name:pat in $driver:expr $(, $($rest:tt)*)?};
-			bound_event = {$($anything:tt)*};
+            bound_event = {$($anything:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -1788,7 +1782,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {event $($anything:tt)*};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -1808,7 +1802,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {entity $name:pat $(, $($rest:tt)*)?};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -1818,7 +1812,7 @@ macro_rules! query {
         $crate::query::query! {
             @internal {
                 remaining_input = {$($($rest)*)?};
-				bound_event = {$($bound_event)*};
+                bound_event = {$($bound_event)*};
                 built_parts = {($parts, $crate::query::query_internals::EntityQueryPart)};
                 built_extractor = {($extractor, $name)};
                 extra_tags = {$extra_tags};
@@ -1829,7 +1823,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {entity $($anything:tt)*};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -1849,7 +1843,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {slot $name:ident : $ty:ty $(, $($rest:tt)*)?};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -1859,7 +1853,7 @@ macro_rules! query {
         $crate::query::query! {
             @internal {
                 remaining_input = {$($($rest)*)?};
-				bound_event = {$($bound_event)*};
+                bound_event = {$($bound_event)*};
                 built_parts = {($parts, $crate::query::query_internals::SlotQueryPart(
                     $crate::query::query_internals::get_tag::<$ty>(),
                 ))};
@@ -1872,7 +1866,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {slot $name:ident in $tag:expr $(, $($rest:tt)*)?};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -1882,7 +1876,7 @@ macro_rules! query {
         $crate::query::query! {
             @internal {
                 remaining_input = {$($($rest)*)?};
-				bound_event = {$($bound_event)*};
+                bound_event = {$($bound_event)*};
                 built_parts = {($parts, $crate::query::query_internals::SlotQueryPart(
                     $crate::query::query_internals::from_tag($tag),
                 ))};
@@ -1897,7 +1891,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {slot $name:ident $($anything:tt)*};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -1919,7 +1913,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {slot $($anything:tt)*};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -1939,7 +1933,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {obj $name:ident : $ty:ty $(, $($rest:tt)*)?};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -1949,7 +1943,7 @@ macro_rules! query {
         $crate::query::query! {
             @internal {
                 remaining_input = {$($($rest)*)?};
-				bound_event = {$($bound_event)*};
+                bound_event = {$($bound_event)*};
                 built_parts = {($parts, $crate::query::query_internals::ObjQueryPart(
                     $crate::query::query_internals::get_tag::<$ty>(),
                 ))};
@@ -1962,7 +1956,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {obj $name:ident in $tag:expr $(, $($rest:tt)*)?};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -1972,7 +1966,7 @@ macro_rules! query {
         $crate::query::query! {
             @internal {
                 remaining_input = {$($($rest)*)?};
-				bound_event = {$($bound_event)*};
+                bound_event = {$($bound_event)*};
                 built_parts = {($parts, $crate::query::query_internals::ObjQueryPart(
                     $crate::query::query_internals::from_tag($tag),
                 ))};
@@ -1987,7 +1981,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {obj $name:ident $($anything:tt)*};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -2009,7 +2003,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {obj $($anything:tt)*};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -2029,7 +2023,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {ref $name:ident : $ty:ty $(, $($rest:tt)*)?};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -2039,7 +2033,7 @@ macro_rules! query {
         $crate::query::query! {
             @internal {
                 remaining_input = {$($($rest)*)?};
-				bound_event = {$($bound_event)*};
+                bound_event = {$($bound_event)*};
                 built_parts = {($parts, $crate::query::query_internals::RefQueryPart(
                     $crate::query::query_internals::get_tag::<$ty>(),
                 ))};
@@ -2052,7 +2046,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {ref $name:ident in $tag:expr $(, $($rest:tt)*)?};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -2062,7 +2056,7 @@ macro_rules! query {
         $crate::query::query! {
             @internal {
                 remaining_input = {$($($rest)*)?};
-				bound_event = {$($bound_event)*};
+                bound_event = {$($bound_event)*};
                 built_parts = {($parts, $crate::query::query_internals::RefQueryPart(
                     $crate::query::query_internals::from_tag($tag),
                 ))};
@@ -2077,7 +2071,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {ref $name:ident $($anything:tt)*};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -2099,7 +2093,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {ref $($anything:tt)*};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -2119,7 +2113,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {mut $name:ident : $ty:ty $(, $($rest:tt)*)?};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -2129,7 +2123,7 @@ macro_rules! query {
         $crate::query::query! {
             @internal {
                 remaining_input = {$($($rest)*)?};
-				bound_event = {$($bound_event)*};
+                bound_event = {$($bound_event)*};
                 built_parts = {($parts, $crate::query::query_internals::MutQueryPart(
                     $crate::query::query_internals::get_tag::<$ty>(),
                 ))};
@@ -2142,7 +2136,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {mut $name:ident in $tag:expr $(, $($rest:tt)*)?};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -2152,7 +2146,7 @@ macro_rules! query {
         $crate::query::query! {
             @internal {
                 remaining_input = {$($($rest)*)?};
-				bound_event = {$($bound_event)*};
+                bound_event = {$($bound_event)*};
                 built_parts = {($parts, $crate::query::query_internals::MutQueryPart(
                     $crate::query::query_internals::from_tag($tag),
                 ))};
@@ -2167,7 +2161,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {mut $name:ident $($anything:tt)*};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -2189,7 +2183,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {mut $($anything:tt)*};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -2209,7 +2203,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {oref $name:ident : $ty:ty $(, $($rest:tt)*)?};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -2219,7 +2213,7 @@ macro_rules! query {
         $crate::query::query! {
             @internal {
                 remaining_input = {$($($rest)*)?};
-				bound_event = {$($bound_event)*};
+                bound_event = {$($bound_event)*};
                 built_parts = {($parts, $crate::query::query_internals::ORefQueryPart(
                     $crate::query::query_internals::get_tag::<$ty>(),
                 ))};
@@ -2232,7 +2226,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {oref $name:ident in $tag:expr $(, $($rest:tt)*)?};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -2242,7 +2236,7 @@ macro_rules! query {
         $crate::query::query! {
             @internal {
                 remaining_input = {$($($rest)*)?};
-				bound_event = {$($bound_event)*};
+                bound_event = {$($bound_event)*};
                 built_parts = {($parts, $crate::query::query_internals::ORefQueryPart(
                     $crate::query::query_internals::from_tag($tag),
                 ))};
@@ -2257,7 +2251,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {oref $name:ident $($anything:tt)*};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -2279,7 +2273,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {oref $($anything:tt)*};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -2299,7 +2293,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {omut $name:ident : $ty:ty $(, $($rest:tt)*)?};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -2309,7 +2303,7 @@ macro_rules! query {
         $crate::query::query! {
             @internal {
                 remaining_input = {$($($rest)*)?};
-				bound_event = {$($bound_event)*};
+                bound_event = {$($bound_event)*};
                 built_parts = {($parts, $crate::query::query_internals::OMutQueryPart(
                     $crate::query::query_internals::get_tag::<$ty>(),
                 ))};
@@ -2322,7 +2316,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {omut $name:ident in $tag:expr $(, $($rest:tt)*)?};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -2332,7 +2326,7 @@ macro_rules! query {
         $crate::query::query! {
             @internal {
                 remaining_input = {$($($rest)*)?};
-				bound_event = {$($bound_event)*};
+                bound_event = {$($bound_event)*};
                 built_parts = {($parts, $crate::query::query_internals::OMutQueryPart(
                     $crate::query::query_internals::from_tag($tag),
                 ))};
@@ -2347,7 +2341,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {omut $name:ident $($anything:tt)*};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -2369,7 +2363,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {omut $($anything:tt)*};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -2389,7 +2383,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {tags $tag:expr $(, $($rest:tt)*)?};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -2399,7 +2393,7 @@ macro_rules! query {
         $crate::query::query! {
             @internal {
                 remaining_input = {$($($rest)*)?};
-				bound_event = {$($bound_event)*};
+                bound_event = {$($bound_event)*};
                 built_parts = {$parts};
                 built_extractor = {$extractor};
                 extra_tags = {$crate::query::query_internals::Iterator::join(
@@ -2413,7 +2407,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {tag $tag:expr $(, $($rest:tt)*)?};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -2423,7 +2417,7 @@ macro_rules! query {
         $crate::query::query! {
             @internal {
                 remaining_input = {$($($rest)*)?};
-				bound_event = {$($bound_event)*};
+                bound_event = {$($bound_event)*};
                 built_parts = {$parts};
                 built_extractor = {$extractor};
                 extra_tags = {$crate::query::query_internals::Iterator::chain(
@@ -2439,7 +2433,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {tags $($anything:tt)*};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -2457,7 +2451,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {tag $($anything:tt)*};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -2477,7 +2471,7 @@ macro_rules! query {
     (
         @internal {
             remaining_input = {$($anything:tt)*};
-			bound_event = {$($bound_event:tt)*};
+            bound_event = {$($bound_event:tt)*};
             built_parts = {$parts:expr};
             built_extractor = {$extractor:pat};
             extra_tags = {$extra_tags:expr};
@@ -2487,7 +2481,7 @@ macro_rules! query {
         $crate::query::query_internals::compile_error!(
             $crate::query::query_internals::concat!(
                 "expected `event`, `entity`, `slot`, `obj`, `ref`, `mut`, `oref`, `omut`, `tag`, or \
-				 `tags`; got `",
+                 `tags`; got `",
                 $crate::query::query_internals::stringify!($($anything)*),
                 "`"
             ),

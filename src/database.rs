@@ -638,7 +638,7 @@ impl DbRoot {
         tags: ReifiedTagList,
         mut f: impl FnMut(InertArchetypeQueryInfo<'_>),
     ) {
-        if tags.iter().next().is_none() {
+        if tags.is_empty() {
             return;
         }
 
@@ -1516,7 +1516,29 @@ pub struct ReifiedTagList<'a> {
 }
 
 impl<'a> ReifiedTagList<'a> {
-    fn iter(self) -> impl Iterator<Item = &'a InertTag> + Clone + 'a {
+    pub fn reify<R>(
+        tags: impl IntoIterator<Item = RawTag>,
+        f: impl FnOnce(ReifiedTagList<'_>) -> R,
+    ) -> R {
+        let mut tags = tags.into_iter().map(|tag| tag.0);
+        let static_tags: [_; 8] = std::array::from_fn(|_| tags.next());
+        let dynamic_tags = tags.collect::<Vec<_>>();
+
+        f(ReifiedTagList {
+            static_tags: &static_tags,
+            dynamic_tags: &dynamic_tags,
+        })
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.iter().next().is_none()
+    }
+
+    pub fn is_non_empty(self) -> bool {
+        self.iter().next().is_some()
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = &'a InertTag> + Clone + 'a {
         self.static_tags
             .iter()
             .filter_map(|v| v.as_ref())

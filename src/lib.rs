@@ -16,15 +16,9 @@ pub use autoken;
 pub mod prelude {
     pub use crate::{
         autoken,
-        behavior::{
-            behavior, delegate, Behavior, BehaviorListFor, BehaviorRegistry, ComponentInjector,
-            InitializerBehaviorList, OrderedBehaviorList, PartialEntity, SimpleBehaviorList,
-        },
+        behavior::{behavior, delegate, BehaviorRegistry},
         entity::{storage, CompMut, CompRef, Entity, OwnedEntity, Storage},
-        event::{
-            CountingEvent, EventGroup, EventGroupMarkerWith, EventGroupMarkerWithSeparated,
-            EventTarget, ProcessableEventList, QueryableEventList, VecEventList,
-        },
+        event::{EventTarget, NopEvent, ProcessableEvent, VecEventList},
         obj::{Obj, OwnedObj},
         query::{
             flush, query, GlobalTag, GlobalVirtualTag, HasGlobalManagedTag, HasGlobalVirtualTag,
