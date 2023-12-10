@@ -356,14 +356,13 @@ pub trait SimpleEventList:
     + QueryDriver
     + for<'a> QueryDriverTypes<'a, Item = &'a Self::Event>
 {
-    type Event: ClearableEvent;
+    type Event;
 }
 
-impl<E, T> SimpleEventList for T
+impl<E, L> SimpleEventList for L
 where
-    T: 'static + Default + Send + EventTarget<E> + ClearableEvent,
-    T: QueryDriver + for<'a> QueryDriverTypes<'a, Item = &'a E>,
-    E: ClearableEvent,
+    L: 'static + Default + Send + EventTarget<E> + ClearableEvent,
+    L: QueryDriver + for<'a> QueryDriverTypes<'a, Item = &'a E>,
 {
     type Event = E;
 }
@@ -587,9 +586,7 @@ impl<'g, G: ?Sized> EventGroupWriter<'g, G> {
         self.group.get_mut()
     }
 
-    pub fn event_raw<'w, L: SimpleEventList>(
-        &'w self,
-    ) -> EventGroupWriterSpec<'g, 'w, G, L::Event> {
+    pub fn event_raw<'w, L: SimpleEventList>(&'w self) -> EventGroupWriterSpec<'g, 'w, G, L> {
         EventGroupWriterSpec {
             _ty: PhantomData,
             index: self.group.borrow_mut().write_raw_index::<L>(),
@@ -597,7 +594,7 @@ impl<'g, G: ?Sized> EventGroupWriter<'g, G> {
         }
     }
 
-    pub fn event<'w, E>(&'w self) -> EventGroupWriterSpec<'g, 'w, G, E>
+    pub fn event<'w, E>(&'w self) -> EventGroupWriterSpec<'g, 'w, G, G::List>
     where
         G: EventGroupMarkerWithSeparated<E>,
     {
