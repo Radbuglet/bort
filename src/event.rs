@@ -57,8 +57,24 @@ pub trait ProcessableEvent {
     fn version(&self) -> Self::Version;
 
     fn has_updated_since(&self, old: Self::Version) -> (bool, Self::Version);
+}
 
+pub trait ClearableEvent {
     fn clear(&mut self);
+}
+
+pub trait SimpleEventTarget:
+    EventTarget<Self::Event> + QueryDriver + for<'a> QueryDriverTypes<'a, Item = &'a Self::Event>
+{
+    type Event;
+}
+
+impl<E, T> SimpleEventTarget for T
+where
+    T: EventTarget<E>,
+    T: QueryDriver + for<'a> QueryDriverTypes<'a, Item = &'a E>,
+{
+    type Event = E;
 }
 
 // === VecEventList === //
@@ -94,7 +110,9 @@ impl<T> ProcessableEvent for VecEventList<T> {
         let new = self.version();
         (new == old, new)
     }
+}
 
+impl<T> ClearableEvent for VecEventList<T> {
     fn clear(&mut self) {
         self.gen += 1;
         self.process_list.get_mut().clear();
@@ -247,7 +265,42 @@ impl<E> EventTarget<E> for NopEvent {
     fn fire_owned_cx(&mut self, _target: OwnedEntity, _event: E, _context: ()) {}
 }
 
-// === drain_recursive === //
+// === EventSwapper === //
+
+#[derive(Debug, Clone, Default)]
+pub struct EventSwapper<E> {
+    pub primary: E,
+    pub secondary: E,
+}
+
+impl<E: Default> EventSwapper<E> {
+    pub fn new(primary: E) -> Self {
+        Self {
+            primary,
+            secondary: E::default(),
+        }
+    }
+}
+
+impl<E: ProcessableEvent> EventSwapper<E> {
+    pub fn drain_recursive(&mut self, f: impl FnMut(&mut E, &mut E)) {
+        drain_recursive(&mut self.primary, &mut self.secondary, f)
+    }
+
+    pub fn drain_recursive_breakable<B>(
+        &mut self,
+        f: impl FnMut(&mut E, &mut E) -> ControlFlow<B>,
+    ) -> ControlFlow<B> {
+        drain_recursive_breakable(&mut self.primary, &mut self.secondary, f)
+    }
+}
+
+impl<E: ClearableEvent> ClearableEvent for EventSwapper<E> {
+    fn clear(&mut self) {
+        self.primary.clear();
+        self.secondary.clear();
+    }
+}
 
 pub fn drain_recursive<E: ProcessableEvent>(
     primary: &mut E,

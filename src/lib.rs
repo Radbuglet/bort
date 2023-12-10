@@ -18,7 +18,7 @@ pub mod prelude {
         autoken,
         behavior::{behavior, delegate, BehaviorRegistry},
         entity::{storage, CompMut, CompRef, Entity, OwnedEntity, Storage},
-        event::{drain_recursive, EventTarget, NopEvent, ProcessableEvent, VecEventList},
+        event::{ClearableEvent, EventSwapper, EventTarget, NopEvent, VecEventList},
         obj::{Obj, OwnedObj},
         query::{
             flush, query, GlobalTag, GlobalVirtualTag, HasGlobalManagedTag, HasGlobalVirtualTag,
