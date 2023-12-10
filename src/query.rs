@@ -411,7 +411,7 @@ pub trait QueryDriver: Sized + for<'a> QueryDriverTypes<'a> {
         query_key: impl QueryKey,
         tags: impl IntoIterator<Item = RawTag>,
         include_entities: bool,
-        handler: impl QueryDriveEntryHandler<Self, B>,
+        handler: impl QueryDriverEntryHandler<Self, B>,
     ) -> ControlFlow<B>;
 
     fn foreach_heap<B>(
@@ -444,7 +444,15 @@ pub trait QueryDriver: Sized + for<'a> QueryDriverTypes<'a> {
     ) -> ControlFlow<B>;
 }
 
-pub trait QueryDriveEntryHandler<D: QueryDriver, B> {
+mod query_handler_sealed {
+    use super::QueryDriver;
+
+    pub trait QueryHandlerSealed<D: QueryDriver, B> {}
+}
+
+use query_handler_sealed::QueryHandlerSealed;
+
+pub trait QueryDriverEntryHandler<D: QueryDriver, B>: QueryHandlerSealed<D, B> {
     fn process_arch(
         &mut self,
         info: &ArchetypeQueryInfo,
@@ -454,12 +462,12 @@ pub trait QueryDriveEntryHandler<D: QueryDriver, B> {
     fn process_arbitrary(&mut self, entity: Entity, item: DriverItem<'_, D>) -> ControlFlow<B>;
 }
 
-pub trait QueryHeapHandler<D: QueryDriver, B> {
+pub trait QueryHeapHandler<D: QueryDriver, B>: QueryHandlerSealed<D, B> {
     fn process_heap(&mut self, index: usize, userdata: DriverHeapIterInfo<'_, D>)
         -> ControlFlow<B>;
 }
 
-pub trait QueryBlockHandler<D: QueryDriver, B> {
+pub trait QueryBlockHandler<D: QueryDriver, B>: QueryHandlerSealed<D, B> {
     fn process_block(
         &mut self,
         index: usize,
@@ -467,7 +475,7 @@ pub trait QueryBlockHandler<D: QueryDriver, B> {
     ) -> ControlFlow<B>;
 }
 
-pub trait QueryBlockElementHandler<D: QueryDriver, B> {
+pub trait QueryBlockElementHandler<D: QueryDriver, B>: QueryHandlerSealed<D, B> {
     fn process_element(
         &mut self,
         index: MultiRefCellIndex,
@@ -505,10 +513,10 @@ pub mod query_internals {
     };
 
     use super::{
-        borrow_flush_guard, ArchetypeId, ArchetypeQueryInfo, DriverArchIterInfo,
-        DriverBlockIterInfo, DriverHeapIterInfo, DriverItem, HasGlobalManagedTag,
-        QueryBlockElementHandler, QueryBlockHandler, QueryDriveEntryHandler, QueryDriver,
-        QueryHeapHandler, QueryKey, RawTag, Tag,
+        borrow_flush_guard, query_handler_sealed::QueryHandlerSealed, ArchetypeId,
+        ArchetypeQueryInfo, DriverArchIterInfo, DriverBlockIterInfo, DriverHeapIterInfo,
+        DriverItem, HasGlobalManagedTag, QueryBlockElementHandler, QueryBlockHandler, QueryDriver,
+        QueryDriverEntryHandler, QueryHeapHandler, QueryKey, RawTag, Tag,
     };
 
     pub use {
@@ -518,13 +526,22 @@ pub mod query_internals {
 
     // === QueryXxHandler === //
 
+    // QueryDriveEntryHandlerInstance
     pub struct QueryDriveEntryHandlerInstance<D, B, U, F1, F2>(PhantomData<fn() -> D>, U, F1, F2)
     where
         D: QueryDriver,
         F1: FnMut(&mut U, &ArchetypeQueryInfo, DriverArchIterInfo<'_, D>) -> ControlFlow<B>,
         F2: FnMut(&mut U, Entity, DriverItem<'_, D>) -> ControlFlow<B>;
 
-    impl<D, B, U, F1, F2> QueryDriveEntryHandler<D, B>
+    impl<D, B, U, F1, F2> QueryHandlerSealed<D, B> for QueryDriveEntryHandlerInstance<D, B, U, F1, F2>
+    where
+        D: QueryDriver,
+        F1: FnMut(&mut U, &ArchetypeQueryInfo, DriverArchIterInfo<'_, D>) -> ControlFlow<B>,
+        F2: FnMut(&mut U, Entity, DriverItem<'_, D>) -> ControlFlow<B>,
+    {
+    }
+
+    impl<D, B, U, F1, F2> QueryDriverEntryHandler<D, B>
         for QueryDriveEntryHandlerInstance<D, B, U, F1, F2>
     where
         D: QueryDriver,
@@ -544,10 +561,18 @@ pub mod query_internals {
         }
     }
 
+    // QueryHeapHandlerInstance
     pub struct QueryHeapHandlerInstance<D, B, F>(PhantomData<fn() -> D>, F)
     where
         D: QueryDriver,
         F: FnMut(usize, DriverHeapIterInfo<'_, D>) -> ControlFlow<B>;
+
+    impl<D, B, F> QueryHandlerSealed<D, B> for QueryHeapHandlerInstance<D, B, F>
+    where
+        D: QueryDriver,
+        F: FnMut(usize, DriverHeapIterInfo<'_, D>) -> ControlFlow<B>,
+    {
+    }
 
     impl<D, B, F> QueryHeapHandler<D, B> for QueryHeapHandlerInstance<D, B, F>
     where
@@ -563,10 +588,18 @@ pub mod query_internals {
         }
     }
 
+    // QueryBlockHandlerInstance
     pub struct QueryBlockHandlerInstance<D, B, F>(PhantomData<fn() -> D>, F)
     where
         D: QueryDriver,
         F: FnMut(usize, DriverBlockIterInfo<'_, D>) -> ControlFlow<B>;
+
+    impl<D, B, F> QueryHandlerSealed<D, B> for QueryBlockHandlerInstance<D, B, F>
+    where
+        D: QueryDriver,
+        F: FnMut(usize, DriverBlockIterInfo<'_, D>) -> ControlFlow<B>,
+    {
+    }
 
     impl<D, B, F> QueryBlockHandler<D, B> for QueryBlockHandlerInstance<D, B, F>
     where
@@ -582,10 +615,18 @@ pub mod query_internals {
         }
     }
 
+    // QueryBlockElementHandlerInstance
     pub struct QueryBlockElementHandlerInstance<D, B, F>(PhantomData<fn() -> D>, F)
     where
         D: QueryDriver,
         F: FnMut(MultiRefCellIndex, DriverItem<'_, D>) -> ControlFlow<B>;
+
+    impl<D, B, F> QueryHandlerSealed<D, B> for QueryBlockElementHandlerInstance<D, B, F>
+    where
+        D: QueryDriver,
+        F: FnMut(MultiRefCellIndex, DriverItem<'_, D>) -> ControlFlow<B>,
+    {
+    }
 
     impl<D, B, F> QueryBlockElementHandler<D, B> for QueryBlockElementHandlerInstance<D, B, F>
     where

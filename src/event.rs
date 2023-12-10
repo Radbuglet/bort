@@ -6,8 +6,9 @@ use crate::{
     entity::{Entity, OwnedEntity},
     query::{
         ArchetypeId, ArchetypeQueryInfo, DriverArchIterInfo, DriverBlockIterInfo,
-        DriverHeapIterInfo, QueryBlockElementHandler, QueryBlockHandler, QueryDriveEntryHandler,
-        QueryDriver, QueryDriverTypes, QueryHeapHandler, QueryKey, QueryVersionMap, RawTag,
+        DriverHeapIterInfo, QueryBlockElementHandler, QueryBlockHandler, QueryDriver,
+        QueryDriverEntryHandler, QueryDriverTypes, QueryHeapHandler, QueryKey, QueryVersionMap,
+        RawTag,
     },
     util::{
         hash_map::FxHashSet,
@@ -109,7 +110,7 @@ impl<T> QueryDriver for VecEventList<T> {
         query_key: impl QueryKey,
         tags: impl IntoIterator<Item = RawTag>,
         _include_entities: bool,
-        mut handler: impl QueryDriveEntryHandler<Self, B>,
+        mut handler: impl QueryDriverEntryHandler<Self, B>,
     ) -> ControlFlow<B> {
         let start = mem::replace(
             self.process_list.borrow_mut().entry(query_key, || 0),
