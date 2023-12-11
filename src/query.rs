@@ -391,7 +391,53 @@ impl<T: 'static + Clone + Send + Sync> AnyAndClone for T {
     }
 }
 
-// === Query Drivers === //
+// === MultiQueryDriver === //
+
+pub type MultiDriverItem<'a, M> = <M as MultiQueryDriverTypes<'a>>::Item;
+
+pub trait MultiQueryDriverTypes<'a, WhereACannotOutliveSelf = &'a Self> {
+    type Item;
+}
+
+pub trait MultiQueryDriver: for<'a> MultiQueryDriverTypes<'a> {
+    fn drive_multi_query<T: QueryDriverTarget, B>(
+        &self,
+        target: T,
+        f: impl FnMut((T::Input<'_>, MultiDriverItem<'_, Self>)) -> ControlFlow<B>,
+    ) -> ControlFlow<B>;
+}
+
+mod query_driver_target_sealed {
+    pub trait DriverTargetSealed {}
+}
+
+use query_driver_target_sealed::DriverTargetSealed;
+
+pub trait QueryDriverTarget: DriverTargetSealed {
+    type Input<'a>;
+
+    fn handle_driver<D: QueryDriver, B>(
+        &mut self,
+        driver: &D,
+        f: impl FnMut((Self::Input<'_>, DriverItem<'_, D>)) -> ControlFlow<B>,
+    ) -> ControlFlow<B>;
+}
+
+impl<'a, D: QueryDriverTypes<'a>> MultiQueryDriverTypes<'a> for D {
+    type Item = D::Item;
+}
+
+impl<D: QueryDriver> MultiQueryDriver for D {
+    fn drive_multi_query<T: QueryDriverTarget, B>(
+        &self,
+        mut target: T,
+        f: impl FnMut((T::Input<'_>, MultiDriverItem<'_, Self>)) -> ControlFlow<B>,
+    ) -> ControlFlow<B> {
+        target.handle_driver(self, f)
+    }
+}
+
+// === QueryDriver === //
 
 pub type DriverItem<'a, D> = <D as QueryDriverTypes<'a>>::Item;
 pub type DriverArchIterInfo<'a, D> = <D as QueryDriverTypes<'a>>::ArchIterInfo;
@@ -513,10 +559,12 @@ pub mod query_internals {
     };
 
     use super::{
-        borrow_flush_guard, query_handler_sealed::QueryHandlerSealed, ArchetypeId,
-        ArchetypeQueryInfo, DriverArchIterInfo, DriverBlockIterInfo, DriverHeapIterInfo,
-        DriverItem, HasGlobalManagedTag, QueryBlockElementHandler, QueryBlockHandler, QueryDriver,
-        QueryDriverEntryHandler, QueryHeapHandler, QueryKey, RawTag, Tag,
+        borrow_flush_guard, query_driver_target_sealed::DriverTargetSealed,
+        query_handler_sealed::QueryHandlerSealed, ArchetypeId, ArchetypeQueryInfo,
+        DriverArchIterInfo, DriverBlockIterInfo, DriverHeapIterInfo, DriverItem,
+        HasGlobalManagedTag, MultiDriverItem, MultiQueryDriver, QueryBlockElementHandler,
+        QueryBlockHandler, QueryDriver, QueryDriverEntryHandler, QueryDriverTarget,
+        QueryHeapHandler, QueryKey, RawTag, Tag,
     };
 
     pub use {
@@ -1136,116 +1184,6 @@ pub mod query_internals {
 
             ControlFlow::Continue(())
         }
-
-        fn query_driven<B, D: QueryDriver>(
-            self,
-            query_key: impl QueryKey,
-            driver: &D,
-            extra_tags: impl IntoIterator<Item = RawTag>,
-            mut f: impl FnMut((Self::Input<'_>, DriverItem<'_, D>)) -> ControlFlow<B>,
-        ) -> ControlFlow<B> {
-            // Ensure that we're running on the main thread.
-            let token = MainThreadToken::acquire_fmt("run a query");
-
-            // Ensure that users cannot flush the database while we're running a query.
-            let _guard = borrow_flush_guard();
-
-            // Fetch the storages used by this query.
-            let storages = <Self::Heap>::storages();
-
-            // Collect the tags needed by this query.
-            let tags = self.tags().chain(extra_tags);
-
-            driver.drive_query(
-                query_key,
-                tags,
-                Self::NEEDS_ENTITIES,
-                QueryDriveEntryHandlerInstance(
-                    PhantomData,
-                    &mut f,
-                    |f, archetype, mut userdata| {
-                        // Fetch the component heaps associated with that archetype.
-                        let mut heaps = <Self::Heap>::heaps_for_archetype(&storages, archetype);
-
-                        // For each of those heaps...
-                        driver.foreach_heap(
-                            archetype,
-                            &mut userdata,
-                            QueryHeapHandlerInstance(PhantomData, |heap_i, mut userdata| {
-                                let heap = heaps.get(heap_i).unwrap();
-
-                                // Fetch the blocks comprising it.
-                                let mut blocks = <Self::Heap>::blocks(heap, token);
-
-                                // For each block...
-                                #[rustfmt::skip]
-                                driver.foreach_block(
-                                    heap_i,
-                                    blocks.len(),
-                                    &mut userdata,
-                                    QueryBlockHandlerInstance(PhantomData, |block_i, mut userdata| 'pb: {
-                                        let block = blocks.get(heap_i).unwrap();
-
-                                        // Attempt to run the fast-path...
-                                        let mut loaner = <Self::GroupAutokenLoan>::default();
-
-                                        if let Some(mut block) =
-                                            <Self::GroupBorrow>::try_borrow_group(
-                                                &block,
-                                                token,
-                                                &mut loaner,
-                                            )
-                                        {
-                                            let mut block = <Self::GroupBorrow>::iter(&mut block);
-
-                                            driver.foreach_element_in_full_block(
-                                                block_i,
-                                                &mut userdata,
-                                                QueryBlockElementHandlerInstance(PhantomData, |index, item| {
-                                                    f((
-                                                        Self::elem_from_block_item(
-                                                            token,
-                                                            &mut block
-                                                                .get(index as usize)
-                                                                .unwrap(),
-                                                        ),
-                                                        item,
-                                                    ))
-                                                }),
-                                            )?;
-
-                                            // N.B. we `break` here rather than putting the slow path in an `else`
-                                            // block because the lifetime of the `loaner` borrow extends into both
-                                            // branches of the `if` expression.
-                                            break 'pb ControlFlow::Continue(());
-                                        }
-
-                                        // Otherwise, run the slow-path.
-                                        driver.foreach_element_in_semi_block(
-                                            block_i,
-                                            &mut userdata,
-                                            QueryBlockElementHandlerInstance(PhantomData, |index, item| {
-                                                Self::call_slow_borrow(
-                                                    token,
-                                                    &block,
-                                                    index,
-                                                    |args| f((args, item)),
-                                                )
-                                            }),
-                                        )
-                                    }),
-                                )?;
-
-                                ControlFlow::Continue(())
-                            }),
-                        )
-                    },
-                    |f, entity, item| {
-                        Self::call_super_slow_borrow(&storages, entity, |args| f((args, item)))
-                    },
-                ),
-            )
-        }
     }
 
     pub struct EntityQueryPart;
@@ -1677,6 +1615,144 @@ pub mod query_internals {
         }
     }
 
+    // === Driven Queries === //
+
+    pub fn run_driven_query<K: QueryKey, P: QueryPart, M: MultiQueryDriver, B>(
+        key: K,
+        part: P,
+        extra_tags: impl IntoIterator<Item = RawTag>,
+        driver: &M,
+        f: impl FnMut((P::Input<'_>, MultiDriverItem<'_, M>)) -> ControlFlow<B>,
+    ) -> ControlFlow<B> {
+        driver.drive_multi_query(
+            QueryDriverTargetInstance::<K, P> {
+                _ty: PhantomData,
+                key,
+                tags: part.tags().chain(extra_tags).collect(),
+            },
+            f,
+        )
+    }
+
+    struct QueryDriverTargetInstance<K: QueryKey, P: QueryPart> {
+        _ty: PhantomData<fn() -> P>,
+        key: K,
+        tags: Vec<RawTag>,
+    }
+
+    impl<K: QueryKey, P: QueryPart> DriverTargetSealed for QueryDriverTargetInstance<K, P> {}
+
+    impl<K: QueryKey, P: QueryPart> QueryDriverTarget for QueryDriverTargetInstance<K, P> {
+        type Input<'a> = P::Input<'a>;
+
+        fn handle_driver<D: QueryDriver, B>(
+            &mut self,
+            driver: &D,
+            mut f: impl FnMut((Self::Input<'_>, DriverItem<'_, D>)) -> ControlFlow<B>,
+        ) -> ControlFlow<B> {
+            // Ensure that we're running on the main thread.
+            let token = MainThreadToken::acquire_fmt("run a query");
+
+            // Ensure that users cannot flush the database while we're running a query.
+            let _guard = borrow_flush_guard();
+
+            // Fetch the storages used by this query.
+            let storages = <P::Heap>::storages();
+
+            driver.drive_query(
+                self.key.clone(),
+                self.tags.clone(),
+                P::NEEDS_ENTITIES,
+                QueryDriveEntryHandlerInstance(
+                    PhantomData,
+                    &mut f,
+                    |f, archetype, mut userdata| {
+                        // Fetch the component heaps associated with that archetype.
+                        let mut heaps = <P::Heap>::heaps_for_archetype(&storages, archetype);
+
+                        // For each of those heaps...
+                        driver.foreach_heap(
+                            archetype,
+                            &mut userdata,
+                            QueryHeapHandlerInstance(PhantomData, |heap_i, mut userdata| {
+                                let heap = heaps.get(heap_i).unwrap();
+
+                                // Fetch the blocks comprising it.
+                                let mut blocks = <P::Heap>::blocks(heap, token);
+
+                                // For each block...
+                                #[rustfmt::skip]
+                                driver.foreach_block(
+                                    heap_i,
+                                    blocks.len(),
+                                    &mut userdata,
+                                    QueryBlockHandlerInstance(PhantomData, |block_i, mut userdata| 'pb: {
+                                        let block = blocks.get(heap_i).unwrap();
+
+                                        // Attempt to run the fast-path...
+                                        let mut loaner = <P::GroupAutokenLoan>::default();
+
+                                        if let Some(mut block) =
+                                            <P::GroupBorrow>::try_borrow_group(
+                                                &block,
+                                                token,
+                                                &mut loaner,
+                                            )
+                                        {
+                                            let mut block = <P::GroupBorrow>::iter(&mut block);
+
+                                            driver.foreach_element_in_full_block(
+                                                block_i,
+                                                &mut userdata,
+                                                QueryBlockElementHandlerInstance(PhantomData, |index, item| {
+                                                    f((
+                                                        P::elem_from_block_item(
+                                                            token,
+                                                            &mut block
+                                                                .get(index as usize)
+                                                                .unwrap(),
+                                                        ),
+                                                        item,
+                                                    ))
+                                                }),
+                                            )?;
+
+                                            // N.B. we `break` here rather than putting the slow path in an `else`
+                                            // block because the lifetime of the `loaner` borrow extends into both
+                                            // branches of the `if` expression.
+                                            break 'pb ControlFlow::Continue(());
+                                        }
+
+                                        // Otherwise, run the slow-path.
+                                        driver.foreach_element_in_semi_block(
+                                            block_i,
+                                            &mut userdata,
+                                            QueryBlockElementHandlerInstance(PhantomData, |index, item| {
+                                                P::call_slow_borrow(
+                                                    token,
+                                                    &block,
+                                                    index,
+                                                    |args| f((args, item)),
+                                                )
+                                            }),
+                                        )
+                                    }),
+                                )?;
+
+                                ControlFlow::Continue(())
+                            }),
+                        )
+                    },
+                    |f, entity, item| {
+                        P::call_super_slow_borrow(&storages, entity, |args| f((args, item)))
+                    },
+                ),
+            )
+        }
+    }
+
+    // === Helpers === //
+
     pub fn get_tag<T: 'static + HasGlobalManagedTag>() -> Tag<T::Component> {
         Tag::global::<T>()
     }
@@ -1755,15 +1831,15 @@ macro_rules! query {
         use $crate::query::query_internals::ExtractRefOfQueryDriver;
 
         $crate::query::query_internals::cbit!(
-            for ($extractor, $name) in $crate::query::query_internals::QueryPart::query_driven(
-                $parts,
+            for ($extractor, $name) in $crate::query::query_internals::run_driven_query(
                 {
                     #[derive(Copy, Clone, Hash, Eq, PartialEq)]
                     struct MyQueryKey;
                     MyQueryKey
                 },
-                $driver.__extract_ref_of_query_driver(),
+                $parts,
                 $extra_tags,
+                $driver.__extract_ref_of_query_driver(),
             ) {
                 $($body)*
             }
