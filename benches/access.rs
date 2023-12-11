@@ -4,11 +4,11 @@ use autoken::{PotentialImmutableBorrow, PotentialMutableBorrow};
 use bort::{
     core::{
         cell::{MultiOptRefCell, MultiRefCellIndex, OptRefCell},
-        heap::Heap,
+        heap::{Heap, Slot},
         token::{is_main_thread, MainThreadToken},
     },
     debug::{alive_entity_count, force_reset_database},
-    flush, query, storage, Entity, OwnedEntity, OwnedObj, Tag,
+    flush, query, storage, Entity, Obj, OwnedEntity, OwnedObj, Tag,
 };
 use criterion::{criterion_main, Criterion};
 
@@ -414,6 +414,230 @@ fn access_tests() {
             cell.try_borrow_all_mut(&mut loaner);
         });
     });
+
+    c.bench_function("linked_list.regular", |c| {
+        let mut items = Vec::new();
+
+        struct Item {
+            next: usize,
+            value: u64,
+        }
+
+        for i in 0..100_000 {
+            if i != 100_000 - 2 {
+                items.push(Item {
+                    next: i + 1,
+                    value: 100 + i as u64,
+                });
+            } else {
+                items.push(Item {
+                    next: usize::MAX,
+                    value: 2,
+                });
+            }
+        }
+
+        c.iter(|| {
+            let mut cursor = 0;
+            let mut accum = 0;
+
+            while cursor < items.len() {
+                accum += items[cursor].value;
+                cursor = items[cursor].next;
+            }
+
+            accum
+        });
+    });
+
+    c.bench_function("linked_list.entity", |c| {
+        struct Item {
+            next: Option<Entity>,
+            value: u64,
+        }
+
+        let mut items = vec![OwnedObj::new(Item {
+            next: None,
+            value: 2,
+        })];
+
+        let start = {
+            let mut curr = items[0].obj();
+
+            for i in 1..100_000 {
+                let item = OwnedObj::new(Item {
+                    next: Some(curr.entity()),
+                    value: i + 100,
+                });
+                curr = item.obj();
+                items.push(item);
+            }
+            curr.entity()
+        };
+
+        let storage = storage::<Item>();
+
+        c.iter(|| {
+            let mut cursor = Some(start);
+            let mut accum = 0;
+
+            while let Some(curr) = cursor {
+                let item = storage.get_mut(curr);
+                accum += item.value;
+                cursor = item.next;
+            }
+
+            accum
+        });
+    });
+
+    c.bench_function("linked_list.obj", |c| {
+        struct Item {
+            next: Option<Obj<Self>>,
+            value: u64,
+        }
+
+        let mut items = vec![OwnedObj::new(Item {
+            next: None,
+            value: 2,
+        })];
+        let start = {
+            let mut curr = items[0].obj();
+
+            for i in 1..100_000 {
+                let item = OwnedObj::new(Item {
+                    next: Some(curr),
+                    value: i + 100,
+                });
+                curr = item.obj();
+                items.push(item);
+            }
+            curr
+        };
+
+        c.iter(|| {
+            let mut cursor = Some(start);
+            let mut accum = 0;
+
+            while let Some(curr) = cursor {
+                let item = curr.get_mut_maybe_aba();
+                accum += item.value;
+                cursor = item.next;
+            }
+
+            accum
+        });
+    });
+
+    c.bench_function("linked_list.slot", |c| {
+        struct Item {
+            next: Option<Slot<Self>>,
+            value: u64,
+        }
+
+        let mut items = vec![OwnedObj::new(Item {
+            next: None,
+            value: 2,
+        })];
+        let start = {
+            let mut curr = items[0].obj();
+
+            for i in 1..100_000 {
+                let item = OwnedObj::new(Item {
+                    next: Some(curr.value()),
+                    value: i + 100,
+                });
+                curr = item.obj();
+                items.push(item);
+            }
+            curr.value()
+        };
+
+        let token = MainThreadToken::acquire();
+
+        c.iter(|| {
+            let mut cursor = Some(start);
+            let mut accum = 0;
+
+            while let Some(curr) = cursor {
+                let item = curr.borrow_mut(token);
+                accum += item.value;
+                cursor = item.next;
+            }
+
+            accum
+        });
+    });
+
+    c.bench_function("linked_list_rng.regular", |c| {
+        struct Item {
+            next: usize,
+            value: u64,
+        }
+
+        let mut items = (0..100_000)
+            .map(|i| Item {
+                next: usize::MAX,
+                value: i + 100,
+            })
+            .collect::<Vec<_>>();
+
+        let (start, chain) = generate_permuted_chain(100_000);
+
+        for (src, target) in chain.into_iter().enumerate() {
+            items[src].next = target;
+        }
+
+        c.iter(|| {
+            let mut cursor = start;
+            let mut accum = 0;
+
+            while cursor < items.len() {
+                accum += items[cursor].value;
+                cursor = items[cursor].next;
+            }
+
+            accum
+        });
+    });
+
+    c.bench_function("linked_list_rng.slot", |c| {
+        struct Item {
+            next: Option<Slot<Self>>,
+            value: u64,
+        }
+
+        let items = (0..100_000)
+            .map(|i| {
+                OwnedObj::new(Item {
+                    next: None,
+                    value: i + 100,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let (start, chain) = generate_permuted_chain(100_000);
+
+        for (src, target) in chain.into_iter().enumerate() {
+            items[src].get_mut().next = items.get(target).map(|v| v.value());
+        }
+
+        let start = items[start].value();
+        let token = MainThreadToken::acquire();
+
+        c.iter(|| {
+            let mut cursor = Some(start);
+            let mut accum = 0;
+
+            while let Some(curr) = cursor {
+                let item = curr.borrow_mut(token);
+                accum += item.value;
+                cursor = item.next;
+            }
+
+            accum
+        });
+    });
 }
 
 criterion_main!(access_tests);
@@ -434,4 +658,23 @@ fn spawn_tagged_pos_vel_pop(pos_tag: Tag<Position>, vel_tag: Tag<Velocity>) -> V
                 .with_tag(vel_tag)
         })
         .collect()
+}
+
+fn generate_permuted_chain(n: usize) -> (usize, Vec<usize>) {
+    fastrand::seed(4);
+
+    let mut remaining = (0..n).collect::<Vec<_>>();
+    let mut chain = (0..n).map(|_| usize::MAX).collect::<Vec<_>>();
+
+    let start = remaining.swap_remove(fastrand::usize(0..remaining.len()));
+    let mut cursor = start;
+
+    while !remaining.is_empty() {
+        let target = remaining.swap_remove(fastrand::usize(0..remaining.len()));
+
+        chain[cursor] = target;
+        cursor = target;
+    }
+
+    (start, chain)
 }
