@@ -13,9 +13,9 @@ use crate::{
     entity::{Entity, OwnedEntity},
     query::{
         ArchetypeId, ArchetypeQueryInfo, DriverArchIterInfo, DriverBlockIterInfo,
-        DriverHeapIterInfo, QueryBlockElementHandler, QueryBlockHandler, QueryDriver,
-        QueryDriverEntryHandler, QueryDriverTypes, QueryHeapHandler, QueryKey, QueryVersionMap,
-        RawTag,
+        DriverHeapIterInfo, MultiDriverItem, MultiQueryDriver, MultiQueryDriverTypes,
+        QueryBlockElementHandler, QueryBlockHandler, QueryDriver, QueryDriverEntryHandler,
+        QueryDriverTarget, QueryDriverTypes, QueryHeapHandler, QueryKey, QueryVersionMap, RawTag,
     },
     util::{
         hash_map::{FxHashMap, FxHashSet},
@@ -111,6 +111,20 @@ impl<T> ClearableEvent for VecEventList<T> {
         self.process_list.get_mut().clear();
         self.events.clear();
         self.owned.clear();
+    }
+}
+
+impl<'a, T> MultiQueryDriverTypes<'a> for VecEventList<T> {
+    type Item = &'a T;
+}
+
+impl<T> MultiQueryDriver for VecEventList<T> {
+    fn drive_multi_query<T2: QueryDriverTarget, B>(
+        &self,
+        target: &mut T2,
+        f: impl FnMut((T2::Input<'_>, MultiDriverItem<'_, Self>)) -> ControlFlow<B>,
+    ) -> ControlFlow<B> {
+        target.handle_driver(self, f)
     }
 }
 

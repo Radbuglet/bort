@@ -402,9 +402,20 @@ pub trait MultiQueryDriverTypes<'a, WhereACannotOutliveSelf = &'a Self> {
 pub trait MultiQueryDriver: for<'a> MultiQueryDriverTypes<'a> {
     fn drive_multi_query<T: QueryDriverTarget, B>(
         &self,
-        target: T,
+        target: &mut T,
         f: impl FnMut((T::Input<'_>, MultiDriverItem<'_, Self>)) -> ControlFlow<B>,
     ) -> ControlFlow<B>;
+
+    fn chain<O: MultiQueryDriver>(&self, other: O) -> QueryChainAdapter<&'_ Self, O> {
+        QueryChainAdapter(self, other)
+    }
+
+    fn map<F>(&self, map: F) -> QueryMapAdapter<&'_ Self, F>
+    where
+        F: for<'a> QueryMapper<MultiDriverItem<'a, Self>>,
+    {
+        QueryMapAdapter(self, map)
+    }
 }
 
 mod query_driver_target_sealed {
@@ -423,17 +434,18 @@ pub trait QueryDriverTarget: DriverTargetSealed {
     ) -> ControlFlow<B>;
 }
 
-impl<'a, D: QueryDriverTypes<'a>> MultiQueryDriverTypes<'a> for D {
+// Derivations
+impl<'a, D: MultiQueryDriverTypes<'a>> MultiQueryDriverTypes<'a> for &'_ D {
     type Item = D::Item;
 }
 
-impl<D: QueryDriver> MultiQueryDriver for D {
+impl<D: MultiQueryDriver> MultiQueryDriver for &'_ D {
     fn drive_multi_query<T: QueryDriverTarget, B>(
         &self,
-        mut target: T,
+        target: &mut T,
         f: impl FnMut((T::Input<'_>, MultiDriverItem<'_, Self>)) -> ControlFlow<B>,
     ) -> ControlFlow<B> {
-        target.handle_driver(self, f)
+        (*self).drive_multi_query(target, f)
     }
 }
 
@@ -527,6 +539,74 @@ pub trait QueryBlockElementHandler<D: QueryDriver, B>: QueryHandlerSealed<D, B> 
         index: MultiRefCellIndex,
         item: DriverItem<'_, D>,
     ) -> ControlFlow<B>;
+}
+
+// === Query Adapters === //
+
+// QueryChainAdapter
+pub struct QueryChainAdapter<M1, M2>(pub M1, pub M2);
+
+impl<'a, M1, M2> MultiQueryDriverTypes<'a> for QueryChainAdapter<M1, M2>
+where
+    M1: MultiQueryDriverTypes<'a>,
+{
+    type Item = M1::Item;
+}
+
+impl<M1, M2> MultiQueryDriver for QueryChainAdapter<M1, M2>
+where
+    M1: MultiQueryDriver,
+    M2: MultiQueryDriver + for<'a> MultiQueryDriverTypes<'a, Item = MultiDriverItem<'a, M1>>,
+{
+    fn drive_multi_query<T: QueryDriverTarget, B>(
+        &self,
+        target: &mut T,
+        mut f: impl FnMut((T::Input<'_>, MultiDriverItem<'_, Self>)) -> ControlFlow<B>,
+    ) -> ControlFlow<B> {
+        self.0.drive_multi_query(target, &mut f)?;
+        self.1.drive_multi_query(target, &mut f)?;
+        ControlFlow::Continue(())
+    }
+}
+
+// QueryMapAdapter
+pub struct QueryMapAdapter<M, F>(pub M, pub F);
+
+pub trait QueryMapper<I> {
+    type Output;
+
+    fn map(&self, input: I) -> Self::Output;
+}
+
+impl<I, O, F: Fn(I) -> O> QueryMapper<I> for F {
+    type Output = O;
+
+    fn map(&self, input: I) -> Self::Output {
+        self(input)
+    }
+}
+
+impl<'a, M, F> MultiQueryDriverTypes<'a> for QueryMapAdapter<M, F>
+where
+    M: MultiQueryDriverTypes<'a>,
+    F: QueryMapper<M::Item>,
+{
+    type Item = F::Output;
+}
+
+impl<M, F> MultiQueryDriver for QueryMapAdapter<M, F>
+where
+    M: MultiQueryDriver,
+    F: for<'a> QueryMapper<MultiDriverItem<'a, M>>,
+{
+    fn drive_multi_query<T: QueryDriverTarget, B>(
+        &self,
+        target: &mut T,
+        mut f: impl FnMut((T::Input<'_>, MultiDriverItem<'_, Self>)) -> ControlFlow<B>,
+    ) -> ControlFlow<B> {
+        self.0
+            .drive_multi_query(target, |(input, item)| f((input, self.1.map(item))))
+    }
 }
 
 // === Query Macro === //
@@ -1625,7 +1705,7 @@ pub mod query_internals {
         f: impl FnMut((P::Input<'_>, MultiDriverItem<'_, M>)) -> ControlFlow<B>,
     ) -> ControlFlow<B> {
         driver.drive_multi_query(
-            QueryDriverTargetInstance::<K, P> {
+            &mut QueryDriverTargetInstance::<K, P> {
                 _ty: PhantomData,
                 key,
                 tags: part.tags().chain(extra_tags).collect(),
@@ -1769,12 +1849,12 @@ pub mod query_internals {
         [].into_iter()
     }
 
-    pub trait ExtractRefOfQueryDriver: QueryDriver {
-        fn __extract_ref_of_query_driver(&self) -> &Self;
+    pub trait ExtractRefOfMultiQueryDriver: MultiQueryDriver {
+        fn __extract_ref_of_multi_query_driver(&self) -> &Self;
     }
 
-    impl<T: ?Sized + QueryDriver> ExtractRefOfQueryDriver for T {
-        fn __extract_ref_of_query_driver(&self) -> &Self {
+    impl<T: ?Sized + MultiQueryDriver> ExtractRefOfMultiQueryDriver for T {
+        fn __extract_ref_of_multi_query_driver(&self) -> &Self {
             self
         }
     }
@@ -1828,7 +1908,7 @@ macro_rules! query {
         }
     ) => {{
         #[allow(unused_import)]
-        use $crate::query::query_internals::ExtractRefOfQueryDriver;
+        use $crate::query::query_internals::ExtractRefOfMultiQueryDriver;
 
         $crate::query::query_internals::cbit!(
             for ($extractor, $name) in $crate::query::query_internals::run_driven_query(
@@ -1839,7 +1919,7 @@ macro_rules! query {
                 },
                 $parts,
                 $extra_tags,
-                $driver.__extract_ref_of_query_driver(),
+                $driver.__extract_ref_of_multi_query_driver(),
             ) {
                 $($body)*
             }
