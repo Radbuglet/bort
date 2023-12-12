@@ -449,6 +449,24 @@ impl<D: MultiQueryDriver> MultiQueryDriver for &'_ D {
     }
 }
 
+impl<'a, D: MultiQueryDriverTypes<'a>> MultiQueryDriverTypes<'a> for Option<D> {
+    type Item = D::Item;
+}
+
+impl<D: MultiQueryDriver> MultiQueryDriver for Option<D> {
+    fn drive_multi_query<T: QueryDriverTarget, B>(
+        &self,
+        target: &mut T,
+        f: impl FnMut((T::Input<'_>, MultiDriverItem<'_, Self>)) -> ControlFlow<B>,
+    ) -> ControlFlow<B> {
+        if let Some(value) = self {
+            value.drive_multi_query(target, f)
+        } else {
+            ControlFlow::Continue(())
+        }
+    }
+}
+
 // === QueryDriver === //
 
 pub type DriverItem<'a, D> = <D as QueryDriverTypes<'a>>::Item;

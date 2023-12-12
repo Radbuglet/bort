@@ -19,8 +19,8 @@ pub mod prelude {
         behavior::{behavior, delegate, BehaviorRegistry},
         entity::{storage, CompMut, CompRef, Entity, OwnedEntity, Storage},
         event::{
-            ClearableEvent, EventGroup, EventGroupMarkerExtends, EventGroupMarkerWith,
-            EventSwapper, EventTarget, NopEvent, VecEventList,
+            ClearableEvent, EventGroup, EventGroupDeclExtends, EventGroupDeclWith, EventSwapper,
+            EventTarget, NopEvent, VecEventList,
         },
         obj::{Obj, OwnedObj},
         query::{

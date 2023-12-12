@@ -393,17 +393,17 @@ where
     type Event = E;
 }
 
-// EventGroupMarkerXx
-pub trait EventGroupMarkerWithSeparated<E> {
+// EventGroupDeclXx
+pub trait EventGroupDeclWithSeparated<E> {
     type List: 'static + SimpleEventList<Event = E> + Default;
 }
 
-pub trait EventGroupMarkerWith<L: 'static + SimpleEventList + Default>:
-    EventGroupMarkerWithSeparated<L::Event, List = L>
+pub trait EventGroupDeclWith<L: 'static + SimpleEventList + Default>:
+    EventGroupDeclWithSeparated<L::Event, List = L>
 {
 }
 
-pub trait EventGroupMarkerExtends<G: ?Sized> {}
+pub trait EventGroupDeclExtends<G: ?Sized> {}
 
 // EventGroup
 #[repr(C)]
@@ -472,7 +472,7 @@ impl<G: ?Sized> EventGroup<G> {
 
     pub fn read<E>(&self) -> Option<&G::List>
     where
-        G: EventGroupMarkerWithSeparated<E>,
+        G: EventGroupDeclWithSeparated<E>,
     {
         self.read_raw()
     }
@@ -517,7 +517,7 @@ impl<G: ?Sized> EventGroup<G> {
 
     pub fn clear_single<E>(&mut self)
     where
-        G: EventGroupMarkerWithSeparated<E>,
+        G: EventGroupDeclWithSeparated<E>,
     {
         self.clear_single_raw::<G::List>();
     }
@@ -551,22 +551,22 @@ impl<G: ?Sized> EventGroup<G> {
         }
     }
 
-    pub fn cast<G2: ?Sized + EventGroupMarkerExtends<G>>(self) -> EventGroup<G2> {
+    pub fn cast<G2: ?Sized + EventGroupDeclExtends<G>>(self) -> EventGroup<G2> {
         self.cast_arbitrary()
     }
 
-    pub fn cast_ref<G2: ?Sized + EventGroupMarkerExtends<G>>(&self) -> &EventGroup<G2> {
+    pub fn cast_ref<G2: ?Sized + EventGroupDeclExtends<G>>(&self) -> &EventGroup<G2> {
         self.cast_arbitrary_ref()
     }
 
-    pub fn cast_mut<G2: ?Sized + EventGroupMarkerExtends<G>>(&mut self) -> &mut EventGroup<G2> {
+    pub fn cast_mut<G2: ?Sized + EventGroupDeclExtends<G>>(&mut self) -> &mut EventGroup<G2> {
         self.cast_arbitrary_mut()
     }
 }
 
 impl<G: ?Sized, E, C> EventTarget<E, C> for EventGroup<G>
 where
-    G: EventGroupMarkerWithSeparated<E>,
+    G: EventGroupDeclWithSeparated<E>,
 {
     fn fire_cx(&mut self, target: Entity, event: E, _context: C) {
         self.fire_raw::<G::List>(target, event);
@@ -620,7 +620,7 @@ impl<'g, G: ?Sized> EventGroupWriter<'g, G> {
 
     pub fn event<'w, E>(&'w self) -> EventGroupWriterSpec<'g, 'w, G, G::List>
     where
-        G: EventGroupMarkerWithSeparated<E>,
+        G: EventGroupDeclWithSeparated<E>,
     {
         self.event_raw::<G::List>()
     }
@@ -635,14 +635,14 @@ impl<'g, G: ?Sized> EventGroupWriter<'g, G> {
 
     pub fn fire<E>(&self, target: Entity, event: E)
     where
-        G: EventGroupMarkerWithSeparated<E>,
+        G: EventGroupDeclWithSeparated<E>,
     {
         self.group.borrow_mut().fire(target, event);
     }
 
     pub fn fire_owned<E>(&self, target: OwnedEntity, event: E)
     where
-        G: EventGroupMarkerWithSeparated<E>,
+        G: EventGroupDeclWithSeparated<E>,
     {
         self.group.borrow_mut().fire_owned(target, event);
     }
@@ -653,7 +653,7 @@ impl<'g, G: ?Sized> EventGroupWriter<'g, G> {
 
     pub fn clear_single<E>(&self)
     where
-        G: EventGroupMarkerWithSeparated<E>,
+        G: EventGroupDeclWithSeparated<E>,
     {
         self.group.borrow_mut().clear_single::<E>();
     }
