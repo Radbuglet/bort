@@ -379,8 +379,8 @@ pub trait SimpleEventList:
     + Send
     + EventTarget<Self::Event>
     + ClearableEvent
-    + QueryDriver
-    + for<'a> QueryDriverTypes<'a, Item = &'a Self::Event>
+    + MultiQueryDriver
+    + for<'a> MultiQueryDriverTypes<'a, Item = &'a Self::Event>
 {
     type Event;
 }
@@ -388,18 +388,22 @@ pub trait SimpleEventList:
 impl<E, L> SimpleEventList for L
 where
     L: 'static + Default + Send + EventTarget<E> + ClearableEvent,
-    L: QueryDriver + for<'a> QueryDriverTypes<'a, Item = &'a E>,
+    L: MultiQueryDriver + for<'a> MultiQueryDriverTypes<'a, Item = &'a E>,
 {
     type Event = E;
 }
 
 // EventGroupDeclXx
-pub trait EventGroupDeclWithSeparated<E> {
+mod event_group_sealed {
+    pub trait OnlyAMarker {}
+}
+
+pub trait EventGroupDeclWithSeparated<E>: event_group_sealed::OnlyAMarker {
     type List: 'static + SimpleEventList<Event = E> + Default;
 }
 
 pub trait EventGroupDeclWith<L: 'static + SimpleEventList + Default>:
-    EventGroupDeclWithSeparated<L::Event, List = L>
+    EventGroupDeclWithSeparated<L::Event, List = L> + event_group_sealed::OnlyAMarker
 {
 }
 

@@ -20,7 +20,7 @@ pub mod prelude {
         entity::{storage, CompMut, CompRef, Entity, OwnedEntity, Storage},
         event::{
             ClearableEvent, EventGroup, EventGroupDeclExtends, EventGroupDeclWith, EventSwapper,
-            EventTarget, NopEvent, VecEventList,
+            EventTarget, NopEvent, SimpleEventList, VecEventList,
         },
         obj::{Obj, OwnedObj},
         query::{
