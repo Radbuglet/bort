@@ -1218,7 +1218,7 @@ impl<T> Drop for MultiOptRefCell<T> {
         let states = wide_cell_to_byte_cell(&self.states);
 
         for (state, value) in states.iter().zip(self.values.iter_mut()) {
-            if state.get() == EMPTY {
+            if state.get() != EMPTY {
                 unsafe { value.get_mut().assume_init_drop() };
             }
         }
