@@ -467,6 +467,19 @@ impl<D: MultiQueryDriver> MultiQueryDriver for Option<D> {
     }
 }
 
+// Aliases
+pub trait BorrowMultiQueryDriver<E: ?Sized>:
+    MultiQueryDriver + for<'a> MultiQueryDriverTypes<'a, Item = &'a E>
+{
+}
+
+impl<E, T> BorrowMultiQueryDriver<E> for T
+where
+    E: ?Sized,
+    T: MultiQueryDriver + for<'a> MultiQueryDriverTypes<'a, Item = &'a E>,
+{
+}
+
 // === QueryDriver === //
 
 pub type DriverItem<'a, D> = <D as QueryDriverTypes<'a>>::Item;

@@ -8,7 +8,7 @@ use bort::{
         token::{is_main_thread, MainThreadToken},
     },
     debug::{alive_entity_count, force_reset_database},
-    flush, query, storage, Entity, Obj, OwnedEntity, OwnedObj, Tag,
+    flush, query, storage, Entity, Obj, OwnedEntity, OwnedObj, Tag, VecEventList,
 };
 use criterion::{criterion_main, Criterion};
 
@@ -47,19 +47,27 @@ fn access_tests() {
     });
 
     c.bench_function("spawn.with", |c| {
-        c.iter_with_large_drop(|| OwnedEntity::new().with(Position(0.0)).with(Velocity(0.0)));
+        c.iter(|| {
+            Entity::new_unmanaged()
+                .with(Position(0.0))
+                .with(Velocity(0.0))
+        });
+        force_reset_database();
+        assert_eq!(alive_entity_count(), 0);
     });
 
     c.bench_function("spawn.storages", |c| {
         let pos = storage::<Position>();
         let vel = storage::<Velocity>();
 
-        c.iter_with_large_drop(|| {
-            let entity = OwnedEntity::new();
-            pos.insert(entity.entity(), Position(0.0));
-            vel.insert(entity.entity(), Velocity(0.0));
+        c.iter(|| {
+            let entity = Entity::new_unmanaged();
+            pos.insert(entity, Position(0.0));
+            vel.insert(entity, Velocity(0.0));
             entity
         });
+        force_reset_database();
+        assert_eq!(alive_entity_count(), 0);
     });
 
     c.bench_function("get.entity.normal.ref", |c| {
@@ -172,6 +180,28 @@ fn access_tests() {
         let slot = unsafe { obj.value().direct_slot(token) };
 
         c.iter(|| slot.borrow_mut(token));
+    });
+
+    c.bench_function("query.normal.overhead.global", |c| {
+        let tag_1 = Tag::<i32>::new();
+        let tag_2 = Tag::<u32>::new();
+        let tag_3 = Tag::<f32>::new();
+
+        c.iter(|| {
+            query!(for (ref _foo in tag_1, mut _bar in tag_2, obj _baz in tag_3) {});
+        });
+    });
+
+    c.bench_function("query.normal.overhead.events", |c| {
+        let tag_1 = Tag::<i32>::new();
+        let tag_2 = Tag::<u32>::new();
+        let tag_3 = Tag::<f32>::new();
+
+		let events = VecEventList::<u32>::default();
+
+        c.iter(|| {
+            query!(for (event _ in events, ref _foo in tag_1, mut _bar in tag_2, obj _baz in tag_3) {});
+        });
     });
 
     c.bench_function("query.normal.only_slots.no_bb", |c| {

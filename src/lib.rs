@@ -24,8 +24,8 @@ pub mod prelude {
         },
         obj::{Obj, OwnedObj},
         query::{
-            flush, query, GlobalTag, GlobalVirtualTag, HasGlobalManagedTag, HasGlobalVirtualTag,
-            RawTag, Tag, VirtualTag,
+            flush, query, BorrowMultiQueryDriver, GlobalTag, GlobalVirtualTag, HasGlobalManagedTag,
+            HasGlobalVirtualTag, RawTag, Tag, VirtualTag,
         },
     };
 }
