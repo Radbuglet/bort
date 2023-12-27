@@ -1,4 +1,7 @@
-use std::hint::black_box;
+use std::{
+    cell::{Cell, RefCell},
+    hint::black_box,
+};
 
 use autoken::{PotentialImmutableBorrow, PotentialMutableBorrow};
 use bort::{
@@ -666,6 +669,42 @@ fn access_tests() {
             }
 
             accum
+        });
+    });
+
+    c.bench_function("repeated_acquire.obj", |c| {
+        let obj_1 = OwnedObj::new(0u64);
+        let obj_2 = OwnedObj::new(0u64);
+
+        c.iter(|| {
+            for _ in 0..100_000 {
+                *obj_1.get_mut() += *obj_2.get_mut();
+                black_box((&obj_1, &obj_2));
+            }
+        });
+    });
+
+    c.bench_function("repeated_acquire.ref_cell", |c| {
+        let obj_1 = RefCell::new(0u64);
+        let obj_2 = RefCell::new(0u64);
+
+        c.iter(|| {
+            for _ in 0..100_000 {
+                *obj_1.borrow_mut() += *obj_2.borrow_mut();
+                black_box((&obj_1, &obj_2));
+            }
+        });
+    });
+
+    c.bench_function("repeated_acquire.cell", |c| {
+        let obj_1 = Cell::new(0u64);
+        let obj_2 = Cell::new(0u64);
+
+        c.iter(|| {
+            for _ in 0..100_000 {
+                obj_1.set(obj_1.get() + obj_2.get());
+                black_box((&obj_1, &obj_2));
+            }
         });
     });
 }
